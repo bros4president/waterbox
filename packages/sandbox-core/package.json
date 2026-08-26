@@ -1,0 +1,16 @@
+{
+  "name": "@waterbox/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./errors": "./src/errors.ts",
+    "./ports": "./src/ports.ts",
+    "./provider": "./src/provider.ts",
+    "./records": "./src/records.ts",
+    "./test-support": "./src/test-support.ts"
+  },
+  "dependencies": {
+    "@waterbox/contracts": "workspace:*"
+  }
+}

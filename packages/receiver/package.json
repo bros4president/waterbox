@@ -1,0 +1,5 @@
+{
+  "name": "@oc-remote/receiver",
+  "private": true,
+  "type": "module"
+}

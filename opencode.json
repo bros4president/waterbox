@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "./packages/plugin/src/index.ts",
+      "options": {
+        "profile": "playground",
+        "region": "us-east-1",
+        "imageIdentifier": "arn:aws:lambda:us-east-1:570435243986:microvm-image:oc-remote-receiver"
+      }
+    }
+  ],
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "deny" },
+    { "action": "read", "resource": "*", "effect": "deny" },
+    { "action": "edit", "resource": "*", "effect": "deny" },
+    { "action": "glob", "resource": "*", "effect": "deny" },
+    { "action": "grep", "resource": "*", "effect": "deny" },
+    { "action": "subagent", "resource": "*", "effect": "deny" },
+    { "action": "remote_shell", "resource": "*", "effect": "allow" },
+    { "action": "remote_read", "resource": "*", "effect": "allow" },
+    { "action": "remote_write", "resource": "*", "effect": "allow" },
+    { "action": "remote_glob", "resource": "*", "effect": "allow" },
+    { "action": "remote_grep", "resource": "*", "effect": "allow" },
+    { "action": "remote_edit", "resource": "*", "effect": "allow" },
+    { "action": "remote_patch", "resource": "*", "effect": "allow" }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@waterbox/contracts",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./errors": "./src/errors.ts",
+    "./identity": "./src/identity.ts",
+    "./lifecycle": "./src/lifecycle.ts",
+    "./pagination": "./src/pagination.ts",
+    "./resources": "./src/resources.ts",
+    "./tools": "./src/tools.ts"
+  },
+  "dependencies": {
+    "zod": "4.1.8"
+  }
+}
