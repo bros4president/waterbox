@@ -9,8 +9,8 @@ export const TimestampSchema = z.string().datetime({ offset: true })
 export const SandboxStateSchema = z.enum([
   "provisioning",
   "running",
-  "suspending",
-  "suspended",
+  "stopping",
+  "stopped",
   "resuming",
   "terminating",
   "terminated",
@@ -54,15 +54,6 @@ export const SnapshotSchema = z.object({
   lastError: PublicResourceErrorSchema.optional(),
 }).strict()
 
-export const ProviderCapabilitiesSchema = z.object({
-  suspend: z.boolean(),
-  resume: z.boolean(),
-  snapshots: z.boolean(),
-  createFromSnapshot: z.boolean(),
-  fork: z.boolean(),
-  streaming: z.boolean(),
-}).strict()
-
 export type SandboxId = z.infer<typeof SandboxIdSchema>
 export type SnapshotId = z.infer<typeof SnapshotIdSchema>
 export type SandboxState = z.infer<typeof SandboxStateSchema>
@@ -70,9 +61,3 @@ export type SnapshotState = z.infer<typeof SnapshotStateSchema>
 export type PublicResourceError = z.infer<typeof PublicResourceErrorSchema>
 export type Sandbox = z.infer<typeof SandboxSchema>
 export type Snapshot = z.infer<typeof SnapshotSchema>
-export type ProviderCapabilities = z.infer<typeof ProviderCapabilitiesSchema>
-
-export const SandboxDtoSchema = SandboxSchema
-export const SnapshotDtoSchema = SnapshotSchema
-export type SandboxDto = Sandbox
-export type SnapshotDto = Snapshot

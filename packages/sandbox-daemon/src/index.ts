@@ -28,13 +28,12 @@ async function parseBody(request: Request, shutdownSignal: AbortSignal, schema: 
   const reader = request.body?.getReader()
   const chunks: Uint8Array[] = []
   let bytes = 0
-  let declaredBytes: number | undefined
   try {
     signal.throwIfAborted()
     const declared = request.headers.get("content-length")
     if (declared !== null) {
       if (!/^\d+$/.test(declared)) throw new RuntimeError(400, "Content-Length must be a non-negative integer")
-      declaredBytes = Number(declared)
+      const declaredBytes = Number(declared)
       if (!Number.isSafeInteger(declaredBytes)) throw new RuntimeError(400, "Content-Length is invalid")
       if (declaredBytes > MAX_BODY_BYTES) throw new RuntimeError(413, "Request body is too large")
     }
@@ -50,10 +49,8 @@ async function parseBody(request: Request, shutdownSignal: AbortSignal, schema: 
       if (item.done) break
       bytes += item.value.byteLength
       if (bytes > MAX_BODY_BYTES) throw new RuntimeError(413, "Request body is too large")
-      if (declaredBytes !== undefined && bytes > declaredBytes) throw new RuntimeError(400, "Content-Length does not match the request body")
       chunks.push(item.value)
     }
-    if (declaredBytes !== undefined && bytes !== declaredBytes) throw new RuntimeError(400, "Content-Length does not match the request body")
     let text: string
     try { text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)))) }
     catch { throw new RuntimeError(400, "Request body must be valid UTF-8 JSON") }
@@ -71,12 +68,6 @@ export function createDaemon(options: RuntimeOptions): Daemon {
   if (!options.workspaceRoot) throw new TypeError("workspaceRoot is required")
   const runtime = createRuntime(options)
   const shutdownController = new AbortController()
-  let mutations: Promise<void> = Promise.resolve()
-  const mutate = <Result>(operation: () => Promise<Result>): Promise<Result> => {
-    const result = mutations.then(operation, operation)
-    mutations = result.then(() => undefined, () => undefined)
-    return result
-  }
   return {
     async handleRequest(request) {
       try {
@@ -85,14 +76,11 @@ export function createDaemon(options: RuntimeOptions): Daemon {
         if (request.method === "GET" && path === "/v1/tools") return json(CANONICAL_TOOL_CATALOG)
         if (request.method !== "POST" || !path.startsWith("/v1/tools/")) return json({ title: "Error", output: "Not found", metadata: { status: 404 } }, 404)
         const parsedName = ToolNameSchema.safeParse(path.slice("/v1/tools/".length)); if (!parsedName.success) return json({ title: "Error", output: "Not found", metadata: { status: 404 } }, 404)
-        const execute = async () => {
-          const args = await parseBody(request, shutdownController.signal, inputs[parsedName.data])
-          request.signal.throwIfAborted()
-          const result = await runtime.execute(parsedName.data, args, request.signal)
-          if (result instanceof ReadableStream) return ndjson(result)
-          return json(events[parsedName.data].parse(result))
-        }
-        return parsedName.data === "write" || parsedName.data === "edit" || parsedName.data === "patch" ? await mutate(execute) : await execute()
+        const args = await parseBody(request, shutdownController.signal, inputs[parsedName.data])
+        request.signal.throwIfAborted()
+        const result = await runtime.execute(parsedName.data, args, request.signal)
+        if (result instanceof ReadableStream) return ndjson(result)
+        return json(events[parsedName.data].parse(result))
       } catch (error) { return errorResponse(error) }
     },
     shutdown: () => { shutdownController.abort(); runtime.shutdown() },

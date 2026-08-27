@@ -502,24 +502,28 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+const terminatingProcesses = new WeakSet<ChildProcess>()
+
 function killProcess(child: ChildProcess): void {
+  if (terminatingProcesses.has(child)) return
   if (child.exitCode !== null || child.signalCode !== null) return
-  try {
-    if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGTERM")
-    else child.kill("SIGTERM")
-  } catch {
-    child.kill("SIGTERM")
-  }
-  const force = setTimeout(() => {
+  terminatingProcesses.add(child)
+  const processGroup = process.platform !== "win32" && child.pid !== undefined
+  const signal = (name: NodeJS.Signals) => {
     try {
-      if (child.pid && process.platform !== "win32") process.kill(-child.pid, "SIGKILL")
-      else child.kill("SIGKILL")
+      if (processGroup) process.kill(-child.pid!, name)
+      else child.kill(name)
     } catch {
-      // The process exited between the state check and signal.
+      // The process group exited between the state check and signal.
     }
+  }
+  signal("SIGTERM")
+  const force = setTimeout(() => {
+    signal("SIGKILL")
   }, 1_000)
   force.unref()
-  child.once("exit", () => clearTimeout(force))
+  // A direct shell can exit while a TERM-resistant process remains in its group.
+  if (!processGroup) child.once("exit", () => clearTimeout(force))
 }
 
 async function bashTool(root: string, body: Record<string, unknown>, signal: AbortSignal): Promise<ReadableStream<BashStreamEvent>> {
@@ -560,6 +564,7 @@ async function bashTool(root: string, body: Record<string, unknown>, signal: Abo
   if (signal.aborted) onAbort()
 
   let canceled = false
+  const outputSources = [child.stdout!, child.stderr!]
   const stream = new ReadableStream<BashStreamEvent>({
     start(controller) {
       let closed = false
@@ -570,6 +575,7 @@ async function bashTool(root: string, body: Record<string, unknown>, signal: Abo
         if (closed || canceled) return
         try {
           controller.enqueue(event)
+          if ((controller.desiredSize ?? 0) <= 0) outputSources.forEach((source) => source.pause())
         } catch {
           canceled = true
           killProcess(child)
@@ -630,8 +636,12 @@ async function bashTool(root: string, body: Record<string, unknown>, signal: Abo
         controller.close()
       })
     },
+    pull() {
+      outputSources.forEach((source) => source.resume())
+    },
     cancel() {
       canceled = true
+      outputSources.forEach((source) => source.pause())
       killProcess(child)
     },
   })

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { ToolName } from "@waterbox/contracts"
-import { ProviderError, type ProviderExecuteInput, type SandboxProvider } from "@waterbox/core/provider"
-import { exerciseProviderConformance } from "@waterbox/core/test-support"
+import { ProviderError } from "@waterbox/core/provider"
 import { BoxSandboxProvider, __testing, type BoxProviderClock } from "../src/index.ts"
 
 class FakeClock implements BoxProviderClock {
@@ -48,11 +47,11 @@ function harness(handler?: (request: Request, seen: Seen[]) => Response | Promis
 }
 
 const signal = () => new AbortController().signal
-const sandboxRef = { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "https://daemon-secret.test/access/token?signature=query-secret" }
+const sandboxRef = { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "https://daemon-secret.test/access/token?signature=query-secret&_token=protected-token" }
 const snapshotRef = { kind: "box-named-snapshot-v1", name: "waterbox-user-snapshot" }
 
 describe("Box provider HTTP contract", () => {
-  test("create waits for ready, sends no environment, template, stable idempotency, and protected hosting", async () => {
+  test("create disables inherited environment, sends only the non-secret sandbox ID tag, and preserves template, idempotency, and protected hosting", async () => {
     let inspection = 0
     const { provider, seen, clock } = harness((request) => {
       if (request.url.endsWith("/api/box/v1/boxes") && request.method === "POST") return Response.json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 3600, box: { id: "bx_23456789", state: "provisioning" } })
@@ -79,7 +78,7 @@ describe("Box provider HTTP contract", () => {
     expect(seen[0]?.headers.get("idempotency-key")).toBe("fork-key")
   })
 
-  test("inspect normalizes states; suspend stops, resume refreshes hosting, and delete is permanent", async () => {
+  test("inspect normalizes states; stop archives, resume refreshes hosting, and delete is permanent", async () => {
     let hosting = 0
     const { provider, seen } = harness((request) => {
       if (request.url.endsWith("/stop")) return Response.json({ id: "bx_23456789", state: "archived" })
@@ -90,13 +89,39 @@ describe("Box provider HTTP contract", () => {
       return Response.json({ id: "bx_23456789", state: request.method === "GET" ? "ready" : "failed" })
     })
     expect(await provider.inspectSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).toEqual({ state: "running", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "https://protected.test/refreshed-1?_token=test" } })
-    expect(await provider.suspendSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).toEqual({ state: "suspended", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789" } })
-    const resumed = await provider.resumeSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })
+    expect(await provider.stopResume.stop({ accountId: "a", providerRef: sandboxRef, signal: signal() })).toEqual({ state: "stopped", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789" } })
+    const resumed = await provider.stopResume.resume({ accountId: "a", providerRef: sandboxRef, signal: signal() })
     expect(resumed).toEqual({ state: "running", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "https://protected.test/refreshed-2?_token=test" } })
     expect((await provider.deleteSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).state).toBe("terminated")
     expect(seen.some((item) => item.url.endsWith("/stop"))).toBe(true)
     expect(seen.some((item) => item.url.endsWith("/resume"))).toBe(true)
     expect(seen.some((item) => item.method === "DELETE" && item.headers.get("x-ascii-confirm-delete") === "bx_23456789")).toBe(true)
+  })
+
+  test("rejects lifecycle envelopes for the opposite endpoint", async () => {
+    const stopping = { ok: true, type: "box.stopping", id: "bx_23456789", status: "archiving" }
+    const resuming = { ok: true, type: "box.resuming", id: "bx_23456789", status: "resuming" }
+    const stopProvider = harness(() => Response.json(resuming, { status: 202 })).provider
+    const resumeProvider = harness(() => Response.json(stopping, { status: 202 })).provider
+    await expect(stopProvider.stopResume.stop({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    await expect(resumeProvider.stopResume.resume({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+  })
+
+  test("maps provider running without registering or fabricating hosting", async () => {
+    const { provider, seen } = harness(() => Response.json({ id: "bx_23456789", state: "running" }))
+    expect(await provider.inspectSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).toEqual({ state: "running", providerRef: sandboxRef })
+    expect(seen.map(item => item.url)).toEqual(["https://api.box.test/api/box/v1/boxes/bx_23456789"])
+  })
+
+  test("requires HTTPS protected URLs with a nonempty token and preserves path and query", async () => {
+    for (const daemonUrl of ["http://protected.test/path?_token=x", "https://protected.test/path", "https://protected.test/path?_token="]) {
+      await expect(harness().provider.inspectSandbox({ accountId: "a", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl }, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    }
+    const invalidHosted = harness(() => Response.json({ ok: true, type: "port.hosted", success: true, port: 4317, url: "https://protected.test/access?signature=x", isProtected: true, access: "private" })).provider
+    await expect(invalidHosted.inspectSandbox({ accountId: "a", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789" }, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    const routed = __testing.daemonToolUrl(sandboxRef.daemonUrl, "read")
+    expect(routed.pathname).toBe("/access/token/v1/tools/read")
+    expect(routed.search).toBe("?signature=query-secret&_token=protected-token")
   })
 
   test("snapshot creation is asynchronous, provider-safe, inspectable, deletable, and quota-aware", async () => {
@@ -106,16 +131,31 @@ describe("Box provider HTTP contract", () => {
       const name = decodeURIComponent(new URL(request.url).pathname.split("/").at(-1)!)
       return Response.json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" })
     })
-    const created = await provider.createSnapshot({ accountId: "Customer.SECRET", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })
+    const created = await provider.snapshots.create({ accountId: "Customer.SECRET", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })
     expect(created).toEqual({ state: "creating", providerRef: { kind: "box-named-snapshot-v1", name: expect.any(String) } })
     const name = (seen[0]?.body as { name: string }).name
     expect(name).toMatch(/^waterbox-[a-z0-9-]+$/)
     expect(name.length).toBeLessThanOrEqual(63)
-    expect((await provider.inspectSnapshot({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("ready")
-    expect((await provider.deleteSnapshot({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("deleted")
+    expect((await provider.snapshots.inspect({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("ready")
+    expect((await provider.snapshots.delete({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("deleted")
 
     const limited = harness(() => Response.json({ code: "snapshot_quota_exceeded", message: "secret details" }, { status: 409 })).provider
-    await expect(limited.createSnapshot({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "limit", message: "Box named snapshot limit reached" })
+    await expect(limited.snapshots.create({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "limit", message: "Box named snapshot limit reached" })
+  })
+
+  test("preserves account-derived identity, provider reference, and caller signal", async () => {
+    const controller = new AbortController()
+    const inputRef = { kind: "box-sandbox-v1", boxId: "bx_23456789" } as const
+    const { provider, seen } = harness((request, requests) => {
+      const name = (requests.at(-1)?.body as { name: string }).name
+      return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name, status: "saving", sourceBoxId: inputRef.boxId, createdAt: "2026-08-27T00:00:00Z" } }, { status: 202 })
+    })
+    const result = await provider.snapshots.create({ accountId: "acct-continuity", snapshotId: "snap_silver-forest-2p9x", sandboxRef: inputRef, signal: controller.signal })
+    const expectedName = await __testing.internalSnapshotName("acct-continuity", "snap_silver-forest-2p9x")
+    expect(seen[0]?.body).toEqual({ boxId: inputRef.boxId, name: expectedName })
+    expect(seen[0]?.signal).toBe(controller.signal)
+    expect(result.providerRef).toEqual({ kind: "box-named-snapshot-v1", name: expectedName })
+    expect(inputRef).toEqual({ kind: "box-sandbox-v1", boxId: "bx_23456789" })
   })
 
   test("reconciles a lost accepted named-snapshot response without retrying POST", async () => {
@@ -127,12 +167,12 @@ describe("Box provider HTTP contract", () => {
       if (request.method === "GET") return Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name, status: "saving", sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00Z" } })
       return Response.json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" })
     })
-    const created = await provider.createSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })
+    const created = await provider.snapshots.create({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })
     expect(created.state).toBe("creating")
     expect(posts).toBe(1)
     expect(seen.filter(item => item.method === "POST")).toHaveLength(1)
-    expect((await provider.inspectSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("creating")
-    expect((await provider.deleteSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("deleted")
+    expect((await provider.snapshots.inspect({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("creating")
+    expect((await provider.snapshots.delete({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: created.providerRef, signal: signal() })).state).toBe("deleted")
   })
 
   test("rejects competing same-name snapshot reconciliation without retrying", async () => {
@@ -142,7 +182,7 @@ describe("Box provider HTTP contract", () => {
       const name = decodeURIComponent(new URL(request.url).pathname.split("/").at(-1)!)
       return Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name, status: "saving", sourceBoxId: "bx_abcdefgh", createdAt: "2026-08-27T00:00:00Z" } })
     })
-    await expect(provider.createSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution", message: "Box snapshot save requires manual recovery" })
+    await expect(provider.snapshots.create({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution", message: "Box snapshot save requires manual recovery" })
     expect(posts).toBe(1)
   })
 
@@ -152,17 +192,32 @@ describe("Box provider HTTP contract", () => {
       if (request.method === "POST") { posts++; throw new TypeError("response lost") }
       gets++; return Response.json({ code: "not_found" }, { status: 404 })
     })
-    await expect(provider.createSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    await expect(provider.snapshots.create({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
     expect(posts).toBe(1); expect(gets).toBe(1)
   })
 
-  test("requires official named-snapshot identity, time, source, and ready artifact fields", async () => {
+  test("requires named-snapshot source, state, and ready artifact identity but not unused timestamps", async () => {
     const name = (snapshotRef as any).name
-    const valid = { name, status: "ready", snapshotId: "snap_artifact_1", sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00Z" }
-    for (const snapshot of [{ ...valid, sourceBoxId: undefined }, { ...valid, createdAt: undefined }, { ...valid, snapshotId: undefined }, { ...valid, status: "unknown" }]) {
+    const valid = { name, status: "ready", snapshotId: "snap_artifact_1", sourceBoxId: "bx_23456789" }
+    expect((await harness(() => Response.json({ ok: true, type: "snapshot.named.info", snapshot: valid })).provider.snapshots.inspect({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() })).state).toBe("ready")
+    for (const snapshot of [{ ...valid, sourceBoxId: undefined }, { ...valid, snapshotId: undefined }, { ...valid, status: "unknown" }]) {
       const provider = harness(() => Response.json({ ok: true, type: "snapshot.named.info", snapshot })).provider
-      await expect(provider.inspectSnapshot({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+      await expect(provider.snapshots.inspect({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     }
+  })
+
+  test("rejects snapshot envelopes for the opposite operation", async () => {
+    const createProvider = harness((_request, seen) => { const name = (seen.at(-1)?.body as { name: string }).name; return Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name, status: "saving", sourceBoxId: "bx_23456789" } }, { status: 202 }) }).provider
+    await expect(createProvider.snapshots.create({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    const saving = { ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name: snapshotRef.name, status: "saving", sourceBoxId: "bx_23456789" } }
+    await expect(harness(() => Response.json(saving)).provider.snapshots.inspect({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+  })
+
+  test("rejects deletion envelopes for the opposite delete and poll operations", async () => {
+    const operationBody = { id: `bdop_${"a".repeat(32)}`, kind: "box", targetId: "bx_23456789", status: "pending" }
+    await expect(harness(() => Response.json({ ok: true, type: "deletion.operation", operation: operationBody }, { status: 202 })).provider.deleteSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    const provider = harness(request => request.method === "DELETE" ? Response.json({ ok: true, type: "box.deleting", operation: operationBody }, { status: 202 }) : Response.json({ ok: true, type: "box.deleting", operation: operationBody })).provider
+    await expect(provider.deleteSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
   })
 
   test("errors redact API keys, provider ids, response bodies, and protected URLs", async () => {
@@ -203,7 +258,7 @@ describe("Box provider canonical daemon transport and conformance", () => {
       expect(seen.at(-1)?.body).toEqual(argsByTool[tool])
       const routed = new URL(seen.at(-1)!.url)
       expect(routed.pathname).toBe(`/access/token/v1/tools/${tool}`)
-      expect(routed.search).toBe("?signature=query-secret")
+      expect(routed.search).toBe("?signature=query-secret&_token=protected-token")
     }
   })
 
@@ -250,10 +305,11 @@ describe("Box provider canonical daemon transport and conformance", () => {
     expect(calls).toBe(1)
   })
 
-  test("capabilities and internal snapshot names conform to the core port", async () => {
+  test("optional operation groups and internal snapshot names conform to the core port", async () => {
     const { provider } = harness()
     expect(provider.name).toBe("box")
-    expect(provider.capabilities).toEqual({ suspend: true, resume: true, snapshots: true, createFromSnapshot: true, fork: true, streaming: true })
+    expect(Object.keys(provider.stopResume)).toEqual(["stop", "resume"])
+    expect(Object.keys(provider.snapshots)).toEqual(["create", "inspect", "delete"])
     const first = await __testing.internalSnapshotName("ACCT !!", "snap_silver-forest-2p9x")
     const second = await __testing.internalSnapshotName("ACCT ??", "snap_silver-forest-2p9x-other-long-suffix")
     expect(first).toMatch(/^waterbox-[a-z0-9-]+$/)
@@ -286,88 +342,6 @@ describe("Phase E guardian corrections", () => {
     for await (const event of provider.executeTool({ accountId: "a", providerRef: reconciled.providerRef, toolName: "read", arguments: { filePath: "/workspace/conformance.txt" }, signal: signal() })) events.push(event)
     expect(events).toEqual([readResult])
     expect(seen.map((item) => item.url)).toContain("https://protected.test/crash/token/v1/tools/read?sig=fresh-secret\&_token=test")
-  })
-
-  test("runs the Box adapter through the reusable core-owned provider conformance harness", async () => {
-    let ambiguousNext = false
-    const toolRecords: import("@waterbox/core/test-support").ProviderConformanceToolRequest[] = []
-    const lifecycleRecords: import("@waterbox/core/test-support").ProviderConformanceLifecycleRequest[] = []
-    const snapshotRecords: import("@waterbox/core/test-support").ProviderConformanceSnapshotRequest[] = []
-    const { provider, seen } = harness((request) => {
-      const url = new URL(request.url)
-      if (url.hostname === "protected.test") {
-        const tool = url.pathname.split("/").at(-1) as ToolName
-        const arguments_ = seen.at(-1)?.body as import("@waterbox/core/records").JsonValue
-        const events: import("@waterbox/core/records").JsonValue[] = tool === "bash"
-          ? [{ type: "stdout", data: "stdout-bash-sentinel" }, { type: "stderr", data: "stderr-bash-sentinel" }, { ...bashResult, metadata: { ...bashResult.metadata, command: "printf bash-sentinel", description: "bash sentinel" } }]
-          : [conformanceResult(tool) as import("@waterbox/core/records").JsonValue]
-        toolRecords.push({ toolName: tool, arguments: arguments_, sandboxIdentity: "bx_23456789", signal: seen.at(-1)!.signal!, expectedEvents: ambiguousNext ? [] : events })
-        if (ambiguousNext) { ambiguousNext = false; return Response.json({ code: "box_direct_failed" }, { status: 502 }) }
-        if (tool === "bash") return new Response(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, { headers: { "content-type": "application/x-ndjson" } })
-        return Response.json(events[0])
-      }
-      if (url.pathname === "/api/box/v1/boxes" && request.method === "POST") return Response.json({ id: "bx_23456789", state: "ready" })
-      if (url.pathname.endsWith("/host")) return Response.json({ url: "https://protected.test/conformance/token?sig=secret" })
-      if (url.pathname.endsWith("/stop")) return Response.json({ id: "bx_23456789", state: "archived" })
-      if (url.pathname.endsWith("/resume")) return Response.json({ id: "bx_23456789", state: "ready" })
-      if (url.pathname === "/api/box/v1/boxes/bx_23456789" && request.method === "GET") return Response.json({ id: "bx_23456789", state: "ready" })
-      if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") { const name = (seen.at(-1)?.body as any).name; return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name, status: "saving", sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00Z" } }) }
-      if (url.pathname.includes("/named-snapshots/") && request.method === "GET") { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name, status: "ready", snapshotId: "snap_artifact_1", sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00Z" } }) }
-      if (url.pathname.includes("/named-snapshots/") && request.method === "DELETE") { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return Response.json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" }) }
-      if (url.pathname === "/api/box/v1/boxes/bx_23456789" && request.method === "DELETE") return Response.json({ ok: true, type: "box.deleting", operation: { id: `bdop_${"a".repeat(32)}`, kind: "box", targetId: "bx_23456789", status: "completed" } }, { status: 202 })
-      if (url.pathname.includes("/deletion-operations/")) return Response.json({ ok: true, type: "deletion.operation", operation: { id: `bdop_${"a".repeat(32)}`, kind: "box", targetId: "bx_23456789", status: "completed" } })
-      throw new Error(`unexpected ${request.method}`)
-    })
-    const count = (operation: import("@waterbox/core/test-support").ProviderConformanceOperation) => seen.filter((item) => {
-      const url = new URL(item.url)
-      if (operation === "executeTool") return url.hostname === "protected.test"
-      if (operation === "createSandbox") return url.pathname === "/api/box/v1/boxes" && item.method === "POST"
-      if (operation === "inspectSandbox") return url.pathname === "/api/box/v1/boxes/bx_23456789" && item.method === "GET"
-      if (operation === "suspendSandbox") return url.pathname.endsWith("/stop")
-      if (operation === "resumeSandbox") return url.pathname.endsWith("/resume")
-      if (operation === "deleteSandbox") return url.pathname === "/api/box/v1/boxes/bx_23456789" && item.method === "DELETE"
-      if (operation === "createSnapshot") return url.pathname.endsWith("/named-snapshots") && item.method === "POST"
-      if (operation === "inspectSnapshot") return url.pathname.includes("/named-snapshots/") && item.method === "GET"
-      return url.pathname.includes("/named-snapshots/") && item.method === "DELETE"
-    }).length
-    const sandboxIdentityOf = (reference: import("@waterbox/core/records").JsonValue) => typeof reference === "object" && reference !== null && !Array.isArray(reference) && typeof reference.boxId === "string" ? reference.boxId : ""
-    const snapshotIdentityOf = (reference: import("@waterbox/core/records").JsonValue) => typeof reference === "object" && reference !== null && !Array.isArray(reference) && typeof reference.name === "string" ? reference.name : ""
-    const recordedProvider: SandboxProvider = {
-      name: provider.name,
-      capabilities: provider.capabilities,
-      createSandbox: (input) => provider.createSandbox(input),
-      inspectSandbox: (input) => { lifecycleRecords.push({ operation: "inspectSandbox", accountId: input.accountId, providerRef: structuredClone(input.providerRef), sandboxIdentity: sandboxIdentityOf(input.providerRef), signal: input.signal }); return provider.inspectSandbox(input) },
-      suspendSandbox: (input) => { lifecycleRecords.push({ operation: "suspendSandbox", accountId: input.accountId, providerRef: structuredClone(input.providerRef), sandboxIdentity: sandboxIdentityOf(input.providerRef), signal: input.signal }); return provider.suspendSandbox(input) },
-      resumeSandbox: (input) => { lifecycleRecords.push({ operation: "resumeSandbox", accountId: input.accountId, providerRef: structuredClone(input.providerRef), sandboxIdentity: sandboxIdentityOf(input.providerRef), signal: input.signal }); return provider.resumeSandbox(input) },
-      deleteSandbox: (input) => { lifecycleRecords.push({ operation: "deleteSandbox", accountId: input.accountId, providerRef: structuredClone(input.providerRef), sandboxIdentity: sandboxIdentityOf(input.providerRef), signal: input.signal }); return provider.deleteSandbox(input) },
-      createSnapshot: (input) => { snapshotRecords.push({ operation: "createSnapshot", accountId: input.accountId, snapshotId: input.snapshotId, providerRef: structuredClone(input.sandboxRef), sandboxIdentity: sandboxIdentityOf(input.sandboxRef), signal: input.signal }); return provider.createSnapshot(input) },
-      inspectSnapshot: (input) => { snapshotRecords.push({ operation: "inspectSnapshot", accountId: input.accountId, snapshotId: input.snapshotId, providerRef: structuredClone(input.providerRef), snapshotIdentity: snapshotIdentityOf(input.providerRef), signal: input.signal }); return provider.inspectSnapshot(input) },
-      deleteSnapshot: (input) => { snapshotRecords.push({ operation: "deleteSnapshot", accountId: input.accountId, snapshotId: input.snapshotId, providerRef: structuredClone(input.providerRef), snapshotIdentity: snapshotIdentityOf(input.providerRef), signal: input.signal }); return provider.deleteSnapshot(input) },
-      executeTool: <N extends ToolName>(input: ProviderExecuteInput<N>) => provider.executeTool(input),
-    }
-    const trace = await exerciseProviderConformance(recordedProvider, {
-      accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", snapshotId: "snap_silver-forest-2p9x", idempotencyKey: "stable-conformance-key",
-      instrumentation: {
-        count,
-        createRequests: () => seen.filter((item) => item.url.endsWith("/api/box/v1/boxes") && item.method === "POST").map((item) => ({ idempotencyKey: item.headers.get("idempotency-key") ?? "", fingerprint: JSON.stringify(item.body) })),
-        toolRequests: () => toolRecords,
-        lifecycleRequests: () => lifecycleRecords,
-        snapshotRequests: () => snapshotRecords,
-        sandboxIdentity: sandboxIdentityOf,
-        snapshotIdentity: snapshotIdentityOf,
-        arrangeAmbiguousExecution: () => { ambiguousNext = true },
-      },
-    })
-    expect(trace.created.state).toBe("running")
-    expect(trace.suspended?.state).toBe("suspended")
-    expect(trace.resumed?.state).toBe("running")
-    expect(trace.snapshotCreated?.state).toBe("creating")
-    expect(trace.snapshotInspected?.state).toBe("ready")
-    expect(trace.snapshotDeleted?.state).toBe("deleted")
-    expect(trace.deleted.state).toBe("terminated")
-    expect(trace.cancellationReason).toBeInstanceOf(DOMException)
-    expect(trace.ambiguityObserved).toBe(true)
-    expect(seen.find((item) => item.url.endsWith("/api/box/v1/boxes"))?.headers.get("idempotency-key")).toBe("stable-conformance-key")
   })
 
   test("rejects every malformed bash framing variant as ambiguous without retry", async () => {
@@ -443,7 +417,7 @@ describe("Phase E guardian corrections", () => {
     const base = { apiBaseUrl: "https://api.box.test", apiKey: "box-secret-key", systemTemplateRef: "template-secret-ref", daemonPort: 4317, polling: { intervalMs: 10, timeoutMs: 100 } }
     const clock = new FakeClock()
     const invalid = [
-      { ...base, apiBaseUrl: "ftp://box-secret-key@example.test" }, { ...base, apiBaseUrl: "https://user:pass@example.test" },
+      { ...base, apiBaseUrl: "ftp://box-secret-key@example.test" }, { ...base, apiBaseUrl: "http://example.test" }, { ...base, apiBaseUrl: "https://user:pass@example.test" },
       { ...base, apiBaseUrl: "https://example.test?token=box-secret-key" }, { ...base, apiBaseUrl: " https://example.test" },
       { ...base, apiKey: " " }, { ...base, systemTemplateRef: " template " }, { ...base, daemonPort: 0 },
       { ...base, polling: { intervalMs: 0, timeoutMs: 100 } }, { ...base, polling: { intervalMs: 100, timeoutMs: 10 } },
@@ -458,21 +432,21 @@ describe("Phase E guardian corrections", () => {
 
     const invalidRefs: import("@waterbox/core/records").JsonValue[] = [
       { kind: "box-sandbox-v1", boxId: "" }, { kind: "box-sandbox-v1", boxId: "bx_23456789", extra: true },
-      { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "not-a-url" }, { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "https://user:pass@host.test/token" },
+      { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "not-a-url" }, { kind: "box-sandbox-v1", boxId: "bx_23456789", daemonUrl: "https://user:pass@host.test/token?_token=x" },
     ]
     for (const providerRef of invalidRefs) await expect(harness().provider.inspectSandbox({ accountId: "a", providerRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
-    await expect(harness().provider.inspectSnapshot({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: { kind: "box-named-snapshot-v1", name: "waterbox-user-snapshot", extra: true }, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    await expect(harness().provider.snapshots.inspect({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: { kind: "box-named-snapshot-v1", name: "waterbox-user-snapshot", extra: true }, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
 
-    for (const payload of [{ id: "bx_23456789", state: "ready", extra: true }, { id: "other", state: "ready" }, { id: "", state: "ready" }]) {
+    for (const payload of [{ id: "other", state: "ready" }, { id: "", state: "ready" }]) {
       const { provider } = harness(() => Response.json(payload))
       await expect(provider.inspectSandbox({ accountId: "a", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789" }, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     }
-    const mismatchedSuspend = harness(() => Response.json({ id: "other", state: "archived" })).provider
-    await expect(mismatchedSuspend.suspendSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    const mismatchedStop = harness(() => Response.json({ id: "other", state: "archived" })).provider
+    await expect(mismatchedStop.stopResume.stop({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     const mismatchedPoll = harness((request) => request.url.endsWith("/resume") ? Response.json({ id: "bx_23456789", state: "resuming" }) : Response.json({ id: "other", state: "ready" })).provider
-    await expect(mismatchedPoll.resumeSandbox({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    await expect(mismatchedPoll.stopResume.resume({ accountId: "a", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     const mismatchedSnapshot = harness(() => Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name: "other", status: "ready", snapshotId: "snap_artifact_1", sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00Z" } })).provider
-    await expect(mismatchedSnapshot.inspectSnapshot({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    await expect(mismatchedSnapshot.snapshots.inspect({ accountId: "a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     const invalidHosting = harness((request) => request.url.endsWith("/host") ? Response.json({ url: "https://protected.test/token#fragment" }) : Response.json({ id: "bx_23456789", state: "ready" })).provider
     await expect(invalidHosting.inspectSandbox({ accountId: "a", providerRef: { kind: "box-sandbox-v1", boxId: "bx_23456789" }, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     const changingClock = new FakeClock()
@@ -493,8 +467,8 @@ describe("Phase E guardian corrections", () => {
       const controller = new AbortController()
       const reason = new DOMException(`cancel ${family}`, "AbortError")
       const pending = family === "lifecycle"
-        ? provider.suspendSandbox({ accountId: "acct-a", providerRef: sandboxRef, signal: controller.signal })
-        : provider.inspectSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: controller.signal })
+        ? provider.stopResume.stop({ accountId: "acct-a", providerRef: sandboxRef, signal: controller.signal })
+        : provider.snapshots.inspect({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: controller.signal })
       await new Promise((resolve) => setTimeout(resolve, 1))
       controller.abort(reason)
       let caught: unknown
@@ -504,51 +478,23 @@ describe("Phase E guardian corrections", () => {
     }
   })
 
-  test("validates every public provider input family before fetch", async () => {
+  test("validates cancellation signals and stored references before fetch", async () => {
     let fetches = 0
     const { provider } = harness(() => { fetches++; return Response.json({ id: "bx_23456789", state: "ready" }) })
     const validOperation = { accountId: "acct-a", providerRef: sandboxRef, signal: signal() }
     const validSnapshotOperation = { accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", providerRef: snapshotRef, signal: signal() }
     const cases: Array<{ name: string; invoke: () => Promise<unknown> }> = [
-      { name: "create unknown", invoke: () => provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "key", signal: signal(), extra: true } as never) },
-      { name: "create account", invoke: () => provider.createSandbox({ accountId: " acct-a ", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "key", signal: signal() }) },
-      { name: "create sandbox", invoke: () => provider.createSandbox({ accountId: "acct-a", sandboxId: "not-a-sandbox" as never, idempotencyKey: "key", signal: signal() }) },
-      { name: "create blank key", invoke: () => provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "   ", signal: signal() }) },
-      { name: "create long key", invoke: () => provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "x".repeat(256), signal: signal() }) },
       { name: "create signal", invoke: () => provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "key", signal: {} as never }) },
       { name: "create source ref", invoke: () => provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "key", sourceSnapshotRef: { kind: "box-named-snapshot-v1", name: "waterbox-user-snapshot", extra: true }, signal: signal() }) },
-      { name: "inspect", invoke: () => provider.inspectSandbox({ ...validOperation, extra: true } as never) },
-      { name: "suspend", invoke: () => provider.suspendSandbox({ ...validOperation, accountId: "bad account" }) },
-      { name: "resume", invoke: () => provider.resumeSandbox({ ...validOperation, providerRef: null }) },
+      { name: "resume", invoke: () => provider.stopResume.resume({ ...validOperation, providerRef: null }) },
       { name: "delete", invoke: () => provider.deleteSandbox({ ...validOperation, signal: "signal" as never }) },
-      { name: "snapshot create", invoke: () => provider.createSnapshot({ accountId: "acct-a", snapshotId: "bad-snapshot" as never, sandboxRef, signal: signal() }) },
-      { name: "snapshot create unknown", invoke: () => provider.createSnapshot({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef, signal: signal(), extra: true } as never) },
-      { name: "snapshot inspect", invoke: () => provider.inspectSnapshot({ ...validSnapshotOperation, accountId: "" }) },
-      { name: "snapshot delete", invoke: () => provider.deleteSnapshot({ ...validSnapshotOperation, providerRef: { kind: "box-named-snapshot-v1", name: "waterbox-user-snapshot", extra: true } }) },
-      { name: "execute unknown", invoke: async () => provider.executeTool({ ...validOperation, toolName: "unknown", arguments: {} } as never)[Symbol.asyncIterator]().next() },
-      { name: "execute mismatch", invoke: async () => provider.executeTool({ ...validOperation, toolName: "read", arguments: { command: "whoami" } } as never)[Symbol.asyncIterator]().next() },
-      { name: "execute unknown field", invoke: async () => provider.executeTool({ ...validOperation, toolName: "read", arguments: { filePath: "x" }, extra: true } as never)[Symbol.asyncIterator]().next() },
+      { name: "snapshot create", invoke: () => provider.snapshots.create({ accountId: "acct-a", snapshotId: "snap_silver-forest-2p9x", sandboxRef: null, signal: signal() }) },
+      { name: "snapshot inspect", invoke: () => provider.snapshots.inspect({ ...validSnapshotOperation, signal: null as never }) },
+      { name: "snapshot delete", invoke: () => provider.snapshots.delete({ ...validSnapshotOperation, providerRef: { kind: "box-named-snapshot-v1", name: "waterbox-user-snapshot", extra: true } }) },
     ]
     for (const item of cases) {
       await expect(item.invoke(), item.name).rejects.toMatchObject({ kind: "failure" })
       expect(fetches, item.name).toBe(0)
     }
-    for (const toolName of ["read", "write", "edit", "patch", "glob", "grep", "bash"] as const) {
-      const invoke = provider.executeTool({ ...validOperation, toolName, arguments: {} } as never)[Symbol.asyncIterator]().next()
-      await expect(invoke, `${toolName} arguments`).rejects.toMatchObject({ kind: "failure" })
-      expect(fetches, `${toolName} arguments`).toBe(0)
-    }
   })
 })
-
-function conformanceResult(tool: Exclude<ToolName, "bash">): unknown {
-  const values = {
-    read: { type: "result", title: "Read", output: "hello", metadata: { filePath: "/workspace/conformance.txt", offset: 1 } },
-    write: { type: "result", title: "Write", output: "ok", metadata: { filePath: "/workspace/conformance.txt", bytes: 5 } },
-    edit: { type: "result", title: "Edit", output: "ok", metadata: { filePath: "/workspace/conformance.txt", replacements: 1, bytes: 5 } },
-    patch: { type: "result", title: "Patch", output: "ok", metadata: { added: [], updated: [], deleted: [], moved: [] } },
-    glob: { type: "result", title: "Glob", output: "", metadata: { pattern: "**/*", path: ".", count: 0, truncated: false } },
-    grep: { type: "result", title: "Grep", output: "", metadata: { pattern: "world", path: ".", matches: 0, truncated: false } },
-  }
-  return values[tool]
-}

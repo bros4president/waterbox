@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http"
+import { realpath } from "node:fs/promises"
 import { resolve } from "node:path"
 import { Readable } from "node:stream"
 import { fileURLToPath } from "node:url"
@@ -51,17 +52,19 @@ function piTools(root: string): Map<string, PiTool> {
 }
 export function createReceiver(options: ReceiverOptions = {}): Receiver {
   const root = resolve(options.workspaceRoot ?? process.env.WORKSPACE_ROOT ?? "/workspace")
-  const runtime = createRuntime({ workspaceRoot: root }); const pi = piTools(root)
+  const runtime = createRuntime({ workspaceRoot: root })
+  let pi: Promise<Map<string, PiTool>> | undefined
+  const getPiTools = () => pi ??= realpath(root).then(piTools)
   return {
     async handleRequest(request) {
       try {
         const path = new URL(request.url).pathname
         if (request.method === "GET" && path === "/health") return json({ status: "ok" })
-        if (request.method === "GET" && path === "/v1/pi/tools") return json([...pi.values()].map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.parameters })))
+        if (request.method === "GET" && path === "/v1/pi/tools") return json([...(await getPiTools()).values()].map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.parameters })))
         if (request.method === "POST" && lifecyclePaths.has(path as (typeof LIFECYCLE_PATHS)[number])) return new Response(null, { status: 204 })
         if (request.method !== "POST") throw new HttpError(404, "Not found")
         if (path.startsWith(PI_PREFIX)) {
-          const name = path.slice(PI_PREFIX.length); const tool = pi.get(name)
+          const name = path.slice(PI_PREFIX.length); const tool = (await getPiTools()).get(name)
           if (!tool || name.includes("/")) throw new HttpError(404, "Not found")
           try { return json(await tool.execute(crypto.randomUUID(), await parseJson(request), request.signal)) }
           catch (error) { return json({ content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true }) }
@@ -76,9 +79,22 @@ export function createReceiver(options: ReceiverOptions = {}): Receiver {
     shutdown: () => runtime.shutdown(),
   }
 }
+export const handleRequest = createReceiver().handleRequest
 async function sendResponse(response: Response, outgoing: ServerResponse) {
   outgoing.writeHead(response.status, Object.fromEntries(response.headers)); if (!response.body) return void outgoing.end()
-  for await (const chunk of Readable.fromWeb(response.body as never)) if (!outgoing.write(chunk)) await new Promise<void>((ok) => outgoing.once("drain", ok))
+  const reader = response.body.getReader()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!outgoing.write(value)) {
+      await new Promise<void>((ok) => {
+        const settled = () => { outgoing.off("drain", settled); outgoing.off("close", settled); ok() }
+        outgoing.once("drain", settled); outgoing.once("close", settled)
+        if (outgoing.destroyed) settled()
+      })
+      if (outgoing.destroyed) { void reader.cancel().catch(() => undefined); return }
+    }
+  }
   outgoing.end()
 }
 function webRequest(incoming: IncomingMessage, signal: AbortSignal): Request {
@@ -95,7 +111,10 @@ export function createNodeServer(receiver: Receiver = createReceiver()): Server 
 }
 export async function startServer(options: ReceiverOptions & { port?: number } = {}): Promise<Server> {
   const receiver = createReceiver(options); const server = createNodeServer(receiver)
-  await new Promise<void>((ok, fail) => { server.once("error", fail); server.listen(options.port ?? Number(process.env.PORT ?? 8080), "0.0.0.0", ok) })
+  await new Promise<void>((ok, fail) => {
+    server.once("error", fail)
+    server.listen(options.port ?? Number(process.env.PORT ?? 8080), "0.0.0.0", () => { server.off("error", fail); ok() })
+  })
   const shutdown = () => { receiver.shutdown(); server.close(); const force = setTimeout(() => server.closeAllConnections(), 5_000); force.unref() }
   const nodeProcess = process as unknown as { once(signal: "SIGTERM" | "SIGINT", listener: () => void): void; off(signal: "SIGTERM" | "SIGINT", listener: () => void): void }
   nodeProcess.once("SIGTERM", shutdown); nodeProcess.once("SIGINT", shutdown); server.once("close", () => { nodeProcess.off("SIGTERM", shutdown); nodeProcess.off("SIGINT", shutdown) })

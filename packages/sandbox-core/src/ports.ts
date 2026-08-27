@@ -19,7 +19,6 @@ export interface SandboxRepository {
   get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined>
   list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>>
   compareAndSwap(record: SandboxRecord, expectedVersion: number): Promise<boolean>
-  conditionalDelete(accountId: string, sandboxId: SandboxId, expectedVersion: number): Promise<boolean>
 }
 
 export interface SnapshotRepository {
@@ -27,7 +26,6 @@ export interface SnapshotRepository {
   get(accountId: string, snapshotId: SnapshotId): Promise<SnapshotRecord | undefined>
   list(input: ListRepositoryInput): Promise<RepositoryPage<SnapshotRecord>>
   compareAndSwap(record: SnapshotRecord, expectedVersion: number): Promise<boolean>
-  conditionalDelete(accountId: string, snapshotId: SnapshotId, expectedVersion: number): Promise<boolean>
 }
 
 export interface IdempotencyKey {
@@ -39,9 +37,7 @@ export interface IdempotencyKey {
 export interface IdempotencyRepository {
   createIfAbsent(record: IdempotencyRecord): Promise<boolean>
   get(input: IdempotencyKey): Promise<IdempotencyRecord | undefined>
-  list(input: ListRepositoryInput): Promise<RepositoryPage<IdempotencyRecord>>
   compareAndSwap(record: IdempotencyRecord, expectedVersion: number): Promise<boolean>
-  conditionalDelete(input: IdempotencyKey, expectedVersion: number): Promise<boolean>
 }
 
 export interface Clock {

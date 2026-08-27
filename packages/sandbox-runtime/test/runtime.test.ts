@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema, PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema } from "@waterbox/contracts"
-import { mkdtemp, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Readable } from "node:stream"
 import { createRuntime } from "../src/index.ts"
 
 const roots: string[] = []
@@ -42,5 +43,48 @@ describe("provider-neutral canonical runtime", () => {
     await expect(shutdownQueued).rejects.toMatchObject({ name: "AbortError" })
     await another
     await expect(Bun.file(join(roots.at(-1)!, "shutdown.txt")).exists()).resolves.toBe(false)
+  })
+
+  test.skipIf(process.platform === "win32")("escalates cancellation for TERM-resistant process-group descendants", async () => {
+    const runtime = await fixture()
+    const root = roots.at(-1)!
+    const controller = new AbortController()
+    const stream = await runtime.execute("bash", {
+      command: "bash -c 'trap \"\" TERM; echo $$ > resistant.pid; printf ready; while :; do sleep 1; done' & wait",
+    }, controller.signal) as ReadableStream
+    const reader = stream.getReader()
+    expect((await reader.read()).value).toMatchObject({ type: "stdout", data: "ready" })
+    controller.abort()
+    while (!(await reader.read()).done) {}
+    const pid = Number(await readFile(join(root, "resistant.pid"), "utf8"))
+    let alive = true
+    for (let attempt = 0; attempt < 100 && alive; attempt++) {
+      try { process.kill(pid, 0); await Bun.sleep(10) } catch { alive = false }
+    }
+    expect(alive).toBe(false)
+  })
+
+  test.skipIf(process.platform === "win32")("pauses bash output while its consumer is slow and resumes on pull", async () => {
+    const runtime = await fixture()
+    const pause = Readable.prototype.pause
+    const resume = Readable.prototype.resume
+    let pauses = 0
+    let resumes = 0
+    Readable.prototype.pause = function () { pauses++; return pause.call(this) }
+    Readable.prototype.resume = function () { resumes++; return resume.call(this) }
+    try {
+      const stream = await runtime.execute("bash", { command: "printf first; sleep 0.2; printf second" }) as ReadableStream
+      for (let attempt = 0; attempt < 100 && pauses === 0; attempt++) await Bun.sleep(10)
+      expect(pauses).toBeGreaterThan(0)
+      const resumesBeforeRead = resumes
+      const reader = stream.getReader()
+      expect((await reader.read()).value).toMatchObject({ type: "stdout", data: "first" })
+      for (let attempt = 0; attempt < 100 && resumes === resumesBeforeRead; attempt++) await Bun.sleep(10)
+      expect(resumes).toBeGreaterThan(resumesBeforeRead)
+      while (!(await reader.read()).done) {}
+    } finally {
+      Readable.prototype.pause = pause
+      Readable.prototype.resume = resume
+    }
   })
 })

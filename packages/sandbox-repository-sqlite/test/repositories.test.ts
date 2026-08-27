@@ -12,7 +12,6 @@ import {
 
 const stores: SqliteRepositoryStore[] = []
 const directories: string[] = []
-const cursorKey = new Uint8Array(32).fill(0x42)
 
 afterEach(async () => {
   for (const store of stores.splice(0)) store.close()
@@ -20,7 +19,7 @@ afterEach(async () => {
 })
 
 function store(filename = ":memory:"): SqliteRepositoryStore {
-  const value = new SqliteRepositoryStore(filename, { cursorKey })
+  const value = new SqliteRepositoryStore(filename)
   stores.push(value)
   return value
 }
@@ -68,23 +67,21 @@ function idempotency(accountId = "acct-a", suffix = "1", version = 1): Idempoten
 }
 
 describe("SQLite repository conformance", () => {
-  test("sandbox port supports create, get, CAS, stale rejection, list, and conditional delete", async () => {
+  test("sandbox port supports create, get, CAS, stale rejection, and list", async () => {
     const repository = store().sandboxes
     const initial = sandbox()
     expect(await repository.createIfAbsent(initial)).toBe(true)
     expect(await repository.createIfAbsent(initial)).toBe(false)
     expect(await repository.get(initial.accountId, initial.sandboxId)).toEqual(initial)
 
-    const updated = { ...initial, state: "suspended" as const, version: 2, updatedAt: "2026-01-01T00:01:00.000Z" }
+    const updated = { ...initial, state: "stopped" as const, version: 2, updatedAt: "2026-01-01T00:01:00.000Z" }
     expect(await repository.compareAndSwap(updated, 0)).toBe(false)
     expect(await repository.compareAndSwap(updated, 1)).toBe(true)
     expect(await repository.compareAndSwap({ ...updated, version: 3 }, 1)).toBe(false)
     expect((await repository.list({ accountId: "acct-a", limit: 10 })).items).toEqual([updated])
-    expect(await repository.conditionalDelete("acct-a", initial.sandboxId, 1)).toBe(false)
-    expect(await repository.conditionalDelete("acct-a", initial.sandboxId, 2)).toBe(true)
   })
 
-  test("snapshot port supports create, get, CAS, list, and conditional delete", async () => {
+  test("snapshot port supports create, get, CAS, and list", async () => {
     const repository = store().snapshots
     const initial = snapshot()
     expect(await repository.createIfAbsent(initial)).toBe(true)
@@ -93,10 +90,9 @@ describe("SQLite repository conformance", () => {
     expect(await repository.compareAndSwap(updated, 1)).toBe(true)
     expect(await repository.get("acct-a", initial.snapshotId)).toEqual(updated)
     expect((await repository.list({ accountId: "acct-a", limit: 1 })).items).toEqual([updated])
-    expect(await repository.conditionalDelete("acct-a", initial.snapshotId, 2)).toBe(true)
   })
 
-  test("idempotency port persists expiry and supports all conditional operations", async () => {
+  test("idempotency port persists expiry and supports create, get, and CAS", async () => {
     const repository = store().idempotency
     const initial = idempotency()
     const key = { accountId: initial.accountId, scope: initial.scope, key: initial.key }
@@ -105,9 +101,6 @@ describe("SQLite repository conformance", () => {
     expect((await repository.get(key))?.expiresAt).toBe(initial.expiresAt)
     const updated = { ...initial, state: "failed" as const, version: 2, expiresAt: "2030-01-01T00:00:00.000Z" }
     expect(await repository.compareAndSwap(updated, 1)).toBe(true)
-    expect((await repository.list({ accountId: initial.accountId, limit: 10 })).items).toEqual([updated])
-    expect(await repository.conditionalDelete(key, 1)).toBe(false)
-    expect(await repository.conditionalDelete(key, 2)).toBe(true)
   })
 })
 
@@ -124,7 +117,7 @@ describe("SQLite durability and isolation", () => {
 
     const second = store(filename)
     expect(await second.sandboxes.get(record.accountId, record.sandboxId)).toEqual(record)
-    const thirdInitialization = new SqliteRepositoryStore(filename, { cursorKey })
+    const thirdInitialization = new SqliteRepositoryStore(filename)
     thirdInitialization.close()
   })
 
@@ -142,11 +135,6 @@ describe("SQLite durability and isolation", () => {
 })
 
 describe("SQLite pagination", () => {
-  test("cursor encryption keys must be exactly 32 bytes", () => {
-    expect(() => new SqliteRepositoryStore(":memory:", { cursorKey: new Uint8Array(31) })).toThrow("exactly 32 bytes")
-    expect(() => new SqliteRepositoryStore(":memory:", { cursorKey: new Uint8Array(33) })).toThrow("exactly 32 bytes")
-  })
-
   test("keyset pages have no duplicates or omissions over stable data", async () => {
     const repositories = store()
     const expected = ["1", "2", "3", "4", "5"].map((suffix) => sandbox("acct-a", suffix))
@@ -163,35 +151,28 @@ describe("SQLite pagination", () => {
     expect(new Set(actual.map((record) => record.sandboxId)).size).toBe(expected.length)
   })
 
-  test("all cursor shapes are encrypted, authenticated, account-bound, and bounded", async () => {
+  test("resource cursors contain only the canonical resource key and keep account filtering separate", async () => {
     const repositories = store()
     for (const suffix of ["1", "2"]) {
       await repositories.sandboxes.createIfAbsent(sandbox("acct-a", suffix))
       await repositories.snapshots.createIfAbsent(snapshot("acct-a", suffix))
-      await repositories.idempotency.createIfAbsent(idempotency("acct-a", suffix))
+      await repositories.sandboxes.createIfAbsent(sandbox("acct-b", suffix))
     }
     const pages = [
       await repositories.sandboxes.list({ accountId: "acct-a", limit: 1 }),
       await repositories.snapshots.list({ accountId: "acct-a", limit: 1 }),
-      await repositories.idempotency.list({ accountId: "acct-a", limit: 1 }),
     ]
     const continuationCalls = [
       (cursor: string) => repositories.sandboxes.list({ accountId: "acct-a", limit: 1, cursor }),
       (cursor: string) => repositories.snapshots.list({ accountId: "acct-a", limit: 1, cursor }),
-      (cursor: string) => repositories.idempotency.list({ accountId: "acct-a", limit: 1, cursor }),
     ]
     for (const [index, page] of pages.entries()) {
       expect(page.nextCursor).toBeString()
-      const tokenBytes = Buffer.from(page.nextCursor!, "base64url")
-      const representation = tokenBytes.toString("utf8")
-      for (const secretField of ["acct-a", "sbx_calm-cactus-1", "snap_silver-forest-1", "sandbox:create", "request-1"]) {
-        expect(representation).not.toContain(secretField)
-      }
+      const representation = Buffer.from(page.nextCursor!, "base64url").toString("utf8")
+      expect(representation).toBe(JSON.stringify({ v: 1, after: index === 0 ? "sbx_calm-cactus-1" : "snap_silver-forest-1" }))
       expect((await continuationCalls[index]!(page.nextCursor!)).items).toHaveLength(1)
-      tokenBytes[tokenBytes.length - 1] = tokenBytes[tokenBytes.length - 1]! ^ 1
-      await expect(continuationCalls[index]!(tokenBytes.toString("base64url"))).rejects.toThrow("Invalid repository cursor")
     }
-    await expect(repositories.sandboxes.list({ accountId: "acct-b", limit: 1, cursor: pages[0]!.nextCursor })).rejects.toThrow("Invalid repository cursor")
+    expect((await repositories.sandboxes.list({ accountId: "acct-b", limit: 1, cursor: pages[0]!.nextCursor })).items[0]?.accountId).toBe("acct-b")
     await expect(repositories.sandboxes.list({ accountId: "acct-a", limit: 1, cursor: "not-a-valid-cursor" })).rejects.toThrow("Invalid repository cursor")
     await expect(repositories.sandboxes.list({ accountId: "acct-a", limit: 1, cursor: pages[1]!.nextCursor })).rejects.toThrow("Invalid repository cursor")
     await expect(repositories.sandboxes.list({ accountId: "acct-a", limit: 0 })).rejects.toBeInstanceOf(RangeError)
@@ -216,14 +197,15 @@ describe("SQLite pagination", () => {
       await expect(repositories.sandboxes.list({ accountId: "acct-a", limit: 1, cursor: malformed })).rejects.toThrow("Invalid repository cursor")
     }
 
-    let base64AliasSource = canonical
-    for (let attempt = 0; attempt < 50 && !/[-_]/.test(base64AliasSource); attempt++) {
-      base64AliasSource = (await repositories.sandboxes.list({ accountId: "acct-a", limit: 1 })).nextCursor!
+    for (const payload of [
+      { v: 1, after: "invalid" },
+      { after: "sbx_calm-cactus-1", v: 1 },
+      { v: 1, after: "sbx_calm-cactus-1", accountId: "acct-a" },
+      { v: 2, after: "sbx_calm-cactus-1" },
+    ]) {
+      const malformed = Buffer.from(JSON.stringify(payload)).toString("base64url")
+      await expect(repositories.sandboxes.list({ accountId: "acct-a", limit: 1, cursor: malformed })).rejects.toThrow("Invalid repository cursor")
     }
-    expect(base64AliasSource).toMatch(/[-_]/)
-    const standardBase64Alias = base64AliasSource.replaceAll("-", "+").replaceAll("_", "/")
-    expect(standardBase64Alias).not.toBe(base64AliasSource)
-    await expect(repositories.sandboxes.list({ accountId: "acct-a", limit: 1, cursor: standardBase64Alias })).rejects.toThrow("Invalid repository cursor")
 
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
     if (canonical.length % 4 === 2 || canonical.length % 4 === 3) {
@@ -235,7 +217,7 @@ describe("SQLite pagination", () => {
     }
   })
 
-  test("cursor continuation works after database close and reopen with the same key", async () => {
+  test("cursor continuation works after database close and reopen", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-cursor-"))
     directories.push(directory)
     const filename = join(directory, "repository.sqlite")
@@ -251,16 +233,6 @@ describe("SQLite pagination", () => {
     expect(secondPage.nextCursor).toBeUndefined()
   })
 
-  test("idempotency pagination is stable across its composite resource key", async () => {
-    const repository = store().idempotency
-    const records = [idempotency("acct-a", "1"), idempotency("acct-a", "2"), { ...idempotency("acct-a", "0"), scope: "another" }]
-    for (const record of records) await repository.createIfAbsent(record)
-    const first = await repository.list({ accountId: "acct-a", limit: 2 })
-    const second = await repository.list({ accountId: "acct-a", limit: 2, cursor: first.nextCursor })
-    expect([...first.items, ...second.items].map((record) => [record.scope, record.key])).toEqual([
-      ["another", "request-0"], ["sandbox:create", "request-1"], ["sandbox:create", "request-2"],
-    ])
-  })
 })
 
 describe("SQLite storage safety", () => {
@@ -273,6 +245,55 @@ describe("SQLite storage safety", () => {
     repositories.database.query("INSERT INTO snapshot_documents VALUES (?, ?, ?, ?)")
       .run("acct-a", "snap_silver-forest-bad", 1, JSON.stringify({ accountId: "acct-a" }))
     await expect(repositories.snapshots.list({ accountId: "acct-a", limit: 10 })).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
+  })
+
+  test("sandbox documents enforce canonical provider, version, and error invariants", async () => {
+    const repositories = store()
+    const original = sandbox()
+    await repositories.sandboxes.createIfAbsent(original)
+
+    for (const corrupted of [
+      { ...original, provider: "Fake" },
+      { ...original, version: 0 },
+      { ...original, lastError: { code: "provider_failure" as const, message: "" } },
+      { ...original, lastError: { code: "provider_failure" as const, message: "x".repeat(2_001) } },
+    ]) {
+      repositories.database.query("UPDATE sandbox_documents SET version = ?, document = ? WHERE account_id = ? AND resource_id = ?")
+        .run(corrupted.version, JSON.stringify(corrupted), original.accountId, original.sandboxId)
+      await expect(repositories.sandboxes.get(original.accountId, original.sandboxId)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
+    }
+  })
+
+  test("snapshot documents enforce canonical name and description bounds", async () => {
+    const repositories = store()
+    const original = snapshot()
+    await repositories.snapshots.createIfAbsent(original)
+
+    for (const corrupted of [
+      { ...original, name: "" },
+      { ...original, name: "x".repeat(129) },
+      { ...original, description: "x".repeat(2_001) },
+    ]) {
+      repositories.database.query("UPDATE snapshot_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
+        .run(JSON.stringify(corrupted), original.accountId, original.snapshotId)
+      await expect(repositories.snapshots.get(original.accountId, original.snapshotId)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
+    }
+  })
+
+  test("idempotency documents require positive versions", async () => {
+    const repositories = store()
+    const original = idempotency()
+    const corrupted = { ...original, version: 0 }
+    await repositories.idempotency.createIfAbsent(original)
+    repositories.database.query(`UPDATE idempotency_documents SET version = ?, document = ?
+      WHERE account_id = ? AND scope = ? AND idempotency_key = ?`)
+      .run(0, JSON.stringify(corrupted), original.accountId, original.scope, original.key)
+
+    await expect(repositories.idempotency.get({
+      accountId: original.accountId,
+      scope: original.scope,
+      key: original.key,
+    })).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
   })
 
   test("sandbox get and list reject every SQL/document identity or version mismatch", async () => {
@@ -307,7 +328,7 @@ describe("SQLite storage safety", () => {
     }
   })
 
-  test("idempotency get and list reject every SQL/document key, version, or expiry mismatch", async () => {
+  test("idempotency get rejects every SQL/document key, version, or expiry mismatch", async () => {
     const repositories = store()
     const original = idempotency()
     const key = { accountId: original.accountId, scope: original.scope, key: original.key }
@@ -323,7 +344,6 @@ describe("SQLite storage safety", () => {
         WHERE account_id = ? AND scope = ? AND idempotency_key = ?`)
         .run(JSON.stringify(corrupted), original.accountId, original.scope, original.key)
       await expect(repositories.idempotency.get(key)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
-      await expect(repositories.idempotency.list({ accountId: original.accountId, limit: 10 })).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
     }
   })
 
@@ -332,7 +352,6 @@ describe("SQLite storage safety", () => {
     for (const [table, ordering] of [
       ["sandbox_documents", "resource_id"],
       ["snapshot_documents", "resource_id"],
-      ["idempotency_documents", "scope, idempotency_key"],
     ] as const) {
       const plan = repositories.database.query<{ detail: string }, [string, number]>(
         `EXPLAIN QUERY PLAN SELECT document FROM ${table} WHERE account_id = ? ORDER BY ${ordering} LIMIT ?`,

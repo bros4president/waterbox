@@ -122,6 +122,43 @@ describe("account ownership", () => {
 })
 
 describe("durable create idempotency", () => {
+  test("pre-aborted create does not allocate, persist, or dispatch", async () => {
+    const { service, sandboxes, idempotency, provider } = harness({ sandboxIds: [] })
+    const controller = new AbortController()
+    const reason = new DOMException("cancel create", "AbortError")
+    controller.abort(reason)
+
+    await expect(service.createSandbox(alice, {}, { idempotencyKey: "cancelled", signal: controller.signal })).rejects.toBe(reason)
+
+    expect(provider.createCalls).toBe(0)
+    expect((await sandboxes.list({ accountId: alice.accountId, limit: 10 })).items).toEqual([])
+    expect(await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "cancelled" })).toBeUndefined()
+  })
+
+  test("in-flight create cancellation preserves the exact reason and provisioning record", async () => {
+    const gate = deferred()
+    const provider = new FakeSandboxProvider()
+    provider.createBarrier = gate.promise
+    const { service, sandboxes, idempotency } = harness({ provider })
+    const controller = new AbortController()
+    const creation = service.createSandbox(alice, {}, { idempotencyKey: "cancelled", signal: controller.signal })
+    await waitUntil(() => provider.createCalls === 1)
+    const reason = new DOMException("cancel in flight", "AbortError")
+    controller.abort(reason)
+    gate.resolve()
+
+    await expect(creation).rejects.toBe(reason)
+    expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({
+      state: "provisioning",
+      providerRef: { privateSandboxId: "sbx_calm-cactus-a1" },
+    })
+    expect((await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.lastError).toBeUndefined()
+    expect(await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "cancelled" })).toMatchObject({
+      state: "in_progress",
+    })
+    expect((await service.getSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("running")
+  })
+
   test("same account, key, and normalized body returns the same sandbox", async () => {
     const { service, provider } = harness()
 
@@ -212,7 +249,7 @@ describe("durable create idempotency", () => {
   })
 })
 
-describe("lifecycle and capabilities", () => {
+describe("lifecycle and optional groups", () => {
   test("invalid create observations fail both sandbox and idempotency records", async () => {
     const provider = new InvalidCreateObservationProvider()
     const { service, sandboxes, idempotency } = harness({ provider })
@@ -240,7 +277,7 @@ describe("lifecycle and capabilities", () => {
   })
 
   test("unsupported snapshots fail before provider invocation or snapshot persistence", async () => {
-    const provider = new FakeSandboxProvider({ capabilities: { snapshots: false } })
+    const provider = new FakeSandboxProvider({ snapshots: false })
     const { service, snapshots } = harness({ provider })
     const sandbox = await service.createSandbox(alice, {})
 
@@ -249,19 +286,71 @@ describe("lifecycle and capabilities", () => {
     expect((await snapshots.list({ accountId: alice.accountId, limit: 10 })).items).toHaveLength(0)
   })
 
-  test("suspend, resume, and delete enforce canonical transitions", async () => {
+  test("unsupported optional groups fail before IDs, persistence, transitions, or provider dispatch", async () => {
+    const provider = new FakeSandboxProvider({ stopResume: false, snapshots: false })
+    const { service, sandboxes, snapshots } = harness({ provider, snapshotIds: [] })
+    const sandbox = await service.createSandbox(alice, {})
+    const stoppedId = "sbx_stopped-cloud-a1" as SandboxId
+    const runningId = "sbx_running-cloud-a1" as SandboxId
+    const deletedSnapshotId = "snap_deleted-forest-a1" as SnapshotId
+    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, stoppedId, "stopped"))
+    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, runningId, "running"))
+    await snapshots.createIfAbsent(snapshotRecord(alice.accountId, deletedSnapshotId, runningId, "deleted"))
+
+    await expectDomainError(service.stopSandbox(alice, sandbox.sandboxId), "unsupported_capability")
+    await expectDomainError(service.stopSandbox(alice, stoppedId), "unsupported_capability")
+    await expectDomainError(service.resumeSandbox(alice, runningId), "unsupported_capability")
+    await expectDomainError(service.createSnapshot(alice, sandbox.sandboxId, {}), "unsupported_capability")
+    await expectDomainError(service.deleteSnapshot(alice, deletedSnapshotId), "unsupported_capability")
+
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("running")
+    expect((await snapshots.get(alice.accountId, deletedSnapshotId))?.state).toBe("deleted")
+    expect((await snapshots.list({ accountId: alice.accountId, limit: 10 })).items).toHaveLength(1)
+    expect(provider.inspectSandboxCalls).toBe(0)
+    expect(provider.stopCalls).toBe(0)
+    expect(provider.createSnapshotCalls).toBe(0)
+  })
+
+  test("stop, resume, and delete enforce canonical transitions", async () => {
     const { service, provider } = harness()
     const sandbox = await service.createSandbox(alice, {})
 
-    expect((await service.suspendSandbox(alice, sandbox.sandboxId)).state).toBe("suspended")
-    await expectDomainError(service.suspendSandbox(alice, sandbox.sandboxId), "invalid_state")
+    expect((await service.stopSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
+    await expectDomainError(service.stopSandbox(alice, sandbox.sandboxId), "invalid_state")
     expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
     await expectDomainError(service.resumeSandbox(alice, sandbox.sandboxId), "invalid_state")
     expect((await service.deleteSandbox(alice, sandbox.sandboxId)).state).toBe("terminated")
     await expectDomainError(service.deleteSandbox(alice, sandbox.sandboxId), "invalid_state")
-    expect(provider.suspendCalls).toBe(1)
+    expect(provider.stopCalls).toBe(1)
     expect(provider.resumeCalls).toBe(1)
     expect(provider.deleteCalls).toBe(1)
+  })
+
+  test("mutation cancellation is preflighted and in-flight stop remains reconcilable", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    const preflight = new AbortController()
+    const preflightReason = new DOMException("cancel stop", "AbortError")
+    preflight.abort(preflightReason)
+
+    await expect(service.stopSandbox(alice, sandbox.sandboxId, preflight.signal)).rejects.toBe(preflightReason)
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("running")
+    expect(provider.stopCalls).toBe(0)
+
+    const gate = deferred()
+    provider.stopBarrier = gate.promise
+    const inFlight = new AbortController()
+    const stopping = service.stopSandbox(alice, sandbox.sandboxId, inFlight.signal)
+    await waitUntil(() => provider.stopCalls === 1)
+    const inFlightReason = new DOMException("cancel stop in flight", "AbortError")
+    inFlight.abort(inFlightReason)
+    gate.resolve()
+
+    await expect(stopping).rejects.toBe(inFlightReason)
+    expect(await sandboxes.get(alice.accountId, sandbox.sandboxId)).toMatchObject({ state: "stopping" })
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.lastError).toBeUndefined()
+    expect((await service.getSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
   })
 
   test("snapshot create and delete enforce immutable lifecycle transitions", async () => {
@@ -274,6 +363,14 @@ describe("lifecycle and capabilities", () => {
     await expectDomainError(service.deleteSnapshot(alice, snapshot.snapshotId), "invalid_state")
     expect(provider.createSnapshotCalls).toBe(1)
     expect(provider.deleteSnapshotCalls).toBe(1)
+  })
+
+  test("snapshot creation accepts a stopped sandbox", async () => {
+    const { service } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, sandbox.sandboxId)
+
+    expect((await service.createSnapshot(alice, sandbox.sandboxId, {})).state).toBe("ready")
   })
 
   test("create-from-snapshot enforces ownership, readiness, relationship, and capability", async () => {
@@ -291,38 +388,170 @@ describe("lifecycle and capabilities", () => {
 
     expect(restored.sourceSnapshotId).toBe(snapshot.snapshotId)
     await expectDomainError(service.createSandbox(bob, { sourceSnapshotId: snapshot.snapshotId }), "not_found")
-    provider.capabilities.createFromSnapshot = false
-    await expectDomainError(
-      service.createSandbox(alice, { sourceSnapshotId: snapshot.snapshotId }),
-      "unsupported_capability",
-    )
+    expect((await service.createSandbox(alice, { sourceSnapshotId: snapshot.snapshotId })).sourceSnapshotId).toBe(snapshot.snapshotId)
   })
 
-  test("create-from-snapshot reconciliation receives the caller's cancellation signal", async () => {
+  test("create-from-snapshot preflights cancellation before lookup or provider dispatch", async () => {
     const provider = new SnapshotSignalProvider()
     const { service, snapshots } = harness({ provider })
     const sourceSandboxId = "sbx_source-cloud-a1" as SandboxId
     const snapshotId = "snap_async-forest-a1" as SnapshotId
     await snapshots.createIfAbsent(snapshotRecord(alice.accountId, snapshotId, sourceSandboxId, "creating"))
     const controller = new AbortController()
-    controller.abort(new Error("cancel reconciliation"))
+    const reason = new Error("cancel reconciliation")
+    controller.abort(reason)
+
+    await expect(service.createSandbox(alice, { sourceSnapshotId: snapshotId }, { signal: controller.signal })).rejects.toBe(reason)
+
+    expect(provider.inspectSnapshotSignal).toBeUndefined()
+    expect(provider.createCalls).toBe(0)
+  })
+
+  test("create from snapshot dispatches to the snapshot's owning provider", async () => {
+    const sourceProvider = new FakeSandboxProvider({ name: "source" })
+    const defaultProvider = new FakeSandboxProvider({ name: "default" })
+    const snapshots = new InMemorySnapshotRepository()
+    const snapshotId = "snap_owned-forest-a1" as SnapshotId
+    await snapshots.createIfAbsent({
+      ...snapshotRecord(alice.accountId, snapshotId, "sbx_source-cloud-a1", "ready"),
+      provider: sourceProvider.name,
+    })
+    const service = new SandboxService({
+      sandboxes: new InMemorySandboxRepository(),
+      snapshots,
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[defaultProvider.name, defaultProvider], [sourceProvider.name, sourceProvider]]),
+      defaultProvider: defaultProvider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(["sbx_restored-cloud-a1"]),
+    })
+
+    const restored = await service.createSandbox(alice, { sourceSnapshotId: snapshotId })
+
+    expect(restored.provider).toBe(sourceProvider.name)
+    expect(defaultProvider.createCalls).toBe(0)
+    expect(sourceProvider.createInputs[0]?.sourceSnapshotRef).toEqual({ privateSnapshotId: snapshotId })
+  })
+
+  test("create from snapshot rejects an owning provider without snapshots before allocation or persistence", async () => {
+    const sourceProvider = new FakeSandboxProvider({ name: "source", snapshots: false })
+    const defaultProvider = new FakeSandboxProvider({ name: "default" })
+    const sandboxes = new InMemorySandboxRepository()
+    const snapshots = new InMemorySnapshotRepository()
+    const idempotency = new InMemoryIdempotencyRepository()
+    const snapshotId = "snap_owned-forest-a1" as SnapshotId
+    await snapshots.createIfAbsent({
+      ...snapshotRecord(alice.accountId, snapshotId, "sbx_source-cloud-a1", "ready"),
+      provider: sourceProvider.name,
+    })
+    const service = new SandboxService({
+      sandboxes,
+      snapshots,
+      idempotency,
+      providers: new Map([[defaultProvider.name, defaultProvider], [sourceProvider.name, sourceProvider]]),
+      defaultProvider: defaultProvider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })
 
     await expectDomainError(
-      service.createSandbox(alice, { sourceSnapshotId: snapshotId }, { signal: controller.signal }),
-      "provider_failure",
+      service.createSandbox(alice, { sourceSnapshotId: snapshotId }, { idempotencyKey: "restore" }),
+      "unsupported_capability",
     )
 
-    expect(provider.inspectSnapshotSignal).toBe(controller.signal)
-    expect(provider.createCalls).toBe(0)
+    expect(sourceProvider.createCalls).toBe(0)
+    expect(defaultProvider.createCalls).toBe(0)
+    expect((await sandboxes.list({ accountId: alice.accountId, limit: 10 })).items).toEqual([])
+    expect(await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "restore" })).toBeUndefined()
   })
 })
 
 describe("execution and reconciliation", () => {
-  test("concurrent execution resumes a suspended sandbox exactly once", async () => {
+  test("maps lifecycle and snapshot operations with exact account, provider reference, and signal continuity", async () => {
+    const { service, provider } = harness()
+    const createSignal = new AbortController().signal
+    const sandbox = await service.createSandbox(alice, {}, { signal: createSignal })
+    const sandboxRef = { privateSandboxId: sandbox.sandboxId }
+    expect(provider.createInputs[0]).toMatchObject({ accountId: alice.accountId, sandboxId: sandbox.sandboxId, signal: createSignal })
+
+    const stopSignal = new AbortController().signal
+    await service.stopSandbox(alice, sandbox.sandboxId, stopSignal)
+    const snapshotSignal = new AbortController().signal
+    const snapshot = await service.createSnapshot(alice, sandbox.sandboxId, {}, snapshotSignal)
+    const resumeSignal = new AbortController().signal
+    await service.resumeSandbox(alice, sandbox.sandboxId, resumeSignal)
+    const deleteSnapshotSignal = new AbortController().signal
+    await service.deleteSnapshot(alice, snapshot.snapshotId, deleteSnapshotSignal)
+    const deleteSignal = new AbortController().signal
+    await service.deleteSandbox(alice, sandbox.sandboxId, deleteSignal)
+
+    expect(provider.lifecycleInputs).toEqual([
+      { operation: "stop", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: stopSignal } },
+      { operation: "resume", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: resumeSignal } },
+      { operation: "delete", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: deleteSignal } },
+    ])
+    expect(provider.snapshotInputs).toEqual([
+      { operation: "create", input: { accountId: alice.accountId, snapshotId: snapshot.snapshotId, sandboxRef, signal: snapshotSignal } },
+      { operation: "delete", input: { accountId: alice.accountId, snapshotId: snapshot.snapshotId, providerRef: { privateSnapshotId: snapshot.snapshotId }, signal: deleteSnapshotSignal } },
+    ])
+  })
+
+  test("dispatches all canonical tools with exact arguments and signal", async () => {
+    const { service, provider } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    const signal = new AbortController().signal
+    const requests = [
+      ["read", { filePath: "/workspace/read", offset: 2, limit: 3 }],
+      ["write", { filePath: "/workspace/write", content: "content" }],
+      ["edit", { filePath: "/workspace/edit", oldString: "old", newString: "new", replaceAll: true }],
+      ["patch", { patchText: "*** Begin Patch\n*** End Patch" }],
+      ["glob", { pattern: "**/*.ts", path: "/workspace" }],
+      ["grep", { pattern: "needle", path: "/workspace", include: "*.ts" }],
+      ["bash", { command: "pwd", description: "where", timeout: 1000, workdir: "/workspace" }],
+    ] as const
+
+    for (const [toolName, arguments_] of requests) {
+      await collect(await service.executeTool(alice, sandbox.sandboxId, toolName, arguments_ as never, signal))
+    }
+
+    expect(provider.toolInputs.map(({ accountId, providerRef, toolName, arguments: arguments_, signal: inputSignal }) => ({
+      accountId,
+      providerRef,
+      toolName,
+      arguments: arguments_,
+      signal: inputSignal,
+    }))).toEqual(requests.map(([toolName, arguments_]) => ({
+      accountId: alice.accountId,
+      providerRef: { privateSandboxId: sandbox.sandboxId },
+      toolName,
+      arguments: arguments_,
+      signal,
+    })))
+  })
+
+  test("preserves cancellation and does not dispatch an already-cancelled tool", async () => {
+    const { service, provider } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    const beforeDispatch = new AbortController()
+    const beforeReason = new DOMException("cancel before dispatch", "AbortError")
+    beforeDispatch.abort(beforeReason)
+
+    await expect(service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/a" }, beforeDispatch.signal)).rejects.toBe(beforeReason)
+    expect(provider.executeCalls).toBe(0)
+
+    const duringStream = new AbortController()
+    const events = await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/a" }, duringStream.signal)
+    const streamReason = new DOMException("cancel stream", "AbortError")
+    duringStream.abort(streamReason)
+    await expect(collect(events)).rejects.toBe(streamReason)
+    expect(provider.executeCalls).toBe(1)
+  })
+
+  test("concurrent execution resumes a stopped sandbox exactly once", async () => {
     const provider = new FakeSandboxProvider()
     const { service } = harness({ provider })
     const sandbox = await service.createSandbox(alice, {})
-    await service.suspendSandbox(alice, sandbox.sandboxId)
+    await service.stopSandbox(alice, sandbox.sandboxId)
     const gate = deferred()
     provider.resumeBarrier = gate.promise
 
@@ -341,6 +570,50 @@ describe("execution and reconciliation", () => {
     expect(secondEvents).toHaveLength(1)
     expect(provider.resumeCalls).toBe(1)
     expect(provider.executeCalls).toBe(2)
+  })
+
+  test("a canceled resume joiner rejects independently without canceling the shared operation", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, sandbox.sandboxId)
+    const gate = deferred()
+    provider.resumeBarrier = gate.promise
+
+    const initiating = service.resumeSandbox(alice, sandbox.sandboxId)
+    await waitUntil(() => provider.resumeCalls === 1)
+    const joiningController = new AbortController()
+    const joining = service.resumeSandbox(alice, sandbox.sandboxId, joiningController.signal)
+    const reason = new DOMException("cancel joining resume", "AbortError")
+    joiningController.abort(reason)
+
+    await expect(joining).rejects.toBe(reason)
+    expect(provider.resumeCalls).toBe(1)
+    gate.resolve()
+    expect((await initiating).state).toBe("running")
+    expect(provider.resumeCalls).toBe(1)
+  })
+
+  test("an uncanceled resume waiter reconciles after the initiating caller is canceled", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, sandbox.sandboxId)
+    const gate = deferred()
+    provider.resumeBarrier = gate.promise
+    const initiatingController = new AbortController()
+
+    const initiating = service.resumeSandbox(alice, sandbox.sandboxId, initiatingController.signal)
+    await waitUntil(() => provider.resumeCalls === 1)
+    const joining = service.resumeSandbox(alice, sandbox.sandboxId)
+    const reason = new DOMException("cancel initiating resume", "AbortError")
+    initiatingController.abort(reason)
+
+    await expect(initiating).rejects.toBe(reason)
+    gate.resolve()
+    expect((await joining).state).toBe("running")
+    expect(provider.resumeCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(1)
   })
 
   test("ambiguous tool failure remains typed and execution is never retried", async () => {
@@ -363,10 +636,20 @@ describe("execution and reconciliation", () => {
     provider.sandboxStates.set(sandboxId, "running")
     provider.snapshotStates.set(snapshotId, "ready")
 
-    expect((await service.getSandbox(alice, sandboxId)).state).toBe("running")
-    expect((await service.getSnapshot(alice, snapshotId)).state).toBe("ready")
+    const sandboxSignal = new AbortController().signal
+    const snapshotSignal = new AbortController().signal
+    expect((await service.getSandbox(alice, sandboxId, sandboxSignal)).state).toBe("running")
+    expect((await service.getSnapshot(alice, snapshotId, snapshotSignal)).state).toBe("ready")
     expect(provider.inspectSandboxCalls).toBe(1)
     expect(provider.inspectSnapshotCalls).toBe(1)
+    expect(provider.lifecycleInputs[0]).toEqual({
+      operation: "inspect",
+      input: { accountId: alice.accountId, providerRef: { privateSandboxId: sandboxId }, signal: sandboxSignal },
+    })
+    expect(provider.snapshotInputs[0]).toEqual({
+      operation: "inspect",
+      input: { accountId: alice.accountId, snapshotId, providerRef: { privateSnapshotId: snapshotId }, signal: snapshotSignal },
+    })
   })
 
   test("readiness reconciliation is bounded for asynchronous provider states", async () => {
@@ -449,9 +732,9 @@ describe("records and compare-and-swap", () => {
     await sandboxes.createIfAbsent(initialSandbox)
     await snapshots.createIfAbsent(initialSnapshot)
 
-    expect(await sandboxes.compareAndSwap({ ...initialSandbox, state: "suspending", version: 2 }, 1)).toBe(true)
+    expect(await sandboxes.compareAndSwap({ ...initialSandbox, state: "stopping", version: 2 }, 1)).toBe(true)
     expect(await sandboxes.compareAndSwap({ ...initialSandbox, state: "terminating", version: 2 }, 1)).toBe(false)
-    expect((await sandboxes.get(alice.accountId, sandboxId))?.state).toBe("suspending")
+    expect((await sandboxes.get(alice.accountId, sandboxId))?.state).toBe("stopping")
     expect(await snapshots.compareAndSwap({ ...initialSnapshot, state: "deleting", version: 2 }, 1)).toBe(true)
     expect(await snapshots.compareAndSwap({ ...initialSnapshot, state: "failed", version: 2 }, 1)).toBe(false)
     expect((await snapshots.get(alice.accountId, snapshotId))?.state).toBe("deleting")
@@ -473,9 +756,9 @@ describe("records and compare-and-swap", () => {
     const sandboxId = "sbx_calm-cactus-a1" as SandboxId
     await base.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "running"))
 
-    await expectDomainError(service.suspendSandbox(alice, sandboxId), "invalid_state")
+    await expectDomainError(service.stopSandbox(alice, sandboxId), "invalid_state")
     expect((await base.get(alice.accountId, sandboxId))?.state).toBe("terminated")
-    expect(provider.suspendCalls).toBe(0)
+    expect(provider.stopCalls).toBe(0)
   })
 })
 
@@ -491,7 +774,7 @@ class AsyncCreateProvider extends FakeSandboxProvider {
 class InvalidCreateObservationProvider extends FakeSandboxProvider {
   override async createSandbox(input: ProviderCreateSandboxInput) {
     this.createCalls++
-    return { state: "suspended" as const, providerRef: { privateSandboxId: input.sandboxId } }
+    return { state: "stopped" as const, providerRef: { privateSandboxId: input.sandboxId } }
   }
 }
 
@@ -553,10 +836,6 @@ class RacingSandboxRepository implements SandboxRepository {
       return false
     }
     return this.base.compareAndSwap(record, expectedVersion)
-  }
-
-  conditionalDelete(accountId: string, sandboxId: SandboxId, expectedVersion: number): Promise<boolean> {
-    return this.base.conditionalDelete(accountId, sandboxId, expectedVersion)
   }
 }
 

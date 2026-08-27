@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process"
 import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createReceiver } from "./server.ts"
+import { createReceiver, handleRequest } from "./server.ts"
 
 const roots: string[] = []
 const hasRipgrep = spawnSync("rg", ["--version"], { stdio: "ignore" }).status === 0
@@ -32,6 +32,7 @@ describe("receiver handler", () => {
     expect(await (await receiver.handleRequest(new Request("http://receiver/health"))).json()).toEqual({ status: "ok" })
     expect((await receiver.handleRequest(post("/aws/lambda-microvms/runtime/v1/run", { session: "test" }))).status).toBe(204)
     expect((await receiver.handleRequest(post("/aws/lambda-microvms/runtime/v1/validate", {}))).status).toBe(204)
+    expect(await (await handleRequest(new Request("http://receiver/health"))).json()).toEqual({ status: "ok" })
   })
 
   test.skipIf(!hasRipgrep)("serves Pi's standalone tool catalog and executes all seven tools", async () => {

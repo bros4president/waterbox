@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto"
 import {
   ErrorCodeSchema,
+  ProviderNameSchema,
   SandboxIdSchema,
   SandboxStateSchema,
   SnapshotIdSchema,
@@ -28,12 +28,12 @@ export class MalformedRepositoryDocumentError extends Error {
 }
 
 const JsonValueSchema: z.ZodType<JsonValue> = z.json()
-const ResourceErrorSchema = z.object({ code: ErrorCodeSchema, message: z.string() }).strict()
+const ResourceErrorSchema = z.object({ code: ErrorCodeSchema, message: z.string().min(1).max(2_000) }).strict()
 const BaseRecordSchema = z.object({
   accountId: z.string().min(1),
-  provider: z.string().min(1),
+  provider: ProviderNameSchema,
   providerRef: JsonValueSchema,
-  version: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   lastError: ResourceErrorSchema.optional(),
@@ -45,8 +45,8 @@ const SandboxRecordSchema = BaseRecordSchema.extend({
 }).strict()
 const SnapshotRecordSchema = BaseRecordSchema.extend({
   snapshotId: SnapshotIdSchema,
-  name: z.string().optional(),
-  description: z.string().optional(),
+  name: z.string().min(1).max(128).optional(),
+  description: z.string().max(2_000).optional(),
   sourceSandboxId: SandboxIdSchema,
   state: SnapshotStateSchema,
 }).strict()
@@ -57,7 +57,7 @@ const IdempotencyRecordSchema = z.object({
   requestHash: z.string().min(1),
   resourceId: SandboxIdSchema,
   state: z.enum(["in_progress", "completed", "failed"]),
-  version: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   expiresAt: z.string().datetime(),
@@ -73,66 +73,30 @@ type IdempotencyDocumentRow = {
   expires_at: string
   document: string
 }
-type CursorPayload = { v: 1; keys: string[] }
-type CursorKind = "sandbox" | "snapshot" | "idempotency"
+type CursorPayload = { v: 1; after: string }
 
 const CURSOR_FORMAT_VERSION = 1
-const CURSOR_IV_BYTES = 12
-const CURSOR_TAG_BYTES = 16
-
 class CursorCodec {
-  readonly #key: Buffer
-
-  constructor(key: Uint8Array) {
-    if (key.byteLength !== 32) throw new Error("SQLite repository cursor key must be exactly 32 bytes")
-    this.#key = Buffer.from(key)
+  encode(after: string): string {
+    return Buffer.from(JSON.stringify({ v: CURSOR_FORMAT_VERSION, after } satisfies CursorPayload), "utf8").toString("base64url")
   }
 
-  encode(kind: CursorKind, accountId: string, keys: string[]): string {
-    const iv = randomBytes(CURSOR_IV_BYTES)
-    const cipher = createCipheriv("aes-256-gcm", this.#key, iv)
-    cipher.setAAD(this.#aad(kind, accountId))
-    const ciphertext = Buffer.concat([
-      cipher.update(JSON.stringify({ v: CURSOR_FORMAT_VERSION, keys } satisfies CursorPayload), "utf8"),
-      cipher.final(),
-    ])
-    return Buffer.concat([
-      Buffer.from([CURSOR_FORMAT_VERSION]),
-      iv,
-      cipher.getAuthTag(),
-      ciphertext,
-    ]).toString("base64url")
-  }
-
-  decode(cursor: string | undefined, kind: CursorKind, accountId: string, keyCount: number): string[] | undefined {
+  decode(cursor: string | undefined, schema: z.ZodType<string>): string | undefined {
     if (cursor === undefined) return undefined
     try {
       if (!/^[A-Za-z0-9_-]+$/.test(cursor) || cursor.length % 4 === 1) throw new Error("Invalid encoding")
       const token = Buffer.from(cursor, "base64url")
       if (token.toString("base64url") !== cursor) throw new Error("Noncanonical encoding")
-      const minimumLength = 1 + CURSOR_IV_BYTES + CURSOR_TAG_BYTES + 1
-      if (token.length < minimumLength || token[0] !== CURSOR_FORMAT_VERSION) throw new Error("Invalid format")
-      const ivStart = 1
-      const tagStart = ivStart + CURSOR_IV_BYTES
-      const ciphertextStart = tagStart + CURSOR_TAG_BYTES
-      const decipher = createDecipheriv("aes-256-gcm", this.#key, token.subarray(ivStart, tagStart))
-      decipher.setAAD(this.#aad(kind, accountId))
-      decipher.setAuthTag(token.subarray(tagStart, ciphertextStart))
-      const plaintext = Buffer.concat([decipher.update(token.subarray(ciphertextStart)), decipher.final()]).toString("utf8")
+      const plaintext = token.toString("utf8")
       const parsed = z.object({
         v: z.literal(CURSOR_FORMAT_VERSION),
-        keys: z.array(z.string()).length(keyCount),
+        after: schema,
       }).strict().parse(JSON.parse(plaintext))
-      return parsed.keys
+      if (JSON.stringify(parsed) !== plaintext) throw new Error("Noncanonical JSON")
+      return parsed.after
     } catch {
-      // Authentication, shape, partition, and key errors intentionally collapse to
-      // one secret-free error at this public repository boundary.
       throw new Error("Invalid repository cursor")
     }
-  }
-
-  #aad(kind: CursorKind, accountId: string): Buffer {
-    return Buffer.from(`${kind}\u0000${accountId}`, "utf8")
   }
 }
 
@@ -222,18 +186,18 @@ export class SqliteSandboxRepository implements SandboxRepository {
 
   async list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> {
     const limit = boundedLimit(input.limit)
-    const keys = this.cursors.decode(input.cursor, "sandbox", input.accountId, 1)
-    const rows = keys === undefined
+    const after = this.cursors.decode(input.cursor, SandboxIdSchema)
+    const rows = after === undefined
       ? this.database.query<ResourceDocumentRow, [string, number]>(
           "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? ORDER BY resource_id LIMIT ?",
         ).all(input.accountId, limit + 1)
       : this.database.query<ResourceDocumentRow, [string, string, number]>(
           "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? AND resource_id > ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, keys[0]!, limit + 1)
+        ).all(input.accountId, after, limit + 1)
     const pageRows = rows.slice(0, limit)
     const items = pageRows.map((row) => parseSandbox(row, input.accountId, row.resource_id)!)
     const last = pageRows.at(-1)
-    return { items, ...(rows.length > limit && last ? { nextCursor: this.cursors.encode("sandbox", input.accountId, [last.resource_id]) } : {}) }
+    return { items, ...(rows.length > limit && last ? { nextCursor: this.cursors.encode(last.resource_id) } : {}) }
   }
 
   async compareAndSwap(record: SandboxRecord, expectedVersion: number): Promise<boolean> {
@@ -244,11 +208,6 @@ export class SqliteSandboxRepository implements SandboxRepository {
     return result.changes === 1
   }
 
-  async conditionalDelete(accountId: string, sandboxId: SandboxRecord["sandboxId"], expectedVersion: number): Promise<boolean> {
-    return this.database.query(
-      "DELETE FROM sandbox_documents WHERE account_id = ? AND resource_id = ? AND version = ?",
-    ).run(accountId, sandboxId, expectedVersion).changes === 1
-  }
 }
 
 export class SqliteSnapshotRepository implements SnapshotRepository {
@@ -269,18 +228,18 @@ export class SqliteSnapshotRepository implements SnapshotRepository {
 
   async list(input: ListRepositoryInput): Promise<RepositoryPage<SnapshotRecord>> {
     const limit = boundedLimit(input.limit)
-    const keys = this.cursors.decode(input.cursor, "snapshot", input.accountId, 1)
-    const rows = keys === undefined
+    const after = this.cursors.decode(input.cursor, SnapshotIdSchema)
+    const rows = after === undefined
       ? this.database.query<ResourceDocumentRow, [string, number]>(
           "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? ORDER BY resource_id LIMIT ?",
         ).all(input.accountId, limit + 1)
       : this.database.query<ResourceDocumentRow, [string, string, number]>(
           "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? AND resource_id > ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, keys[0]!, limit + 1)
+        ).all(input.accountId, after, limit + 1)
     const pageRows = rows.slice(0, limit)
     const items = pageRows.map((row) => parseSnapshot(row, input.accountId, row.resource_id)!)
     const last = pageRows.at(-1)
-    return { items, ...(rows.length > limit && last ? { nextCursor: this.cursors.encode("snapshot", input.accountId, [last.resource_id]) } : {}) }
+    return { items, ...(rows.length > limit && last ? { nextCursor: this.cursors.encode(last.resource_id) } : {}) }
   }
 
   async compareAndSwap(record: SnapshotRecord, expectedVersion: number): Promise<boolean> {
@@ -290,15 +249,10 @@ export class SqliteSnapshotRepository implements SnapshotRepository {
       .run(record.version, serialize(record), record.accountId, record.snapshotId, expectedVersion).changes === 1
   }
 
-  async conditionalDelete(accountId: string, snapshotId: SnapshotRecord["snapshotId"], expectedVersion: number): Promise<boolean> {
-    return this.database.query(
-      "DELETE FROM snapshot_documents WHERE account_id = ? AND resource_id = ? AND version = ?",
-    ).run(accountId, snapshotId, expectedVersion).changes === 1
-  }
 }
 
 export class SqliteIdempotencyRepository implements IdempotencyRepository {
-  constructor(private readonly database: Database, private readonly cursors: CursorCodec) {}
+  constructor(private readonly database: Database) {}
 
   async createIfAbsent(record: IdempotencyRecord): Promise<boolean> {
     return this.database.query(`INSERT OR IGNORE INTO idempotency_documents
@@ -314,25 +268,6 @@ export class SqliteIdempotencyRepository implements IdempotencyRepository {
     return parseIdempotency(row ?? undefined, input.accountId, input.scope, input.key)
   }
 
-  async list(input: ListRepositoryInput): Promise<RepositoryPage<IdempotencyRecord>> {
-    const limit = boundedLimit(input.limit)
-    const keys = this.cursors.decode(input.cursor, "idempotency", input.accountId, 2)
-    const rows = keys === undefined
-      ? this.database.query<IdempotencyDocumentRow, [string, number]>(
-          `SELECT account_id, scope, idempotency_key, version, expires_at, document
-           FROM idempotency_documents WHERE account_id = ? ORDER BY scope, idempotency_key LIMIT ?`,
-        ).all(input.accountId, limit + 1)
-      : this.database.query<IdempotencyDocumentRow, [string, string, string, string, number]>(
-          `SELECT account_id, scope, idempotency_key, version, expires_at, document FROM idempotency_documents
-           WHERE account_id = ? AND (scope > ? OR (scope = ? AND idempotency_key > ?))
-           ORDER BY scope, idempotency_key LIMIT ?`,
-        ).all(input.accountId, keys[0]!, keys[0]!, keys[1]!, limit + 1)
-    const pageRows = rows.slice(0, limit)
-    const items = pageRows.map((row) => parseIdempotency(row, input.accountId, row.scope, row.idempotency_key)!)
-    const last = pageRows.at(-1)
-    return { items, ...(rows.length > limit && last ? { nextCursor: this.cursors.encode("idempotency", input.accountId, [last.scope, last.idempotency_key]) } : {}) }
-  }
-
   async compareAndSwap(record: IdempotencyRecord, expectedVersion: number): Promise<boolean> {
     if (record.version !== expectedVersion + 1) return false
     return this.database.query(`UPDATE idempotency_documents SET version = ?, expires_at = ?, document = ?
@@ -340,15 +275,9 @@ export class SqliteIdempotencyRepository implements IdempotencyRepository {
       .run(record.version, record.expiresAt, serialize(record), record.accountId, record.scope, record.key, expectedVersion).changes === 1
   }
 
-  async conditionalDelete(input: IdempotencyKey, expectedVersion: number): Promise<boolean> {
-    return this.database.query(`DELETE FROM idempotency_documents
-      WHERE account_id = ? AND scope = ? AND idempotency_key = ? AND version = ?`)
-      .run(input.accountId, input.scope, input.key, expectedVersion).changes === 1
-  }
 }
 
 export interface SqliteRepositoryStoreOptions {
-  cursorKey: Uint8Array
   readonly?: boolean
   create?: boolean
 }
@@ -360,8 +289,8 @@ export class SqliteRepositoryStore {
   readonly idempotency: SqliteIdempotencyRepository
   #closed = false
 
-  constructor(filename: string, options: SqliteRepositoryStoreOptions) {
-    const cursors = new CursorCodec(options.cursorKey)
+  constructor(filename: string, options: SqliteRepositoryStoreOptions = {}) {
+    const cursors = new CursorCodec()
     const databaseOptions = { ...(options.readonly === undefined ? {} : { readonly: options.readonly }), ...(options.create === undefined ? {} : { create: options.create }) }
     this.database = Object.keys(databaseOptions).length === 0 ? new Database(filename) : new Database(filename, databaseOptions)
     this.database.exec("PRAGMA foreign_keys = OFF")
@@ -382,7 +311,7 @@ export class SqliteRepositoryStore {
     `)
     this.sandboxes = new SqliteSandboxRepository(this.database, cursors)
     this.snapshots = new SqliteSnapshotRepository(this.database, cursors)
-    this.idempotency = new SqliteIdempotencyRepository(this.database, cursors)
+    this.idempotency = new SqliteIdempotencyRepository(this.database)
   }
 
   close(): void {

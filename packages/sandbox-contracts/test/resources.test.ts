@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
   IdentitySchema,
-  ProviderCapabilitiesSchema,
   type Sandbox,
   SandboxIdSchema,
   SandboxSchema,
@@ -54,7 +53,7 @@ describe("public resources", () => {
   }
 
   test("accepts all canonical states", () => {
-    expect(SandboxStateSchema.options).toEqual(["provisioning", "running", "suspending", "suspended", "resuming", "terminating", "terminated", "failed"])
+    expect(SandboxStateSchema.options).toEqual(["provisioning", "running", "stopping", "stopped", "resuming", "terminating", "terminated", "failed"])
     expect(SnapshotStateSchema.options).toEqual(["creating", "ready", "failed", "deleting", "deleted"])
   })
 
@@ -81,12 +80,5 @@ describe("public resources", () => {
     expect(SandboxSchema.safeParse({ ...sandbox, lastError: { code: "provider_failure", message: "Provisioning failed" } }).success).toBe(true)
     expect(SandboxSchema.safeParse({ ...sandbox, lastError: { code: "box_direct_failed", message: "Provisioning failed" } }).success).toBe(false)
     expect(SnapshotSchema.safeParse({ ...snapshot, lastError: { code: "aws_error", message: "Capture failed" } }).success).toBe(false)
-  })
-
-  test("capabilities require exactly all six booleans", () => {
-    const capabilities = { suspend: true, resume: true, snapshots: true, createFromSnapshot: true, fork: true, streaming: true }
-    expect(ProviderCapabilitiesSchema.parse(capabilities)).toEqual(capabilities)
-    expect(ProviderCapabilitiesSchema.safeParse({ ...capabilities, streaming: "yes" }).success).toBe(false)
-    expect(ProviderCapabilitiesSchema.safeParse({ ...capabilities, provider: "box" }).success).toBe(false)
   })
 })

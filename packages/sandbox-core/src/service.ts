@@ -82,8 +82,9 @@ export class SandboxService {
     request: CreateSandboxRequest,
     options: CreateSandboxOptions = {},
   ): Promise<Sandbox> {
+    const providerSignal = options.signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
     const requestHash = await hashCreateRequest(request)
-    const now = this.#now()
     let reservation: IdempotencyRecord | undefined
     let reservationCanFail = true
 
@@ -98,7 +99,15 @@ export class SandboxService {
       }
     }
 
+    const source = request.sourceSnapshotId === undefined
+      ? undefined
+      : await this.#getReadySnapshotRecord(identity, request.sourceSnapshotId, providerSignal)
+    const providerName = source?.provider ?? this.#deps.defaultProvider
+    const provider = this.#provider(providerName)
+
+    providerSignal.throwIfAborted()
     const sandboxId = this.#sandboxId()
+    const now = this.#now()
 
     if (options.idempotencyKey !== undefined) {
       reservation = {
@@ -119,15 +128,6 @@ export class SandboxService {
     }
 
     try {
-      const source = request.sourceSnapshotId === undefined
-        ? undefined
-        : await this.#getReadySnapshotRecord(identity, request.sourceSnapshotId, options.signal ?? NEVER_ABORTED)
-      const providerName = source?.provider ?? this.#deps.defaultProvider
-      const provider = this.#provider(providerName)
-      if (source !== undefined && !provider.capabilities.createFromSnapshot) {
-        throw new DomainError("unsupported_capability", "The provider does not support creating from snapshots")
-      }
-
       const record: SandboxRecord = {
         accountId: identity.accountId,
         sandboxId,
@@ -150,9 +150,21 @@ export class SandboxService {
           sandboxId,
           ...(source === undefined ? {} : { sourceSnapshotRef: source.providerRef }),
           idempotencyKey: await providerIdempotencyKey(identity.accountId, sandboxId),
-          signal: options.signal ?? NEVER_ABORTED,
+          signal: providerSignal,
         })
+        providerSignal.throwIfAborted()
       } catch (error) {
+        if (providerSignal.aborted) {
+          if (observation !== undefined) {
+            try {
+              await this.#applySandboxObservation(record, "provisioning", {
+                state: "provisioning",
+                providerRef: observation.providerRef,
+              })
+            } catch {}
+          }
+          throw providerSignal.reason
+        }
         const domainError = mapProviderError(error)
         await this.#failSandbox(record, "provisioning", domainError)
         throw domainError
@@ -176,6 +188,7 @@ export class SandboxService {
       }
       return toSandbox(completed)
     } catch (error) {
+      if (providerSignal.aborted) throw providerSignal.reason
       const domainError = error instanceof DomainError ? error : mapProviderError(error)
       if (reservation !== undefined && reservationCanFail) await this.#failIdempotency(reservation, domainError)
       throw domainError
@@ -197,52 +210,62 @@ export class SandboxService {
     return { items: items.map(toSandbox), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) }
   }
 
-  async suspendSandbox(identity: Identity, sandboxId: SandboxId, signal?: AbortSignal): Promise<Sandbox> {
+  async stopSandbox(identity: Identity, sandboxId: SandboxId, signal?: AbortSignal): Promise<Sandbox> {
     const providerSignal = signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
     const existing = await this.#getSandboxRecord(identity, sandboxId)
-    if (existing.state !== "running") throw invalidState("suspend", existing.state)
     const existingProvider = this.#provider(existing.provider)
-    this.#requireCapability(existingProvider.capabilities.suspend, "suspend")
-    const record = await this.#claimSandboxTransition(identity, sandboxId, ["running"], "suspending")
-    const provider = this.#provider(record.provider)
+    const stopResume = this.#requireStopResume(existingProvider)
+    if (existing.state !== "running") throw invalidState("stop", existing.state)
+    const record = await this.#claimSandboxTransition(identity, sandboxId, ["running"], "stopping", providerSignal)
     try {
-      const observation = await provider.suspendSandbox({
+      const observation = await stopResume.stop({
         accountId: identity.accountId,
         providerRef: record.providerRef,
         signal: providerSignal,
       })
-      return toSandbox(await this.#applySandboxObservation(record, "suspending", observation))
+      providerSignal.throwIfAborted()
+      return toSandbox(await this.#applySandboxObservation(record, "stopping", observation))
     } catch (error) {
+      if (providerSignal.aborted) throw providerSignal.reason
       const domainError = mapProviderError(error)
-      await this.#failSandbox(record, "suspending", domainError)
+      await this.#failSandbox(record, "stopping", domainError)
       throw domainError
     }
   }
 
   async resumeSandbox(identity: Identity, sandboxId: SandboxId, signal?: AbortSignal): Promise<Sandbox> {
+    const providerSignal = signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
     const initial = await this.#getSandboxRecord(identity, sandboxId)
-    if (initial.state !== "suspended" && initial.state !== "resuming") {
+    this.#requireStopResume(this.#provider(initial.provider))
+    if (initial.state !== "stopped" && initial.state !== "resuming") {
       throw invalidState("resume", initial.state)
     }
-    return toSandbox(await this.#resumeRecord(identity, sandboxId, signal ?? NEVER_ABORTED))
+    return toSandbox(await this.#resumeRecord(identity, sandboxId, providerSignal))
   }
 
   async deleteSandbox(identity: Identity, sandboxId: SandboxId, signal?: AbortSignal): Promise<Sandbox> {
+    const providerSignal = signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
     const record = await this.#claimSandboxTransition(
       identity,
       sandboxId,
-      ["running", "suspended", "failed"],
+      ["running", "stopped", "failed"],
       "terminating",
+      providerSignal,
     )
     const provider = this.#provider(record.provider)
     try {
       const observation = await provider.deleteSandbox({
         accountId: identity.accountId,
         providerRef: record.providerRef,
-        signal: signal ?? NEVER_ABORTED,
+        signal: providerSignal,
       })
+      providerSignal.throwIfAborted()
       return toSandbox(await this.#applySandboxObservation(record, "terminating", observation))
     } catch (error) {
+      if (providerSignal.aborted) throw providerSignal.reason
       const domainError = mapProviderError(error)
       await this.#failSandbox(record, "terminating", domainError)
       throw domainError
@@ -255,10 +278,14 @@ export class SandboxService {
     request: CreateSnapshotRequest,
     signal?: AbortSignal,
   ): Promise<Snapshot> {
-    const sandbox = await this.#reconcileSandbox(await this.#getSandboxRecord(identity, sandboxId), signal ?? NEVER_ABORTED)
-    if (sandbox.state !== "running") throw invalidState("create a snapshot", sandbox.state)
-    const provider = this.#provider(sandbox.provider)
-    this.#requireCapability(provider.capabilities.snapshots, "snapshots")
+    const providerSignal = signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
+    const existing = await this.#getSandboxRecord(identity, sandboxId)
+    const provider = this.#provider(existing.provider)
+    const snapshots = this.#requireSnapshots(provider)
+    const sandbox = await this.#reconcileSandbox(existing, providerSignal)
+    if (sandbox.state !== "running" && sandbox.state !== "stopped") throw invalidState("create a snapshot", sandbox.state)
+    providerSignal.throwIfAborted()
     const snapshotId = this.#snapshotId()
     const now = this.#now()
     const record: SnapshotRecord = {
@@ -277,15 +304,28 @@ export class SandboxService {
     if (!await this.#deps.snapshots.createIfAbsent(record)) {
       throw new DomainError("conflict", "The generated snapshot ID is already in use")
     }
+    let observation
     try {
-      const observation = await provider.createSnapshot({
+      observation = await snapshots.create({
         accountId: identity.accountId,
         snapshotId,
         sandboxRef: sandbox.providerRef,
-        signal: signal ?? NEVER_ABORTED,
+        signal: providerSignal,
       })
+      providerSignal.throwIfAborted()
       return toSnapshot(await this.#applySnapshotObservation(record, "creating", observation))
     } catch (error) {
+      if (providerSignal.aborted) {
+        if (observation !== undefined) {
+          try {
+            await this.#applySnapshotObservation(record, "creating", {
+              state: "creating",
+              providerRef: observation.providerRef,
+            })
+          } catch {}
+        }
+        throw providerSignal.reason
+      }
       const domainError = mapProviderError(error)
       await this.#failSnapshot(record, "creating", domainError)
       throw domainError
@@ -294,6 +334,7 @@ export class SandboxService {
 
   async getSnapshot(identity: Identity, snapshotId: SnapshotId, signal?: AbortSignal): Promise<Snapshot> {
     const record = await this.#getSnapshotRecord(identity, snapshotId)
+    this.#requireSnapshots(this.#provider(record.provider))
     return toSnapshot(await this.#reconcileSnapshot(record, signal ?? NEVER_ABORTED))
   }
 
@@ -303,25 +344,29 @@ export class SandboxService {
       ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
       limit: request.limit ?? DEFAULT_LIMIT,
     })
+    for (const record of page.items) this.#requireSnapshots(this.#provider(record.provider))
     const items = await Promise.all(page.items.map((record) => this.#reconcileSnapshot(record, signal ?? NEVER_ABORTED)))
     return { items: items.map(toSnapshot), ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }) }
   }
 
   async deleteSnapshot(identity: Identity, snapshotId: SnapshotId, signal?: AbortSignal): Promise<Snapshot> {
+    const providerSignal = signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
     const existing = await this.#getSnapshotRecord(identity, snapshotId)
+    const snapshots = this.#requireSnapshots(this.#provider(existing.provider))
     if (existing.state !== "ready" && existing.state !== "failed") throw invalidState("delete", existing.state)
-    this.#requireCapability(this.#provider(existing.provider).capabilities.snapshots, "snapshots")
-    const record = await this.#claimSnapshotTransition(identity, snapshotId, ["ready", "failed"], "deleting")
-    const provider = this.#provider(record.provider)
+    const record = await this.#claimSnapshotTransition(identity, snapshotId, ["ready", "failed"], "deleting", providerSignal)
     try {
-      const observation = await provider.deleteSnapshot({
+      const observation = await snapshots.delete({
         accountId: identity.accountId,
         snapshotId,
         providerRef: record.providerRef,
-        signal: signal ?? NEVER_ABORTED,
+        signal: providerSignal,
       })
+      providerSignal.throwIfAborted()
       return toSnapshot(await this.#applySnapshotObservation(record, "deleting", observation))
     } catch (error) {
+      if (providerSignal.aborted) throw providerSignal.reason
       const domainError = mapProviderError(error)
       await this.#failSnapshot(record, "deleting", domainError)
       throw domainError
@@ -335,7 +380,9 @@ export class SandboxService {
     arguments_: ToolArgumentsByName[N],
     signal?: AbortSignal,
   ): Promise<AsyncIterable<ToolEventByName[N]>> {
-    const sandbox = await this.#ensureRunning(identity, sandboxId, signal ?? NEVER_ABORTED)
+    const providerSignal = signal ?? NEVER_ABORTED
+    providerSignal.throwIfAborted()
+    const sandbox = await this.#ensureRunning(identity, sandboxId, providerSignal)
     const provider = this.#provider(sandbox.provider)
     let events: AsyncIterable<ToolEventByName[N]>
     try {
@@ -344,12 +391,13 @@ export class SandboxService {
         providerRef: sandbox.providerRef,
         toolName,
         arguments: arguments_,
-        signal: signal ?? NEVER_ABORTED,
+        signal: providerSignal,
       })
     } catch (error) {
+      if (providerSignal.aborted) throw providerSignal.reason
       throw mapProviderError(error)
     }
-    return mapToolErrors(events)
+    return mapToolErrors(events, providerSignal)
   }
 
   async #resolveExistingCreate(identity: Identity, key: string, requestHash: string): Promise<Sandbox> {
@@ -416,10 +464,12 @@ export class SandboxService {
     sandboxId: SandboxId,
     allowed: SandboxState[],
     transition: SandboxState,
+    signal: AbortSignal = NEVER_ABORTED,
   ): Promise<SandboxRecord> {
     let current = await this.#getSandboxRecord(identity, sandboxId)
     for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
       if (!allowed.includes(current.state)) throw invalidState(transition, current.state)
+      signal.throwIfAborted()
       const updated: SandboxRecord = {
         ...current,
         state: transition,
@@ -438,10 +488,12 @@ export class SandboxService {
     snapshotId: SnapshotId,
     allowed: SnapshotState[],
     transition: SnapshotState,
+    signal: AbortSignal = NEVER_ABORTED,
   ): Promise<SnapshotRecord> {
     let current = await this.#getSnapshotRecord(identity, snapshotId)
     for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
       if (!allowed.includes(current.state)) throw invalidState(transition, current.state)
+      signal.throwIfAborted()
       const updated: SnapshotRecord = {
         ...current,
         state: transition,
@@ -539,11 +591,14 @@ export class SandboxService {
 
   async #reconcileSandbox(record: SandboxRecord, signal: AbortSignal): Promise<SandboxRecord> {
     if (!isTransitionalSandbox(record.state)) return record
+    signal.throwIfAborted()
     const provider = this.#provider(record.provider)
     let observation
     try {
       observation = await provider.inspectSandbox({ accountId: record.accountId, providerRef: record.providerRef, signal })
+      signal.throwIfAborted()
     } catch (error) {
+      if (signal.aborted) throw signal.reason
       throw mapProviderError(error)
     }
     return this.#applySandboxObservation(record, record.state, observation)
@@ -551,16 +606,20 @@ export class SandboxService {
 
   async #reconcileSnapshot(record: SnapshotRecord, signal: AbortSignal): Promise<SnapshotRecord> {
     if (record.state !== "creating" && record.state !== "deleting") return record
+    signal.throwIfAborted()
     const provider = this.#provider(record.provider)
+    const snapshots = this.#requireSnapshots(provider)
     let observation
     try {
-      observation = await provider.inspectSnapshot({
+      observation = await snapshots.inspect({
         accountId: record.accountId,
         snapshotId: record.snapshotId,
         providerRef: record.providerRef,
         signal,
       })
+      signal.throwIfAborted()
     } catch (error) {
+      if (signal.aborted) throw signal.reason
       throw mapProviderError(error)
     }
     return this.#applySnapshotObservation(record, record.state, observation)
@@ -573,14 +632,25 @@ export class SandboxService {
       if (current.state === "running") return current
       if (current.state === "resuming") {
         const active = this.#resumeOperations.get(operationKey)
-        if (active !== undefined) return active
+        if (active !== undefined) {
+          try {
+            return await waitForResume(active, signal)
+          } catch (error) {
+            if (signal.aborted) throw signal.reason
+            const latest = await this.#getSandboxRecord(identity, sandboxId)
+            if (latest.state !== "resuming") throw error
+            const reconciled = await this.#reconcileSandbox(latest, signal)
+            if (reconciled.state === "running") return reconciled
+            continue
+          }
+        }
         const reconciled = await this.#reconcileSandbox(current, signal)
         if (reconciled.state === "running") return reconciled
         continue
       }
-      if (current.state !== "suspended") throw invalidState("resume", current.state)
+      if (current.state !== "stopped") throw invalidState("resume", current.state)
       const provider = this.#provider(current.provider)
-      this.#requireCapability(provider.capabilities.resume, "resume")
+      const stopResume = this.#requireStopResume(provider)
       const claimed: SandboxRecord = {
         ...current,
         state: "resuming",
@@ -588,27 +658,30 @@ export class SandboxService {
         updatedAt: this.#now(),
         lastError: undefined,
       }
+      signal.throwIfAborted()
       if (!await this.#deps.sandboxes.compareAndSwap(claimed, current.version)) continue
-      const operation = this.#finishResume(claimed, provider, signal)
+      const operation = this.#finishResume(claimed, stopResume, signal)
       this.#resumeOperations.set(operationKey, operation)
-      try {
-        return await operation
-      } finally {
+      const clearOperation = () => {
         if (this.#resumeOperations.get(operationKey) === operation) this.#resumeOperations.delete(operationKey)
       }
+      void operation.then(clearOperation, clearOperation)
+      return waitForResume(operation, signal)
     }
     throw new DomainError("conflict", "The sandbox resume is still in progress")
   }
 
-  async #finishResume(record: SandboxRecord, provider: SandboxProvider, signal: AbortSignal): Promise<SandboxRecord> {
+  async #finishResume(record: SandboxRecord, stopResume: NonNullable<SandboxProvider["stopResume"]>, signal: AbortSignal): Promise<SandboxRecord> {
     try {
-      const observation = await provider.resumeSandbox({
+      const observation = await stopResume.resume({
         accountId: record.accountId,
         providerRef: record.providerRef,
         signal,
       })
+      signal.throwIfAborted()
       return await this.#applySandboxObservation(record, "resuming", observation)
     } catch (error) {
+      if (signal.aborted) throw signal.reason
       const domainError = mapProviderError(error)
       await this.#failSandbox(record, "resuming", domainError)
       throw domainError
@@ -619,7 +692,8 @@ export class SandboxService {
     for (let attempt = 0; attempt < this.#reconciliationAttempts; attempt++) {
       const current = await this.#getSandboxRecord(identity, sandboxId)
       if (current.state === "running") return current
-      if (current.state === "suspended" || current.state === "resuming") {
+      if (current.state === "stopped" || current.state === "resuming") {
+        this.#requireStopResume(this.#provider(current.provider))
         const resumed = await this.#resumeRecord(identity, sandboxId, signal)
         if (resumed.state === "running") return resumed
         continue
@@ -651,7 +725,9 @@ export class SandboxService {
     snapshotId: SnapshotId,
     signal: AbortSignal,
   ): Promise<SnapshotRecord> {
-    const record = await this.#reconcileSnapshot(await this.#getSnapshotRecord(identity, snapshotId), signal)
+    const existing = await this.#getSnapshotRecord(identity, snapshotId)
+    this.#requireSnapshots(this.#provider(existing.provider))
+    const record = await this.#reconcileSnapshot(existing, signal)
     if (record.state !== "ready") throw invalidState("create a sandbox from the snapshot", record.state)
     return record
   }
@@ -662,8 +738,14 @@ export class SandboxService {
     return provider
   }
 
-  #requireCapability(supported: boolean, capability: string): void {
-    if (!supported) throw new DomainError("unsupported_capability", `The provider does not support ${capability}`)
+  #requireStopResume(provider: SandboxProvider): NonNullable<SandboxProvider["stopResume"]> {
+    if (provider.stopResume === undefined) throw new DomainError("unsupported_capability", "The provider does not support stop/resume")
+    return provider.stopResume
+  }
+
+  #requireSnapshots(provider: SandboxProvider): NonNullable<SandboxProvider["snapshots"]> {
+    if (provider.snapshots === undefined) throw new DomainError("unsupported_capability", "The provider does not support snapshots")
+    return provider.snapshots
   }
 
   #sandboxId(): SandboxId {
@@ -728,22 +810,22 @@ function invalidState(operation: string, state: string): DomainError {
 }
 
 function isTransitionalSandbox(state: SandboxState): boolean {
-  return state === "provisioning" || state === "suspending" || state === "resuming" || state === "terminating"
+  return state === "provisioning" || state === "stopping" || state === "resuming" || state === "terminating"
 }
 
 function isAllowedSandboxObservation(transition: SandboxState, observed: SandboxState): boolean {
   if (observed === transition || observed === "failed") return true
   if (transition === "provisioning") return observed === "running"
-  if (transition === "suspending") return observed === "suspended"
+  if (transition === "stopping") return observed === "stopped"
   if (transition === "resuming") return observed === "running"
   if (transition === "terminating") return observed === "terminated"
   return false
 }
 
 function isStaleSandboxObservation(transition: SandboxState, observed: SandboxState): boolean {
-  if (transition === "suspending") return observed === "running"
-  if (transition === "resuming") return observed === "suspended"
-  if (transition === "terminating") return observed === "running" || observed === "suspended"
+  if (transition === "stopping") return observed === "running"
+  if (transition === "resuming") return observed === "stopped"
+  if (transition === "terminating") return observed === "running" || observed === "stopped"
   return false
 }
 
@@ -758,10 +840,29 @@ function isStaleSnapshotObservation(transition: SnapshotState, observed: Snapsho
   return transition === "deleting" && observed === "ready"
 }
 
-async function* mapToolErrors<T>(events: AsyncIterable<T>): AsyncIterable<T> {
+async function* mapToolErrors<T>(events: AsyncIterable<T>, signal: AbortSignal): AsyncIterable<T> {
   try {
     for await (const event of events) yield event
   } catch (error) {
+    if (signal.aborted) throw signal.reason
     throw mapProviderError(error)
   }
+}
+
+function waitForResume<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener("abort", onAbort, { once: true })
+    void operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort)
+        reject(error)
+      },
+    )
+  })
 }

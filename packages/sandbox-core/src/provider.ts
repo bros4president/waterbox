@@ -9,7 +9,6 @@ import type {
   GrepToolEvent,
   PatchToolArguments,
   PatchToolEvent,
-  ProviderCapabilities,
   ReadToolArguments,
   ReadToolEvent,
   SandboxId,
@@ -21,8 +20,6 @@ import type {
   WriteToolEvent,
 } from "@waterbox/contracts"
 import type { JsonValue } from "./records.ts"
-
-export type { ProviderCapabilities } from "@waterbox/contracts"
 
 export interface ToolArgumentsByName {
   read: ReadToolArguments
@@ -98,14 +95,17 @@ export class ProviderError extends Error {
 
 export interface SandboxProvider {
   readonly name: string
-  readonly capabilities: ProviderCapabilities
   createSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation>
   inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
-  suspendSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
-  resumeSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
-  createSnapshot(input: ProviderCreateSnapshotInput): Promise<ProviderSnapshotObservation>
-  inspectSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation>
-  deleteSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation>
   executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]>
+  readonly stopResume?: {
+    stop(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
+    resume(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
+  }
+  readonly snapshots?: {
+    create(input: ProviderCreateSnapshotInput): Promise<ProviderSnapshotObservation>
+    inspect(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation>
+    delete(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation>
+  }
 }

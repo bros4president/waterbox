@@ -1,8 +1,6 @@
 import {
-  AccountIdSchema, BashToolArgumentsSchema, BashToolEventSchema, EditToolArgumentsSchema, EditToolEventSchema,
-  GlobToolArgumentsSchema, GlobToolEventSchema, GrepToolArgumentsSchema, GrepToolEventSchema,
-  IdempotencyKeySchema, PatchToolArgumentsSchema, PatchToolEventSchema, ReadToolArgumentsSchema, ReadToolEventSchema,
-  SandboxIdSchema, SnapshotIdSchema, ToolNameSchema, WriteToolArgumentsSchema, WriteToolEventSchema,
+  BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema, PatchToolEventSchema,
+  ReadToolEventSchema, WriteToolEventSchema,
   type SandboxState, type SnapshotState, type ToolName,
 } from "@waterbox/contracts"
 import {
@@ -34,7 +32,6 @@ const MAX_JSON_BYTES = 1_048_576
 const MAX_NDJSON_BYTES = 4_194_304
 const MAX_NDJSON_LINE_BYTES = 1_048_576
 const EVENT_SCHEMAS = { read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema, bash: BashToolEventSchema }
-const ARGUMENT_SCHEMAS = { read: ReadToolArgumentsSchema, write: WriteToolArgumentsSchema, edit: EditToolArgumentsSchema, patch: PatchToolArgumentsSchema, glob: GlobToolArgumentsSchema, grep: GrepToolArgumentsSchema, bash: BashToolArgumentsSchema }
 class BoxHttpError extends ProviderError { constructor(readonly status: number) { super("failure", `Box request failed (${status})`) } }
 
 export class SystemBoxProviderClock implements BoxProviderClock {
@@ -53,7 +50,15 @@ export class SystemBoxProviderClock implements BoxProviderClock {
 
 export class BoxSandboxProvider implements SandboxProvider {
   readonly name = "box"
-  readonly capabilities = { suspend: true, resume: true, snapshots: true, createFromSnapshot: true, fork: true, streaming: true } as const
+  readonly stopResume = {
+    stop: (input: ProviderOperationInput) => this.#stopSandbox(input),
+    resume: (input: ProviderOperationInput) => this.#resumeSandbox(input),
+  }
+  readonly snapshots = {
+    create: (input: ProviderCreateSnapshotInput) => this.#createSnapshot(input),
+    inspect: (input: ProviderSnapshotOperationInput) => this.#inspectSnapshot(input),
+    delete: (input: ProviderSnapshotOperationInput) => this.#deleteSnapshot(input),
+  }
   readonly #config: Readonly<BoxProviderConfig>
   readonly #fetch: BoxProviderFetch
   readonly #clock: BoxProviderClock
@@ -87,16 +92,16 @@ export class BoxSandboxProvider implements SandboxProvider {
     const refreshed = READY.has(box.state) ? await this.#registerHosting(withoutDaemon(ref), input.signal) : ref
     return { state: mapSandboxState(box.state), providerRef: refreshed as unknown as JsonValue }
   }
-  async suspendSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
+  async #stopSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     validateOperationInput(input)
     const ref = sandboxRef(input.providerRef)
-    const box = actionBox(await this.#boxJson("POST", `/boxes/${segment(ref.boxId)}/stop`, input.signal, { expectedStatuses: [202] }), ref.boxId)
+    const box = actionBox(await this.#boxJson("POST", `/boxes/${segment(ref.boxId)}/stop`, input.signal, { expectedStatuses: [202] }), ref.boxId, "box.stopping")
     return { state: mapSandboxState(box.state), providerRef: withoutDaemon(ref) as unknown as JsonValue }
   }
-  async resumeSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
+  async #resumeSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     validateOperationInput(input)
     const ref = sandboxRef(input.providerRef)
-    const resumed = actionBox(await this.#boxJson("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { expectedStatuses: [202] }), ref.boxId)
+    const resumed = actionBox(await this.#boxJson("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { expectedStatuses: [202] }), ref.boxId, "box.resuming")
     const ready = await this.#waitForReady(resumed, input.signal)
     const refreshed = await this.#registerHosting(withoutDaemon(ref), input.signal)
     return { state: mapSandboxState(ready.state), providerRef: refreshed as unknown as JsonValue }
@@ -104,23 +109,23 @@ export class BoxSandboxProvider implements SandboxProvider {
   async deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     validateOperationInput(input)
     const ref = sandboxRef(input.providerRef)
-    const operation = deletionOperation(await this.#boxJson("DELETE", `/boxes/${segment(ref.boxId)}`, input.signal, { headers: { "x-ascii-confirm-delete": ref.boxId }, expectedStatuses: [202] }), ref.boxId, "box", undefined, "box.deleting")
+    const operation = deletionOperation(await this.#boxJson("DELETE", `/boxes/${segment(ref.boxId)}`, input.signal, { headers: { "x-ascii-confirm-delete": ref.boxId }, expectedStatuses: [202] }), "box.deleting", ref.boxId)
     await this.#waitForDeletion(operation.id, ref.boxId, input.signal)
     return { state: "terminated", providerRef: withoutDaemon(ref) as unknown as JsonValue }
   }
-  async createSnapshot(input: ProviderCreateSnapshotInput): Promise<ProviderSnapshotObservation> {
+  async #createSnapshot(input: ProviderCreateSnapshotInput): Promise<ProviderSnapshotObservation> {
     validateCreateSnapshotInput(input)
     const ref = sandboxRef(input.sandboxRef)
     const name = await internalSnapshotName(input.accountId, input.snapshotId)
     try {
-      const snapshot = namedSnapshot(await this.#boxJson("POST", "/named-snapshots", input.signal, { body: { boxId: ref.boxId, name }, expectedStatuses: [202] }), name, ref.boxId)
+      const snapshot = namedSnapshot(await this.#boxJson("POST", "/named-snapshots", input.signal, { body: { boxId: ref.boxId, name }, expectedStatuses: [202] }), "snapshot.named.saving", name, ref.boxId)
       return { state: mapSnapshotState(snapshot.status), providerRef: { kind: "box-named-snapshot-v1", name } }
     } catch (error) {
       if (input.signal.aborted) throw input.signal.reason ?? error
       if (error instanceof ProviderError && error.kind === "limit") throw error
       if (error instanceof BoxHttpError && error.status < 500) throw error
       try {
-        const snapshot = namedSnapshot(await this.#boxJson("GET", `/named-snapshots/${segment(name)}`, input.signal, { expectedStatuses: [200] }), name, ref.boxId)
+        const snapshot = namedSnapshot(await this.#boxJson("GET", `/named-snapshots/${segment(name)}`, input.signal, { expectedStatuses: [200] }), "snapshot.named.info", name, ref.boxId)
         return { state: mapSnapshotState(snapshot.status), providerRef: { kind: "box-named-snapshot-v1", name } }
       } catch (lookupError) {
         if (input.signal.aborted) throw input.signal.reason ?? lookupError
@@ -129,13 +134,13 @@ export class BoxSandboxProvider implements SandboxProvider {
       }
     }
   }
-  async inspectSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation> {
+  async #inspectSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation> {
     validateSnapshotOperationInput(input)
     const ref = snapshotRef(input.providerRef)
-    const snapshot = namedSnapshot(await this.#boxJson("GET", `/named-snapshots/${segment(ref.name)}`, input.signal, { expectedStatuses: [200] }), ref.name)
+    const snapshot = namedSnapshot(await this.#boxJson("GET", `/named-snapshots/${segment(ref.name)}`, input.signal, { expectedStatuses: [200] }), "snapshot.named.info", ref.name)
     return { state: mapSnapshotState(snapshot.status), providerRef: ref as unknown as JsonValue }
   }
-  async deleteSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation> {
+  async #deleteSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation> {
     validateSnapshotOperationInput(input)
     const ref = snapshotRef(input.providerRef)
     namedSnapshotDeleted(await this.#boxJson("DELETE", `/named-snapshots/${segment(ref.name)}`, input.signal, { expectedStatuses: [200] }), ref.name)
@@ -199,7 +204,7 @@ export class BoxSandboxProvider implements SandboxProvider {
   async #waitForDeletion(operationId: string, targetId: string, signal: AbortSignal): Promise<void> {
     const deadline = this.#clockTime() + this.#config.polling.timeoutMs
     while (true) {
-      const operation = deletionOperation(await this.#boxJson("GET", `/deletion-operations/${segment(operationId)}`, signal, { expectedStatuses: [200] }), targetId, "box", operationId, "deletion.operation")
+      const operation = deletionOperation(await this.#boxJson("GET", `/deletion-operations/${segment(operationId)}`, signal, { expectedStatuses: [200] }), "deletion.operation", targetId, operationId)
       if (operation.status === "completed") return
       if (operation.status === "blocked") throw new ProviderError("failure", "Box deletion is blocked")
       if (this.#clockTime() >= deadline) throw new ProviderError("failure", "Box deletion timed out")
@@ -232,7 +237,7 @@ export class BoxSandboxProvider implements SandboxProvider {
 }
 
 function sandboxRef(value: JsonValue): SandboxRef {
-  if (!isExactObject(value, ["kind", "boxId"], ["daemonUrl"]) || value.kind !== "box-sandbox-v1" || !strictNonempty(value.boxId) || (value.daemonUrl !== undefined && !validProtectedUrl(value.daemonUrl))) throw new ProviderError("failure", "The Box sandbox reference is invalid")
+  if (!isExactObject(value, ["kind", "boxId"], ["daemonUrl"]) || value.kind !== "box-sandbox-v1" || typeof value.boxId !== "string" || !BOX_ID.test(value.boxId) || (value.daemonUrl !== undefined && !validProtectedUrl(value.daemonUrl))) throw new ProviderError("failure", "The Box sandbox reference is invalid")
   return { kind: "box-sandbox-v1", boxId: value.boxId, ...(typeof value.daemonUrl === "string" ? { daemonUrl: value.daemonUrl } : {}) }
 }
 function snapshotRef(value: JsonValue): SnapshotRef {
@@ -245,22 +250,21 @@ function boxDto(value: unknown): BoxDto {
 }
 function correlatedBox(value: unknown, expectedId: string): BoxDto { const dto = boxDto(value); if (dto.id !== expectedId) throw new ProviderError("failure", "Box returned a mismatched response"); return dto }
 function success(value: unknown, type: string): Record<string, unknown> { if (!isObject(value) || value.ok !== true || value.type !== type) throw new ProviderError("failure", "Box returned an invalid response"); return value }
-function createdBox(value: unknown): BoxDto { const envelope = success(value, "box.created"); if (envelope.status !== "provisioning" || !(envelope.ttlSeconds === null || Number.isInteger(envelope.ttlSeconds))) throw new ProviderError("failure", "Box returned an invalid response"); return boxDto(envelope.box) }
+function createdBox(value: unknown): BoxDto { const envelope = success(value, "box.created"); if (envelope.status !== "provisioning") throw new ProviderError("failure", "Box returned an invalid response"); return boxDto(envelope.box) }
 function infoBox(value: unknown, id: string): BoxDto { const envelope = success(value, "box.info"); return correlatedBox(envelope.box, id) }
-function actionBox(value: unknown, id: string): BoxDto { if (!isObject(value) || value.ok !== true || !["box.stopping", "box.resuming"].includes(String(value.type)) || value.id !== id || value.status !== (value.type === "box.stopping" ? "archiving" : "resuming")) throw new ProviderError("failure", "Box returned an invalid response"); return value.box == null ? { id, state: value.type === "box.stopping" ? "archiving" : "provisioning" } : correlatedBox(value.box, id) }
-function namedSnapshot(value: unknown, name: string, sourceBoxId?: string): { name: string; status: typeof SNAPSHOT_STATES[number] } { if (!isObject(value) || value.ok !== true || !["snapshot.named.saving", "snapshot.named.info"].includes(String(value.type)) || (value.type === "snapshot.named.saving" && value.status !== "saving") || !isObject(value.snapshot) || value.snapshot.name !== name || !BOX_ID.test(String(value.snapshot.sourceBoxId)) || (sourceBoxId !== undefined && value.snapshot.sourceBoxId !== sourceBoxId) || !canonicalTimestamp(value.snapshot.createdAt) || !SNAPSHOT_STATES.includes(value.snapshot.status as any) || (value.snapshot.status === "ready" && !strictNonempty(value.snapshot.snapshotId)) || (value.snapshot.snapshotId !== undefined && !strictNonempty(value.snapshot.snapshotId))) throw new ProviderError("failure", "Box returned an invalid response"); return { name, status: value.snapshot.status as any } }
+function actionBox(value: unknown, id: string, type: "box.stopping" | "box.resuming"): BoxDto { const status = type === "box.stopping" ? "archiving" : "resuming"; if (!isObject(value) || value.ok !== true || value.type !== type || value.id !== id || value.status !== status) throw new ProviderError("failure", "Box returned an invalid response"); return value.box == null ? { id, state: type === "box.stopping" ? "archiving" : "provisioning" } : correlatedBox(value.box, id) }
+function namedSnapshot(value: unknown, type: "snapshot.named.saving" | "snapshot.named.info", name: string, sourceBoxId?: string): { name: string; status: typeof SNAPSHOT_STATES[number] } { if (!isObject(value) || value.ok !== true || value.type !== type || (type === "snapshot.named.saving" && value.status !== "saving") || !isObject(value.snapshot) || value.snapshot.name !== name || !BOX_ID.test(String(value.snapshot.sourceBoxId)) || (sourceBoxId !== undefined && value.snapshot.sourceBoxId !== sourceBoxId) || !SNAPSHOT_STATES.includes(value.snapshot.status as any) || (value.snapshot.status === "ready" && !strictNonempty(value.snapshot.snapshotId)) || (value.snapshot.snapshotId !== undefined && !strictNonempty(value.snapshot.snapshotId))) throw new ProviderError("failure", "Box returned an invalid response"); return { name, status: value.snapshot.status as any } }
 function namedSnapshotDeleted(value: unknown, name: string): void { const envelope = success(value, "snapshot.named.deleted"); if (envelope.name !== name || envelope.status !== "deleted") throw new ProviderError("failure", "Box returned a mismatched response") }
-function hostResponse(value: unknown, port: number): string { if (!isObject(value) || value.ok !== true || value.type !== "port.hosted" || value.success !== true || value.port !== port || value.isProtected !== true || value.access !== "private" || !validProtectedUrl(value.url) || new URL(value.url).searchParams.get("_token") === null) throw new ProviderError("failure", "Box returned an invalid hosting response"); return value.url }
-function deletionOperation(value: unknown, targetId: string, kind: "box" | "snapshot", operationId?: string, expectedType?: string): { id: string; status: "pending" | "processing" | "blocked" | "completed" } { if (!isObject(value) || value.ok !== true || (expectedType !== undefined ? value.type !== expectedType : !["box.deleting", "snapshot.deleting", "deletion.operation"].includes(String(value.type))) || !isObject(value.operation)) throw new ProviderError("failure", "Box returned an invalid deletion response"); const op = value.operation; if (!DELETION_ID.test(String(op.id)) || (operationId !== undefined && op.id !== operationId) || op.kind !== kind || op.targetId !== targetId || !["pending", "processing", "blocked", "completed"].includes(String(op.status))) throw new ProviderError("failure", "Box returned a mismatched deletion response"); return { id: op.id as string, status: op.status as any } }
+function hostResponse(value: unknown, port: number): string { if (!isObject(value) || value.ok !== true || value.type !== "port.hosted" || value.success !== true || value.port !== port || value.isProtected !== true || value.access !== "private" || !validProtectedUrl(value.url)) throw new ProviderError("failure", "Box returned an invalid hosting response"); return value.url }
+function deletionOperation(value: unknown, type: "box.deleting" | "deletion.operation", targetId: string, operationId?: string): { id: string; status: "pending" | "processing" | "blocked" | "completed" } { if (!isObject(value) || value.ok !== true || value.type !== type || !isObject(value.operation)) throw new ProviderError("failure", "Box returned an invalid deletion response"); const op = value.operation; if (!DELETION_ID.test(String(op.id)) || (operationId !== undefined && op.id !== operationId) || op.kind !== "box" || op.targetId !== targetId || !["pending", "processing", "blocked", "completed"].includes(String(op.status))) throw new ProviderError("failure", "Box returned a mismatched deletion response"); return { id: op.id as string, status: op.status as any } }
 function configurationUrl(value: unknown): string {
   if (!strictNonempty(value)) throw new TypeError("Box provider configuration is invalid")
-  try { const url = new URL(value); if (!/^https?:$/.test(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(); return url.href.replace(/\/+$/, "") }
+  try { const url = new URL(value); if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error(); return url.href.replace(/\/+$/, "") }
   catch { throw new TypeError("Box provider configuration is invalid") }
 }
-function canonicalTimestamp(value: unknown): value is string { return typeof value === "string" && Number.isFinite(Date.parse(value)) }
-function validProtectedUrl(value: unknown): value is string { if (!strictNonempty(value)) return false; try { const url = new URL(value); return /^https?:$/.test(url.protocol) && !url.username && !url.password && !url.hash } catch { return false } }
+function validProtectedUrl(value: unknown): value is string { if (!strictNonempty(value)) return false; try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.hash && strictNonempty(url.searchParams.get("_token")) } catch { return false } }
 function daemonToolUrl(base: string, toolName: ToolName): URL { const url = new URL(base); url.pathname = `${url.pathname.replace(/\/+$/, "")}/v1/tools/${toolName}`; return url }
-function mapSandboxState(state: BoxState): SandboxState { if (READY.has(state)) return "running"; if (["init", "provisioning", "provisioned", "cloning"].includes(state)) return "provisioning"; if (state === "archiving") return "suspending"; if (state === "archived") return "suspended"; return "failed" }
+function mapSandboxState(state: BoxState): SandboxState { if (READY.has(state) || state === "running") return "running"; if (["init", "provisioning", "provisioned", "cloning"].includes(state)) return "provisioning"; if (state === "archiving") return "stopping"; if (state === "archived") return "stopped"; return "failed" }
 function mapSnapshotState(state: typeof SNAPSHOT_STATES[number]): SnapshotState { return state === "saving" ? "creating" : state }
 function withoutDaemon(ref: SandboxRef): SandboxRef { return { kind: ref.kind, boxId: ref.boxId } }
 function segment(value: string): string { return encodeURIComponent(value) }
@@ -316,34 +320,31 @@ function cancelDetached(reader: ReadableStreamDefaultReader<Uint8Array>, reason:
 function cancelStreamDetached(stream: ReadableStream<Uint8Array> | null): void { if (!stream) return; try { void stream.cancel().catch(() => undefined) } catch {} }
 
 function validateCreateSandboxInput(value: unknown): asserts value is ProviderCreateSandboxInput {
-  if (!isExactObject(value, ["accountId", "sandboxId", "idempotencyKey", "signal"], ["sourceSnapshotRef"]) || !canonical(AccountIdSchema, value.accountId) || !canonical(SandboxIdSchema, value.sandboxId) || !canonical(IdempotencyKeySchema, value.idempotencyKey) || !strictNonempty(value.idempotencyKey) || !isAbortSignal(value.signal)) invalidInput()
+  if (!isObject(value) || !isAbortSignal(value.signal)) invalidInput()
   value.signal.throwIfAborted()
   if (value.sourceSnapshotRef !== undefined) snapshotRef(value.sourceSnapshotRef as JsonValue)
 }
 function validateOperationInput(value: unknown): asserts value is ProviderOperationInput {
-  if (!isExactObject(value, ["accountId", "providerRef", "signal"]) || !canonical(AccountIdSchema, value.accountId) || !isAbortSignal(value.signal)) invalidInput()
+  if (!isObject(value) || !isAbortSignal(value.signal)) invalidInput()
   value.signal.throwIfAborted()
   sandboxRef(value.providerRef as JsonValue)
 }
 function validateCreateSnapshotInput(value: unknown): asserts value is ProviderCreateSnapshotInput {
-  if (!isExactObject(value, ["accountId", "snapshotId", "sandboxRef", "signal"]) || !canonical(AccountIdSchema, value.accountId) || !canonical(SnapshotIdSchema, value.snapshotId) || !isAbortSignal(value.signal)) invalidInput()
+  if (!isObject(value) || !isAbortSignal(value.signal)) invalidInput()
   value.signal.throwIfAborted()
   sandboxRef(value.sandboxRef as JsonValue)
 }
 function validateSnapshotOperationInput(value: unknown): asserts value is ProviderSnapshotOperationInput {
-  if (!isExactObject(value, ["accountId", "snapshotId", "providerRef", "signal"]) || !canonical(AccountIdSchema, value.accountId) || !canonical(SnapshotIdSchema, value.snapshotId) || !isAbortSignal(value.signal)) invalidInput()
+  if (!isObject(value) || !isAbortSignal(value.signal)) invalidInput()
   value.signal.throwIfAborted()
   snapshotRef(value.providerRef as JsonValue)
 }
 function validateExecuteInput(value: unknown): asserts value is ProviderExecuteInput {
-  if (!isExactObject(value, ["accountId", "providerRef", "signal", "toolName", "arguments"]) || !canonical(AccountIdSchema, value.accountId) || !isAbortSignal(value.signal)) invalidInput()
+  if (!isObject(value) || !isAbortSignal(value.signal)) invalidInput()
   value.signal.throwIfAborted()
-  const tool = ToolNameSchema.safeParse(value.toolName)
-  if (!tool.success || !ARGUMENT_SCHEMAS[tool.data].safeParse(value.arguments).success) invalidInput()
   sandboxRef(value.providerRef as JsonValue)
 }
 function isAbortSignal(value: unknown): value is AbortSignal { return value instanceof AbortSignal && typeof value.throwIfAborted === "function" }
-function canonical(schema: { safeParse(value: unknown): { success: boolean; data?: unknown } }, value: unknown): boolean { const parsed = schema.safeParse(value); return parsed.success && parsed.data === value }
 function invalidInput(): never { throw new ProviderError("failure", "The Box provider input is invalid") }
 async function internalSnapshotName(accountId: string, snapshotId: string): Promise<string> { const [a, s] = await Promise.all([shortHash(accountId), shortHash(snapshotId)]); return `waterbox-${slug(accountId)}-${a}-${slug(snapshotId)}-${s}` }
 function slug(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 8) || "id" }
