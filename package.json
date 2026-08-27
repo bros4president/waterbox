@@ -12,6 +12,9 @@
     "smoke:pi-mcp": "bun run scripts/pi-mcp-smoke.ts",
     "chat:pi-mcp": "bun run scripts/pi-mcp-chat.ts",
     "build:box-template": "bun run --cwd packages/sandbox-daemon build && bun run scripts/build-box-system-template.ts",
+    "start:api-local": "bun run apps/api-local/src/main.ts",
+    "test:api-local": "bun test apps/api-local/test/integration.test.ts",
+    "smoke:control-plane-box": "bun run scripts/control-plane-box-smoke.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

@@ -21,6 +21,20 @@
         "typescript": "^5.9.2",
       },
     },
+    "apps/api-local": {
+      "name": "@waterbox/api-local",
+      "dependencies": {
+        "@waterbox/api": "workspace:*",
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+        "@waterbox/provider-box": "workspace:*",
+        "@waterbox/repository-sqlite": "workspace:*",
+        "zod": "^4.1.5",
+      },
+      "devDependencies": {
+        "@waterbox/daemon": "workspace:*",
+      },
+    },
     "packages/pi-mcp": {
       "name": "@oc-remote/pi-mcp",
     },
@@ -334,6 +348,8 @@
     "@types/retry": ["@types/retry@0.12.0", "", {}, "sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA=="],
 
     "@waterbox/api": ["@waterbox/api@workspace:packages/sandbox-api"],
+
+    "@waterbox/api-local": ["@waterbox/api-local@workspace:apps/api-local"],
 
     "@waterbox/contracts": ["@waterbox/contracts@workspace:packages/sandbox-contracts"],
 
