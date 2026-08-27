@@ -1,0 +1,15 @@
+{
+  "name": "@waterbox/api",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hono/zod-openapi": "^1.1.5",
+    "@waterbox/contracts": "workspace:*",
+    "@waterbox/core": "workspace:*",
+    "hono": "^4.9.6",
+    "zod": "^4.1.5"
+  }
+}

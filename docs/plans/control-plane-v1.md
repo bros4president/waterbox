@@ -1,6 +1,6 @@
 # Waterbox Control Plane V1
 
-Status: remediated through Phase F implementation; Phase F manual Box verification remains authorization-gated
+Status: implemented through Phase G; Phase F manual Box verification remains authorization-gated
 
 This document is the stable architecture and phase-status plan for the Waterbox control plane. The approved cleanup of the draft implementation is tracked separately in [`control-plane-v1-remediation.md`](./control-plane-v1-remediation.md); that remediation plan governs until its stopping condition is met.
 
@@ -677,7 +677,7 @@ Delegation prompt:
 
 ## Phase G: Hono API Package
 
-Status: ready to begin against injected fakes
+Status: completed against injected fakes
 
 Dependencies: Phases A and B
 
@@ -864,3 +864,4 @@ These do not block V1 phases A-H:
 - 2026-08-27: Remediation verification passed 201 tests with 906 assertions, typecheck, diff checking, standalone daemon compilation, v0 receiver tests and Node bundle syntax, plugin tests, and Pi MCP tests. Four independent review lenses approved the corrected core/repository, runtime/daemon, Box/probe, and scope boundaries. No generated daemon binary, credentials, or provider resources were committed or used.
 - 2026-08-27: The separately authorized live Box probe calibrated Phase E successfully: exact create replay, readiness, persistent `/home/user` marker writes, running named snapshots, snapshot restore, stop/archive, resume identity and marker continuity, snapshot deletion, and resource release all passed. Box deletion operations remained irreversibly accepted but `blocked`, so the probe distinguishes `accepted_pending` from `completed` and verifies that probe Boxes leave listings and active capacity. Phase F is now ready to begin; daemon installation, protected hosting, and template construction remain unclaimed Phase F work.
 - 2026-08-27: Phase F implementation added a credential-gated, provider-specific system-template builder with local validation, an explicit Linux x86-64 baseline daemon target and preflight ELF validation, deterministic secret-free bootstrap construction, daemon upload and systemd installation, local health verification, stop-before-save behavior, conservative opt-in same-name replacement, strict OpenAPI response correlation, incrementally bounded response parsing, non-secret `.waterbox/` metadata, and cleanup/deletion polling. Credential-free fake-HTTP tests cover construction, exact lost-create replay through structured `idempotency_in_progress` and subsequent 5xx outcomes, accepted-resource cleanup, sequencing, required response fields, metadata validation, replacement refusal, response cancellation, and redaction. Verification passed 210 tests with 952 assertions, typecheck, diff checking, standalone Linux x86-64 baseline daemon compilation, the v0 receiver Node bundle syntax check, and 45 explicit receiver/plugin/Pi MCP tests. No live Box operation or Phase G/H work was performed; artifact upload-size feasibility and the documented manual template, reboot/resume, protected-hosting, and user-snapshot verification remain authorization-gated.
+- 2026-08-27: Phase G added the provider-neutral `@waterbox/api` Web application with an injected core-compatible service surface and bearer `IdentityResolver`, all canonical public routes, strict canonical input and output validation, stable secret-safe error envelopes and request IDs, deterministic OpenAPI 3.1 generation, and incremental canonical NDJSON with disconnect cancellation. Fake-only route tests cover authentication, complete dispatch, malformed and unknown input, cross-boundary redaction, error mapping, incremental streaming, cancellation, and OpenAPI contents and determinism. Verification passed 218 tests with 1,029 expectations, 8 focused API tests with 77 expectations, typecheck, diff checking, import-boundary inspection, standalone Linux x86-64 baseline daemon compilation, v0 receiver Node bundle syntax, and 45 explicit receiver/plugin/Pi MCP tests. No credentials, live provider operations, runtime adapter, repository/provider composition, Phase H, client, or MCP work was added.
