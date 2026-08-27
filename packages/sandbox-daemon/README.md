@@ -7,12 +7,13 @@ Routes are `GET /health`, `GET /v1/tools`, and `POST /v1/tools/{name}` for each
 canonical tool. Tool calls return JSON except bash, which returns ordered incremental
 NDJSON `stdout`, `stderr`, and final `result` events.
 
-Build a standalone Linux executable with:
+Build a standalone Linux x86-64 baseline executable with:
 
 ```sh
 bun run --cwd packages/sandbox-daemon build
 ```
 
-The target host must provide `bash` and `rg` (ripgrep). The daemon handles SIGTERM
+The explicit baseline target avoids inheriting the build host's OS, architecture, or
+modern-CPU requirements. The target host must provide `bash` and `rg` (ripgrep). The daemon handles SIGTERM
 and SIGINT, aborts active runtime work, and drains its HTTP listener before forcing
 remaining connections closed.

@@ -1,6 +1,6 @@
 # Waterbox Control Plane V1
 
-Status: remediated and live-calibrated through Phase E; Phases F and G are ready to begin
+Status: remediated through Phase F implementation; Phase F manual Box verification remains authorization-gated
 
 This document is the stable architecture and phase-status plan for the Waterbox control plane. The approved cleanup of the draft implementation is tracked separately in [`control-plane-v1-remediation.md`](./control-plane-v1-remediation.md); that remediation plan governs until its stopping condition is met.
 
@@ -624,7 +624,7 @@ Delegation prompt:
 
 ## Phase F: Box System Template
 
-Status: ready to begin from reviewed live probe observations
+Status: implementation complete; credential-gated manual verification not run
 
 Dependencies: Phases D and E
 
@@ -863,3 +863,4 @@ These do not block V1 phases A-H:
 - 2026-08-27: Phase F was reset to pending. The mock-hardened builder and its tests/script were removed before shipment. A minimal raw-fetch capability probe now records the required create replay, lifecycle, marker, snapshot, restore, stop/resume, and cleanup observations only when separately credentialed and explicitly authorized; no real Box call occurred during remediation.
 - 2026-08-27: Remediation verification passed 201 tests with 906 assertions, typecheck, diff checking, standalone daemon compilation, v0 receiver tests and Node bundle syntax, plugin tests, and Pi MCP tests. Four independent review lenses approved the corrected core/repository, runtime/daemon, Box/probe, and scope boundaries. No generated daemon binary, credentials, or provider resources were committed or used.
 - 2026-08-27: The separately authorized live Box probe calibrated Phase E successfully: exact create replay, readiness, persistent `/home/user` marker writes, running named snapshots, snapshot restore, stop/archive, resume identity and marker continuity, snapshot deletion, and resource release all passed. Box deletion operations remained irreversibly accepted but `blocked`, so the probe distinguishes `accepted_pending` from `completed` and verifies that probe Boxes leave listings and active capacity. Phase F is now ready to begin; daemon installation, protected hosting, and template construction remain unclaimed Phase F work.
+- 2026-08-27: Phase F implementation added a credential-gated, provider-specific system-template builder with local validation, an explicit Linux x86-64 baseline daemon target and preflight ELF validation, deterministic secret-free bootstrap construction, daemon upload and systemd installation, local health verification, stop-before-save behavior, conservative opt-in same-name replacement, strict OpenAPI response correlation, incrementally bounded response parsing, non-secret `.waterbox/` metadata, and cleanup/deletion polling. Credential-free fake-HTTP tests cover construction, exact lost-create replay through structured `idempotency_in_progress` and subsequent 5xx outcomes, accepted-resource cleanup, sequencing, required response fields, metadata validation, replacement refusal, response cancellation, and redaction. Verification passed 210 tests with 952 assertions, typecheck, diff checking, standalone Linux x86-64 baseline daemon compilation, the v0 receiver Node bundle syntax check, and 45 explicit receiver/plugin/Pi MCP tests. No live Box operation or Phase G/H work was performed; artifact upload-size feasibility and the documented manual template, reboot/resume, protected-hosting, and user-snapshot verification remain authorization-gated.
