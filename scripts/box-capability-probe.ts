@@ -1,6 +1,8 @@
+import { posix } from "node:path"
+
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
 const DEFAULT_BASE_URL = "https://ascii.dev/api/box/v1"
-const MARKER_PATH = "/tmp/waterbox-capability-probe-marker"
+const MARKER_PATH = "/home/user/waterbox-capability-probe-marker"
 const MAX_RESPONSE_BYTES = 1_048_576
 const BOX_STATES = ["init", "provisioning", "provisioned", "cloning", "ready", "idle", "running", "archiving", "archived", "error"] as const
 const SNAPSHOT_STATES = ["saving", "ready", "failed"] as const
@@ -51,48 +53,65 @@ export async function runBoxCapabilityProbe(config: ProbeConfig, dependencies: P
   const createBody = { noEnv: true, ttlSeconds: 300 }
   const boxes: string[] = []
   let snapshotCleanupIntent = false
-  const client = new ProbeClient(config, dependencies.fetch, dependencies.sleep)
+  const client = new ProbeClient(config, dependencies.fetch, dependencies.sleep, observe)
 
   try {
-    const limits = limitsResponse(await client.json("GET", "/account/limits"))
-    if (limits.zeroDataRetention !== false) throw new Error("Box account must have zero-data-retention disabled")
-    observe({ stage: "account-limits", zeroDataRetention: false, namedSnapshotLimit: limits.namedSnapshotLimit })
+    const limits = limitsResponse(await client.json("GET", "/limits"))
+    observe({ stage: "account-limits", canStart: limits.canStart, activeBoxes: limits.activeBoxes, maxActiveBoxes: limits.maxActiveBoxes })
+    if (!limits.canStart || limits.maxActiveBoxes - limits.activeBoxes < 2) throw new Error("Box account does not have capacity for two probe Boxes")
+    const retention = dataRetentionResponse(await client.json("GET", "/account/data-retention"))
+    if (retention.enabled) throw new Error("Box account must have zero-data-retention disabled")
+    observe({ stage: "data-retention", zeroDataRetention: false })
 
+    observe({ stage: "source-create", status: "requesting" })
     const first = await createBoxWithRecovery(client, createBody, idempotencyKey)
     boxes.push(first.id)
+    observe({ stage: "source-create", status: "accepted" })
     const replay = await createBoxWithRecovery(client, createBody, idempotencyKey)
     if (replay.id !== first.id) throw new Error("Box create replay returned a different identity")
     observe({ stage: "create-replay", sameIdentity: true })
 
-    await client.waitForBox(first.id, ["ready", "idle"])
+    await client.waitForBox(first.id, ["ready", "idle"], "source-readiness")
     markerWriteResponse(await client.json("PUT", `/boxes/${segment(first.id)}/files`, { body: { path: MARKER_PATH, content: btoa(marker), encoding: "base64" } }), MARKER_PATH)
     observe({ stage: "marker-written", verified: true })
 
     snapshotCleanupIntent = true
+    observe({ stage: "snapshot-save", status: "requesting" })
     const saving = snapshotResponse(await client.json("POST", "/named-snapshots", { body: { boxId: first.id, name: snapshotName } }), "snapshot.named.saving", snapshotName, first.id)
     if (saving.state !== "saving") throw new Error("Named snapshot did not enter saving")
     const readySnapshot = await client.waitForSnapshot(snapshotName, first.id)
     observe({ stage: "snapshot-ready", artifactObserved: plain(readySnapshot.artifactId) })
 
     const restoredBody = { from: snapshotName, noEnv: true, ttlSeconds: 300 }
+    observe({ stage: "restored-create", status: "requesting" })
     const restored = await createBoxWithRecovery(client, restoredBody, `${idempotencyKey}-restore`)
     boxes.push(restored.id)
-    await client.waitForBox(restored.id, ["ready", "idle"])
+    observe({ stage: "restored-create", status: "accepted" })
+    await client.waitForBox(restored.id, ["ready", "idle"], "restored-readiness")
+    observe({ stage: "restored-marker", status: "verifying" })
     await verifyMarker(client, restored.id, marker)
     observe({ stage: "snapshot-restore", markerVerified: true })
 
+    observe({ stage: "source-stop", status: "requesting" })
     actionResponse(await client.json("POST", `/boxes/${segment(first.id)}/stop`), first.id, "box.stopping")
-    await client.waitForBox(first.id, ["archived"])
+    await client.waitForBox(first.id, ["archived"], "source-stop")
+    observe({ stage: "source-resume", status: "requesting" })
     actionResponse(await client.json("POST", `/boxes/${segment(first.id)}/resume`), first.id, "box.resuming")
-    const resumed = await client.waitForBox(first.id, ["ready", "idle"])
+    const resumed = await client.waitForBox(first.id, ["ready", "idle"], "source-resume")
     if (resumed.id !== first.id) throw new Error("Resumed Box identity changed")
     await verifyMarker(client, first.id, marker)
     observe({ stage: "stop-resume", sameIdentity: true, markerVerified: true })
 
-    for (const id of [...boxes].reverse()) { await client.deleteBox(id); boxes.splice(boxes.indexOf(id), 1) }
+    const deletedBoxIds = [...boxes]
+    const deletionStatuses: Array<"completed" | "accepted_pending"> = []
+    for (const [index, id] of [...boxes].reverse().entries()) { deletionStatuses.push(await client.deleteBox(id, index === 0 ? "restored-delete" : "source-delete")); boxes.splice(boxes.indexOf(id), 1) }
+    observe({ stage: "snapshot-delete", status: "requesting" })
     await client.deleteSnapshot(snapshotName)
     snapshotCleanupIntent = false
-    observe({ stage: "cleanup", boxesDeleted: 2, snapshotDeleted: true })
+    observe({ stage: "snapshot-delete", status: "completed" })
+    await client.verifyBoxesReleased(deletedBoxIds, limits.activeBoxes)
+    const boxDeletionStatus = deletionStatuses.every(status => status === "completed") ? "completed" : "accepted_pending"
+    observe({ stage: "cleanup", boxesReleased: 2, boxDeletionStatus, snapshotDeleted: true })
     return observations
   } catch (error) {
     await bestEffortCleanup(client, boxes, snapshotCleanupIntent ? snapshotName : undefined)
@@ -101,7 +120,7 @@ export async function runBoxCapabilityProbe(config: ProbeConfig, dependencies: P
 }
 
 class ProbeClient {
-  constructor(private readonly config: ProbeConfig, private readonly fetcher: Fetcher, private readonly sleep: ProbeDependencies["sleep"]) {}
+  constructor(private readonly config: ProbeConfig, private readonly fetcher: Fetcher, private readonly sleep: ProbeDependencies["sleep"], private readonly progress: ProbeDependencies["log"]) {}
 
   async json(method: string, path: string, options: { body?: unknown; idempotencyKey?: string; confirmDelete?: string; signal?: AbortSignal } = {}): Promise<unknown> {
     const signal = options.signal ?? AbortSignal.timeout(this.config.requestTimeoutMs)
@@ -115,10 +134,13 @@ class ProbeClient {
     return boundedJson(response, signal)
   }
 
-  async waitForBox(id: string, terminal: readonly BoxState[]): Promise<{ id: string; state: BoxState }> {
+  async waitForBox(id: string, terminal: readonly BoxState[], stage: string): Promise<{ id: string; state: BoxState }> {
     const deadline = Date.now() + this.config.pollTimeoutMs
+    let lastState: string | undefined
+    let lastLogAt = 0
     while (true) {
       const box = infoBox(await this.json("GET", `/boxes/${segment(id)}`), id)
+      ;({ lastState, lastLogAt } = this.#reportProgress(stage, box.state, lastState, lastLogAt))
       if (terminal.includes(box.state)) return box
       if (box.state === "error") throw new Error("Box entered error state")
       if (Date.now() >= deadline) throw new Error("Box state polling timed out")
@@ -128,8 +150,11 @@ class ProbeClient {
 
   async waitForSnapshot(name: string, sourceId: string): Promise<{ state: SnapshotState; artifactId?: string }> {
     const deadline = Date.now() + this.config.pollTimeoutMs
+    let lastState: string | undefined
+    let lastLogAt = 0
     while (true) {
       const snapshot = snapshotResponse(await this.json("GET", `/named-snapshots/${segment(name)}`), "snapshot.named.info", name, sourceId)
+      ;({ lastState, lastLogAt } = this.#reportProgress("snapshot-save", snapshot.state, lastState, lastLogAt))
       if (snapshot.state === "ready") return snapshot
       if (snapshot.state === "failed") throw new Error("Named snapshot failed")
       if (Date.now() >= deadline) throw new Error("Snapshot polling timed out")
@@ -137,13 +162,16 @@ class ProbeClient {
     }
   }
 
-  async deleteBox(id: string): Promise<void> {
+  async deleteBox(id: string, stage = "box-delete"): Promise<"completed" | "accepted_pending"> {
     const operation = deletionResponse(await this.json("DELETE", `/boxes/${segment(id)}`, { confirmDelete: id }), "box.deleting", id)
     const deadline = Date.now() + this.config.pollTimeoutMs
+    let lastState: string | undefined
+    let lastLogAt = 0
     while (true) {
       const current = deletionResponse(await this.json("GET", `/deletion-operations/${segment(operation.id)}`), "deletion.operation", id, operation.id)
-      if (current.status === "completed") return
-      if (current.status === "blocked") throw new Error("Box deletion was blocked")
+      ;({ lastState, lastLogAt } = this.#reportProgress(stage, current.status, lastState, lastLogAt))
+      if (current.status === "completed") return "completed"
+      if (current.status === "blocked") return "accepted_pending"
       if (Date.now() >= deadline) throw new Error("Box deletion polling timed out")
       await this.sleep(this.config.pollIntervalMs, AbortSignal.timeout(this.config.requestTimeoutMs))
     }
@@ -152,6 +180,22 @@ class ProbeClient {
   async deleteSnapshot(name: string): Promise<void> {
     const value = await this.json("DELETE", `/named-snapshots/${segment(name)}`)
     if (!object(value) || value.ok !== true || value.type !== "snapshot.named.deleted" || value.name !== name || value.status !== "deleted") throw new Error("Box returned an invalid snapshot deletion")
+  }
+
+  async verifyBoxesReleased(ids: readonly string[], activeBaseline: number): Promise<void> {
+    const limits = limitsResponse(await this.json("GET", "/limits"))
+    const visibleIds = boxListResponse(await this.json("GET", "/boxes"))
+    if (limits.activeBoxes > activeBaseline || ids.some(id => visibleIds.includes(id))) throw new Error("Accepted Box deletion did not release probe resources")
+    this.progress({ stage: "cleanup-verification", activeBoxes: limits.activeBoxes, probeBoxesVisible: false })
+  }
+
+  #reportProgress(stage: string, state: string, previousState: string | undefined, previousLogAt: number): { lastState: string; lastLogAt: number } {
+    const now = Date.now()
+    if (state !== previousState || now - previousLogAt >= 10_000) {
+      this.progress({ stage, state })
+      return { lastState: state, lastLogAt: now }
+    }
+    return { lastState: state, lastLogAt: previousLogAt }
   }
 }
 
@@ -171,23 +215,26 @@ async function createBoxWithRecovery(client: ProbeClient, body: unknown, idempot
 
 async function bestEffortCleanup(client: ProbeClient, boxes: readonly string[], snapshotName?: string): Promise<void> {
   if (snapshotName) try { await client.deleteSnapshot(snapshotName) } catch {}
-  for (const id of [...boxes].reverse()) try { await client.deleteBox(id) } catch {}
+  for (const [index, id] of [...boxes].reverse().entries()) try { await client.deleteBox(id, index === 0 ? "restored-delete" : "source-delete") } catch {}
 }
 
-function limitsResponse(value: unknown): { zeroDataRetention: boolean; namedSnapshotLimit: number } {
-  if (!object(value) || value.ok !== true || value.type !== "account.limits" || typeof value.zeroDataRetention !== "boolean" || !object(value.limits) || !Number.isSafeInteger(value.limits.namedSnapshots) || Number(value.limits.namedSnapshots) < 0) throw new Error("Box returned invalid account limits")
-  return { zeroDataRetention: value.zeroDataRetention, namedSnapshotLimit: Number(value.limits.namedSnapshots) }
+function limitsResponse(value: unknown): { canStart: boolean; activeBoxes: number; maxActiveBoxes: number } {
+  if (!object(value) || value.ok !== true || value.type !== "limits.info" || typeof value.canStart !== "boolean" || !nonnegativeInteger(value.activeBoxes) || !nonnegativeInteger(value.maxActiveBoxes)) throw new Error("Box returned invalid account limits")
+  return { canStart: value.canStart, activeBoxes: value.activeBoxes, maxActiveBoxes: value.maxActiveBoxes }
 }
-function createdBox(value: unknown): { id: string; state: BoxState } { if (!object(value) || value.ok !== true || value.type !== "box.created" || value.status !== "provisioning") throw new Error("Box returned an invalid create response"); return box(value.box) }
+function dataRetentionResponse(value: unknown): { enabled: boolean } { if (!object(value) || value.ok !== true || value.type !== "data_retention.info" || typeof value.enabled !== "boolean") throw new Error("Box returned invalid data-retention policy"); return { enabled: value.enabled } }
+function boxListResponse(value: unknown): string[] { if (!object(value) || value.ok !== true || value.type !== "box.list" || !Array.isArray(value.boxes)) throw new Error("Box returned an invalid list response"); return value.boxes.map(item => box(item).id) }
+function createdBox(value: unknown): { id: string; state: BoxState } { if (!object(value) || value.ok !== true || value.type !== "box.created") throw new Error("Box returned an invalid create response"); const result = box(value.box); if (value.status !== "provisioning" && value.status !== result.state) throw new Error("Box returned an invalid create response"); return result }
 function infoBox(value: unknown, id: string): { id: string; state: BoxState } { if (!object(value) || value.ok !== true || value.type !== "box.info") throw new Error("Box returned an invalid info response"); const result = box(value.box); if (result.id !== id) throw new Error("Box response identity mismatch"); return result }
 function box(value: unknown): { id: string; state: BoxState } { if (!object(value) || !/^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/.test(String(value.id)) || !BOX_STATES.includes(value.state as BoxState)) throw new Error("Box returned an invalid Box"); return { id: String(value.id), state: value.state as BoxState } }
 function actionResponse(value: unknown, id: string, type: "box.stopping" | "box.resuming"): void { if (!object(value) || value.ok !== true || value.type !== type || value.id !== id || value.status !== (type === "box.stopping" ? "archiving" : "resuming")) throw new Error("Box returned an invalid lifecycle response") }
-function markerWriteResponse(value: unknown, path: string): void { if (!object(value) || value.ok !== true || value.type !== "file.written" || value.path !== path) throw new Error("Box returned an invalid marker write response") }
+function markerWriteResponse(value: unknown, path: string): void { if (!object(value) || value.ok !== true || value.type !== "file.written" || value.success !== true || value.encoding !== "base64" || !nonnegativeInteger(value.size) || typeof value.path !== "string" || posix.resolve("/home/user", value.path) !== path) throw new Error("Box returned an invalid marker write response") }
 function snapshotResponse(value: unknown, type: "snapshot.named.saving" | "snapshot.named.info", name: string, sourceId: string): { state: SnapshotState; artifactId?: string } { if (!object(value) || value.ok !== true || value.type !== type || !object(value.snapshot) || value.snapshot.name !== name || value.snapshot.sourceBoxId !== sourceId || !SNAPSHOT_STATES.includes(value.snapshot.status as SnapshotState) || (value.snapshot.status === "ready" && !plain(value.snapshot.snapshotId))) throw new Error("Box returned an invalid named snapshot"); return { state: value.snapshot.status as SnapshotState, ...(plain(value.snapshot.snapshotId) ? { artifactId: value.snapshot.snapshotId } : {}) } }
 function deletionResponse(value: unknown, type: "box.deleting" | "deletion.operation", targetId: string, operationId?: string): { id: string; status: "pending" | "processing" | "blocked" | "completed" } { if (!object(value) || value.ok !== true || value.type !== type || !object(value.operation) || !/^bdop_[a-f0-9]{32}$/.test(String(value.operation.id)) || (operationId && value.operation.id !== operationId) || value.operation.kind !== "box" || value.operation.targetId !== targetId || !["pending", "processing", "blocked", "completed"].includes(String(value.operation.status))) throw new Error("Box returned an invalid deletion operation"); return { id: String(value.operation.id), status: value.operation.status as "pending" | "processing" | "blocked" | "completed" } }
 function redact(error: unknown, secrets: readonly string[]): string { let text = error instanceof Error ? error.message : String(error); for (const secret of [...secrets].filter(Boolean).sort((a, b) => b.length - a.length)) text = text.split(secret).join("[REDACTED]"); return text.replace(/https?:\/\/[^\s"']+/gi, "[REDACTED_URL]") }
 function cleanUrl(value: string): string { try { const url = new URL(value); if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) throw new Error(); return url.href.replace(/\/+$/, "") } catch { throw new Error("BOX_API_BASE_URL must be a credential-free HTTPS URL") } }
 function positiveInteger(value: string, name: string): number { const number = Number(value); if (!Number.isSafeInteger(number) || number <= 0) throw new Error(`${name} must be a positive integer`); return number }
+function nonnegativeInteger(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 0 }
 function plain(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value === value.trim() }
 function object(value: unknown): value is Record<string, any> { return typeof value === "object" && value !== null && !Array.isArray(value) }
 function segment(value: string): string { return encodeURIComponent(value) }

@@ -1,6 +1,6 @@
 # Waterbox Control Plane V1
 
-Status: remediated through Phase E; Phase G is ready to begin
+Status: remediated and live-calibrated through Phase E; Phases F and G are ready to begin
 
 This document is the stable architecture and phase-status plan for the Waterbox control plane. The approved cleanup of the draft implementation is tracked separately in [`control-plane-v1-remediation.md`](./control-plane-v1-remediation.md); that remediation plan governs until its stopping condition is met.
 
@@ -563,7 +563,7 @@ Delegation prompt:
 
 ## Phase E: Box Provider
 
-Status: documentation-aligned implementation; real capability probe pending
+Status: complete with live lifecycle capability calibration
 
 Dependencies: Phases B and D
 
@@ -624,7 +624,7 @@ Delegation prompt:
 
 ## Phase F: Box System Template
 
-Status: pending probe-driven implementation
+Status: ready to begin from reviewed live probe observations
 
 Dependencies: Phases D and E
 
@@ -862,3 +862,4 @@ These do not block V1 phases A-H:
 - 2026-08-27: Phase E is documentation-aligned with focused fake-HTTP coverage for `noEnv` creation, exact idempotency replay, stop/resume, snapshots and snapshot-sourced creation, protected hosting, permanent deletion, every canonical tool, cancellation, ambiguity without retry, identity correlation, bounded response handling, and secret redaction. A separately authorized real capability probe remains the gate for calibrating provider behavior.
 - 2026-08-27: Phase F was reset to pending. The mock-hardened builder and its tests/script were removed before shipment. A minimal raw-fetch capability probe now records the required create replay, lifecycle, marker, snapshot, restore, stop/resume, and cleanup observations only when separately credentialed and explicitly authorized; no real Box call occurred during remediation.
 - 2026-08-27: Remediation verification passed 201 tests with 906 assertions, typecheck, diff checking, standalone daemon compilation, v0 receiver tests and Node bundle syntax, plugin tests, and Pi MCP tests. Four independent review lenses approved the corrected core/repository, runtime/daemon, Box/probe, and scope boundaries. No generated daemon binary, credentials, or provider resources were committed or used.
+- 2026-08-27: The separately authorized live Box probe calibrated Phase E successfully: exact create replay, readiness, persistent `/home/user` marker writes, running named snapshots, snapshot restore, stop/archive, resume identity and marker continuity, snapshot deletion, and resource release all passed. Box deletion operations remained irreversibly accepted but `blocked`, so the probe distinguishes `accepted_pending` from `completed` and verifies that probe Boxes leave listings and active capacity. Phase F is now ready to begin; daemon installation, protected hosting, and template construction remain unclaimed Phase F work.

@@ -72,8 +72,8 @@ The V1 runtime remains the canonical seven-tool runtime. The Pi-wrapper decision
 - Phase B: complete with the narrowed provider contract.
 - Phase C: complete with simplified local persistence.
 - Phase D: complete with the simplified daemon.
-- Phase E: documentation-aligned implementation; real capability probe pending.
-- Phase F: pending probe-driven implementation.
+- Phase E: complete with live lifecycle capability calibration.
+- Phase F: ready to begin from reviewed live probe observations.
 - Phase G: ready to begin against injected fakes.
 - Phase H: pending E, F, and G; real Box composition remains gated on calibrated E/F behavior.
 
@@ -114,4 +114,15 @@ Final post-review verification on 2026-08-27:
 - No generated daemon binary remains in the worktree.
 - No credentials were loaded and no real Box request was made.
 
-The real Box capability probe remains a separate credential-authorized gate. Phase F must be designed from its reviewed sanitized observations rather than from mocks alone.
+## Post-Remediation Capability Probe
+
+The separately credential-authorized Box capability probe completed on 2026-08-27 with sanitized observations:
+
+- Account capacity and disabled zero-data-retention were confirmed through `/limits` and `/account/data-retention`.
+- Exact create replay preserved Box identity; a replay may report the Box's current state rather than `provisioning`.
+- File writes may return paths relative to `/home/user`; that directory, unlike `/tmp`, persisted through named snapshot restore.
+- Running snapshot creation, snapshot-sourced creation, marker restoration, stop/archive, resume with the same identity, and marker continuity all succeeded.
+- Permanent Box deletion was accepted irreversibly but entered `blocked` background status. Both Boxes immediately left listings and active capacity returned to its preflight baseline, so the probe reports `accepted_pending` rather than claiming physical deletion completed.
+- The named snapshot was deleted, and final cleanup verification found zero active or visible probe Boxes and no probe snapshot.
+
+Post-probe verification passed 201 tests with 907 assertions, typecheck, and diff checking. Phase F may now be designed from these observations; daemon installation, protected hosting, and template construction remain Phase F work rather than probe claims.

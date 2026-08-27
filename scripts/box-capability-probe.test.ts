@@ -17,18 +17,20 @@ describe("Box capability probe", () => {
     let creates = 0; let snapshotGets = 0; let sourceGets = 0
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url); const body = request.body ? await request.clone().json() as any : undefined
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
-      if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; const id = creates <= 2 ? source : restored; return json({ ok: true, type: "box.created", status: "provisioning", box: { id, state: "provisioning" } }, 202) }
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
+      if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; const id = creates <= 2 ? source : restored; const state = creates === 2 ? "ready" : "provisioning"; return json({ ok: true, type: "box.created", status: state, box: { id, state } }, 202) }
+      if (url.pathname.endsWith("/boxes") && request.method === "GET") return json({ ok: true, type: "box.list", boxes: [] })
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") { sourceGets++; return json({ ok: true, type: "box.info", box: { id: source, state: sourceGets === 2 ? "archived" : "ready" } }) }
       if (url.pathname.endsWith(`/boxes/${restored}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: restored, state: "ready" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", path: body.path })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
       if (url.pathname.endsWith("/commands")) return json({ ok: true, type: "command.finished", success: true, exitCode: 0, timedOut: false })
       if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") return json({ ok: true, type: "snapshot.named.saving", snapshot: { name: body.name, sourceBoxId: source, status: "saving" } }, 202)
       if (url.pathname.includes("/named-snapshots/") && request.method === "GET") { snapshotGets++; const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.info", snapshot: { name, sourceBoxId: source, status: snapshotGets === 1 ? "saving" : "ready", ...(snapshotGets > 1 ? { snapshotId: "artifact-1" } : {}) } }) }
       if (url.pathname.endsWith("/stop")) return json({ ok: true, type: "box.stopping", id: source, status: "archiving" }, 202)
       if (url.pathname.endsWith("/resume")) return json({ ok: true, type: "box.resuming", id: source, status: "resuming" }, 202)
       if (request.method === "DELETE" && url.pathname.includes("/boxes/")) { const id = url.pathname.split("/").at(-1)!; return json({ ok: true, type: "box.deleting", operation: { id: operation, kind: "box", targetId: id, status: "pending" } }, 202) }
-      if (url.pathname.includes("/deletion-operations/")) { const deletion = [...requests].reverse().find(item => item.method === "DELETE" && new URL(item.url).pathname.includes("/boxes/"))!; const id = new URL(deletion.url).pathname.split("/").at(-1)!; return json({ ok: true, type: "deletion.operation", operation: { id: operation, kind: "box", targetId: id, status: "completed" } }) }
+      if (url.pathname.includes("/deletion-operations/")) { const deletion = [...requests].reverse().find(item => item.method === "DELETE" && new URL(item.url).pathname.includes("/boxes/"))!; const id = new URL(deletion.url).pathname.split("/").at(-1)!; return json({ ok: true, type: "deletion.operation", operation: { id: operation, kind: "box", targetId: id, status: id === restored ? "blocked" : "completed" } }) }
       if (request.method === "DELETE" && url.pathname.includes("/named-snapshots/")) { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" }) }
       throw new Error(`unexpected ${request.method} ${url.pathname}`)
     }
@@ -44,7 +46,8 @@ describe("Box capability probe", () => {
     expect(requests.filter(request => new URL(request.url).pathname.endsWith("/commands"))).toHaveLength(2)
     expect(requests.filter(request => request.method === "DELETE" && new URL(request.url).pathname.includes("/boxes/"))).toHaveLength(2)
     expect(new Set(requests.map(request => request.signal)).size).toBeGreaterThan(5)
-    expect(observations.at(-1)).toEqual({ stage: "cleanup", boxesDeleted: 2, snapshotDeleted: true })
+    expect(requests.some(request => request.method === "GET" && new URL(request.url).pathname.endsWith("/boxes"))).toBe(true)
+    expect(observations.at(-1)).toEqual({ stage: "cleanup", boxesReleased: 2, boxDeletionStatus: "accepted_pending", snapshotDeleted: true })
     const serialized = JSON.stringify(logs)
     for (const secret of [config.apiKey, source, restored, "artifact-1", "0123456789abcdef"]) expect(serialized).not.toContain(secret)
   })
@@ -53,7 +56,8 @@ describe("Box capability probe", () => {
     const requests: Request[] = []
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url)
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") return json({ ok: true, type: "box.created", status: "provisioning", box: { id: source, state: "ready" } }, 202)
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
       if (url.pathname.endsWith("/files")) return new Response(`failed ${config.apiKey} https://protected.test/token ${source}`, { status: 500 })
@@ -75,10 +79,11 @@ describe("Box capability probe", () => {
     const requests: Request[] = []; let creates = 0
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url)
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { if (++creates === 1) throw new TypeError("response lost"); return json({ ok: true, type: "box.created", status: "provisioning", box: { id: source, state: "ready" } }, 202) }
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", path: "/wrong-path" })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "/wrong-path", encoding: "base64", size: 32 })
       if (request.method === "DELETE" && url.pathname.endsWith(source)) return json({ ok: true, type: "box.deleting", operation: { id: operation, kind: "box", targetId: source, status: "pending" } }, 202)
       if (url.pathname.includes("/deletion-operations/")) return json({ ok: true, type: "deletion.operation", operation: { id: operation, kind: "box", targetId: source, status: "completed" } })
       throw new Error(`unexpected ${request.method} ${url.pathname}`)
@@ -96,10 +101,11 @@ describe("Box capability probe", () => {
     const requests: Request[] = []; let creates = 0
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url)
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { if (++creates === 1) return json({ code: "internal" }, 503); return json({ ok: true, type: "box.created", status: "provisioning", box: { id: source, state: "ready" } }, 202) }
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", path: "/wrong-path" })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "/wrong-path", encoding: "base64", size: 32 })
       if (request.method === "DELETE" && url.pathname.endsWith(source)) return json({ ok: true, type: "box.deleting", operation: { id: operation, kind: "box", targetId: source, status: "pending" } }, 202)
       if (url.pathname.includes("/deletion-operations/")) return json({ ok: true, type: "deletion.operation", operation: { id: operation, kind: "box", targetId: source, status: "completed" } })
       throw new Error(`unexpected ${request.method} ${url.pathname}`)
@@ -116,7 +122,8 @@ describe("Box capability probe", () => {
     const requests: Request[] = []
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url)
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") return json({ code: "invalid_request" }, 409)
       throw new Error(`unexpected ${request.method} ${url.pathname}`)
     }
@@ -128,11 +135,12 @@ describe("Box capability probe", () => {
     const requests: Request[] = []; let creates = 0; let snapshotGets = 0
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url); const body = request.body ? await request.clone().json() as any : undefined
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; if (creates === 3) throw new TypeError("restored response lost"); const id = creates < 3 ? source : restored; return json({ ok: true, type: "box.created", status: "provisioning", box: { id, state: "ready" } }, 202) }
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
       if (url.pathname.endsWith(`/boxes/${restored}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: restored, state: "error" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", path: body.path })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
       if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") return json({ ok: true, type: "snapshot.named.saving", snapshot: { name: body.name, sourceBoxId: source, status: "saving" } }, 202)
       if (url.pathname.includes("/named-snapshots/") && request.method === "GET") { snapshotGets++; const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.info", snapshot: { name, sourceBoxId: source, status: snapshotGets === 1 ? "saving" : "ready", ...(snapshotGets > 1 ? { snapshotId: "artifact-1" } : {}) } }) }
       if (request.method === "DELETE" && url.pathname.includes("/named-snapshots/")) { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" }) }
@@ -153,10 +161,11 @@ describe("Box capability probe", () => {
     const requests: Request[] = []; let creates = 0
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url); const body = request.body ? await request.clone().json() as any : undefined
-      if (url.pathname.endsWith("/account/limits")) return json({ ok: true, type: "account.limits", zeroDataRetention: false, limits: { namedSnapshots: 5 } })
+      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; return json({ ok: true, type: "box.created", status: "provisioning", box: { id: source, state: "ready" } }, 202) }
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", path: body.path })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
       if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") throw new TypeError("snapshot response lost")
       if (request.method === "DELETE" && url.pathname.includes("/named-snapshots/")) { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" }) }
       if (request.method === "DELETE" && url.pathname.endsWith(source)) return json({ ok: true, type: "box.deleting", operation: { id: operation, kind: "box", targetId: source, status: "pending" } }, 202)
@@ -176,4 +185,6 @@ describe("Box capability probe", () => {
 })
 
 function json(value: unknown, status = 200): Response { return Response.json(value, { status }) }
+function limits(): Response { return json({ ok: true, type: "limits.info", canStart: true, activeBoxes: 0, maxActiveBoxes: 2, billingStatus: "active" }) }
+function retention(): Response { return json({ ok: true, type: "data_retention.info", enabled: false, enabledAt: null }) }
 function deps(fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) { return { fetch: fetcher, sleep: async (_ms: number, signal: AbortSignal) => signal.throwIfAborted(), randomId: () => "01234567-89ab-cdef", log: () => {} } }

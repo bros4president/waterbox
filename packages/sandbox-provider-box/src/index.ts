@@ -206,7 +206,6 @@ export class BoxSandboxProvider implements SandboxProvider {
     while (true) {
       const operation = deletionOperation(await this.#boxJson("GET", `/deletion-operations/${segment(operationId)}`, signal, { expectedStatuses: [200] }), "deletion.operation", targetId, operationId)
       if (operation.status === "completed") return
-      if (operation.status === "blocked") throw new ProviderError("failure", "Box deletion is blocked")
       if (this.#clockTime() >= deadline) throw new ProviderError("failure", "Box deletion timed out")
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
     }
@@ -250,7 +249,7 @@ function boxDto(value: unknown): BoxDto {
 }
 function correlatedBox(value: unknown, expectedId: string): BoxDto { const dto = boxDto(value); if (dto.id !== expectedId) throw new ProviderError("failure", "Box returned a mismatched response"); return dto }
 function success(value: unknown, type: string): Record<string, unknown> { if (!isObject(value) || value.ok !== true || value.type !== type) throw new ProviderError("failure", "Box returned an invalid response"); return value }
-function createdBox(value: unknown): BoxDto { const envelope = success(value, "box.created"); if (envelope.status !== "provisioning") throw new ProviderError("failure", "Box returned an invalid response"); return boxDto(envelope.box) }
+function createdBox(value: unknown): BoxDto { const envelope = success(value, "box.created"); const box = boxDto(envelope.box); if (envelope.status !== "provisioning" && envelope.status !== box.state) throw new ProviderError("failure", "Box returned an invalid response"); return box }
 function infoBox(value: unknown, id: string): BoxDto { const envelope = success(value, "box.info"); return correlatedBox(envelope.box, id) }
 function actionBox(value: unknown, id: string, type: "box.stopping" | "box.resuming"): BoxDto { const status = type === "box.stopping" ? "archiving" : "resuming"; if (!isObject(value) || value.ok !== true || value.type !== type || value.id !== id || value.status !== status) throw new ProviderError("failure", "Box returned an invalid response"); return value.box == null ? { id, state: type === "box.stopping" ? "archiving" : "provisioning" } : correlatedBox(value.box, id) }
 function namedSnapshot(value: unknown, type: "snapshot.named.saving" | "snapshot.named.info", name: string, sourceBoxId?: string): { name: string; status: typeof SNAPSHOT_STATES[number] } { if (!isObject(value) || value.ok !== true || value.type !== type || (type === "snapshot.named.saving" && value.status !== "saving") || !isObject(value.snapshot) || value.snapshot.name !== name || !BOX_ID.test(String(value.snapshot.sourceBoxId)) || (sourceBoxId !== undefined && value.snapshot.sourceBoxId !== sourceBoxId) || !SNAPSHOT_STATES.includes(value.snapshot.status as any) || (value.snapshot.status === "ready" && !strictNonempty(value.snapshot.snapshotId)) || (value.snapshot.snapshotId !== undefined && !strictNonempty(value.snapshot.snapshotId))) throw new ProviderError("failure", "Box returned an invalid response"); return { name, status: value.snapshot.status as any } }
