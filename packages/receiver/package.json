@@ -1,5 +1,9 @@
 {
   "name": "@oc-remote/receiver",
   "private": true,
-  "type": "module"
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "@waterbox/runtime": "workspace:*"
+  }
 }

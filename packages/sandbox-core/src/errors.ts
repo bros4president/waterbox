@@ -13,16 +13,16 @@ export class DomainError extends Error {
 }
 
 export function mapProviderError(error: unknown): DomainError {
-  if (error instanceof DomainError) return error
   if (error instanceof ProviderError) {
-    const code = error.kind === "limit"
-      ? "provider_limit"
-      : error.kind === "ambiguous_execution"
-        ? "ambiguous_execution"
-        : "provider_failure"
-    return new DomainError(code, error.message, { cause: error })
+    if (error.kind === "limit") {
+      return new DomainError("provider_limit", "The provider limit was reached")
+    }
+    if (error.kind === "ambiguous_execution") {
+      return new DomainError("ambiguous_execution", "The provider execution outcome is unknown")
+    }
+    return new DomainError("provider_failure", "The provider operation failed")
   }
-  return new DomainError("provider_failure", "The provider operation failed", { cause: error })
+  return new DomainError("provider_failure", "The provider operation failed")
 }
 
 export function errorRecord(error: DomainError): ResourceErrorRecord {

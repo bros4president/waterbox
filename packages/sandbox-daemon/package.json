@@ -1,0 +1,13 @@
+{
+  "name": "@waterbox/daemon",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "build": "bun build ./src/main.ts --compile --outfile ./dist/waterbox-daemon"
+  },
+  "dependencies": {
+    "@waterbox/contracts": "workspace:*",
+    "@waterbox/runtime": "workspace:*"
+  }
+}

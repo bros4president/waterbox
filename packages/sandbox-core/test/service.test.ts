@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId, SnapshotId } from "@waterbox/contracts"
 import { DomainError, SandboxService } from "@waterbox/core"
 import type { ListRepositoryInput, RepositoryPage, SandboxRepository } from "@waterbox/core/ports"
-import { ProviderError, type ProviderCreateSandboxInput } from "@waterbox/core/provider"
+import {
+  ProviderError,
+  type ProviderCreateSandboxInput,
+  type ProviderSnapshotOperationInput,
+} from "@waterbox/core/provider"
 import type { SandboxRecord, SnapshotRecord } from "@waterbox/core/records"
 import {
   FakeSandboxProvider,
@@ -20,10 +24,11 @@ function harness(options: {
   sandboxIds?: string[]
   snapshotIds?: string[]
   provider?: FakeSandboxProvider
+  idempotency?: InMemoryIdempotencyRepository
 } = {}) {
   const sandboxes = new InMemorySandboxRepository()
   const snapshots = new InMemorySnapshotRepository()
-  const idempotency = new InMemoryIdempotencyRepository()
+  const idempotency = options.idempotency ?? new InMemoryIdempotencyRepository()
   const provider = options.provider ?? new FakeSandboxProvider()
   const service = new SandboxService({
     sandboxes,
@@ -129,6 +134,15 @@ describe("durable create idempotency", () => {
     expect(provider.providerIdempotencyKeys[0]).toMatch(/^waterbox:create:[a-f0-9]{64}$/)
   })
 
+  test("completed replay does not call or consume the sandbox ID generator", async () => {
+    const { service } = harness({ sandboxIds: ["sbx_calm-cactus-a1"] })
+    const first = await service.createSandbox(alice, {}, { idempotencyKey: "request-1" })
+
+    const replay = await service.createSandbox(alice, {}, { idempotencyKey: "request-1" })
+
+    expect(replay).toEqual(first)
+  })
+
   test("same key with a different normalized body is rejected", async () => {
     const { service, provider } = harness()
     await service.createSandbox(alice, {}, { idempotencyKey: "request-1" })
@@ -171,9 +185,60 @@ describe("durable create idempotency", () => {
     expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "concurrent" }))?.state)
       .toBe("completed")
   })
+
+  test("replay heals a failed idempotency completion without reprovisioning", async () => {
+    const idempotency = new FailingCompletionIdempotencyRepository()
+    const { service, sandboxes, provider } = harness({ idempotency })
+
+    await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "completion-failure" }),
+      "conflict",
+    )
+    expect((await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.state).toBe("running")
+    expect((await idempotency.get({
+      accountId: alice.accountId,
+      scope: "sandbox:create",
+      key: "completion-failure",
+    }))?.state).toBe("in_progress")
+
+    const replay = await service.createSandbox(alice, {}, { idempotencyKey: "completion-failure" })
+    expect(replay.state).toBe("running")
+    expect(provider.createCalls).toBe(1)
+    expect((await idempotency.get({
+      accountId: alice.accountId,
+      scope: "sandbox:create",
+      key: "completion-failure",
+    }))?.state).toBe("completed")
+  })
 })
 
 describe("lifecycle and capabilities", () => {
+  test("invalid create observations fail both sandbox and idempotency records", async () => {
+    const provider = new InvalidCreateObservationProvider()
+    const { service, sandboxes, idempotency } = harness({ provider })
+
+    const error = await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "invalid-observation" }),
+      "provider_failure",
+    )
+    const sandbox = await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")
+    const reservation = await idempotency.get({
+      accountId: alice.accountId,
+      scope: "sandbox:create",
+      key: "invalid-observation",
+    })
+
+    expect(error.message).toBe("The provider returned an invalid sandbox state")
+    expect(sandbox?.state).toBe("failed")
+    expect(sandbox?.providerRef).toEqual({ privateSandboxId: "sbx_calm-cactus-a1" })
+    expect(sandbox?.lastError).toEqual({
+      code: "provider_failure",
+      message: "The provider returned an invalid sandbox state",
+    })
+    expect(reservation?.state).toBe("failed")
+    expect(reservation?.lastError).toEqual(sandbox?.lastError)
+  })
+
   test("unsupported snapshots fail before provider invocation or snapshot persistence", async () => {
     const provider = new FakeSandboxProvider({ capabilities: { snapshots: false } })
     const { service, snapshots } = harness({ provider })
@@ -231,6 +296,24 @@ describe("lifecycle and capabilities", () => {
       service.createSandbox(alice, { sourceSnapshotId: snapshot.snapshotId }),
       "unsupported_capability",
     )
+  })
+
+  test("create-from-snapshot reconciliation receives the caller's cancellation signal", async () => {
+    const provider = new SnapshotSignalProvider()
+    const { service, snapshots } = harness({ provider })
+    const sourceSandboxId = "sbx_source-cloud-a1" as SandboxId
+    const snapshotId = "snap_async-forest-a1" as SnapshotId
+    await snapshots.createIfAbsent(snapshotRecord(alice.accountId, snapshotId, sourceSandboxId, "creating"))
+    const controller = new AbortController()
+    controller.abort(new Error("cancel reconciliation"))
+
+    await expectDomainError(
+      service.createSandbox(alice, { sourceSnapshotId: snapshotId }, { signal: controller.signal }),
+      "provider_failure",
+    )
+
+    expect(provider.inspectSnapshotSignal).toBe(controller.signal)
+    expect(provider.createCalls).toBe(0)
   })
 })
 
@@ -302,6 +385,48 @@ describe("execution and reconciliation", () => {
 })
 
 describe("records and compare-and-swap", () => {
+  test("secret-bearing provider errors are stable in thrown, persisted, and public forms", async () => {
+    const secret = "box-token-super-secret"
+    const provider = new CreateErrorProvider(new ProviderError("failure", `upstream rejected ${secret}`))
+    const { service, sandboxes, idempotency } = harness({ provider })
+
+    const thrown = await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "secret-failure" }),
+      "provider_failure",
+    )
+    expect(thrown.message).toBe("The provider operation failed")
+    expect(thrown.message).not.toContain(secret)
+    expect(serializeError(thrown)).not.toContain(secret)
+    expect(thrown.cause).toBeUndefined()
+
+    const persisted = await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")
+    const reservation = await idempotency.get({
+      accountId: alice.accountId,
+      scope: "sandbox:create",
+      key: "secret-failure",
+    })
+    const publicSandbox = await service.getSandbox(alice, "sbx_calm-cactus-a1")
+    expect(JSON.stringify(persisted?.lastError)).not.toContain(secret)
+    expect(JSON.stringify(reservation?.lastError)).not.toContain(secret)
+    expect(JSON.stringify(publicSandbox)).not.toContain(secret)
+    expect(publicSandbox.lastError).toEqual({ code: "provider_failure", message: "The provider operation failed" })
+  })
+
+  test("provider-thrown domain errors are sanitized without a reachable cause", async () => {
+    const secret = "provider-domain-secret"
+    const provider = new CreateErrorProvider(new DomainError("conflict", `provider leaked ${secret}`, {
+      cause: new Error(`nested ${secret}`),
+    }))
+    const { service } = harness({ provider })
+
+    const thrown = await expectDomainError(service.createSandbox(alice, {}), "provider_failure")
+    expect(thrown.message).toBe("The provider operation failed")
+    expect(thrown.cause).toBeUndefined()
+    expect(serializeError(thrown)).not.toContain(secret)
+    const publicSandbox = await service.getSandbox(alice, "sbx_calm-cactus-a1")
+    expect(JSON.stringify(publicSandbox)).not.toContain(secret)
+  })
+
   test("public DTOs never expose account IDs or opaque provider references", async () => {
     const { service } = harness()
     const sandbox = await service.createSandbox(alice, {})
@@ -360,6 +485,47 @@ class AsyncCreateProvider extends FakeSandboxProvider {
     this.providerIdempotencyKeys.push(input.idempotencyKey)
     this.sandboxStates.set(input.sandboxId, "provisioning")
     return { state: "provisioning" as const, providerRef: { privateSandboxId: input.sandboxId } }
+  }
+}
+
+class InvalidCreateObservationProvider extends FakeSandboxProvider {
+  override async createSandbox(input: ProviderCreateSandboxInput) {
+    this.createCalls++
+    return { state: "suspended" as const, providerRef: { privateSandboxId: input.sandboxId } }
+  }
+}
+
+class CreateErrorProvider extends FakeSandboxProvider {
+  constructor(readonly createError: unknown) {
+    super()
+  }
+
+  override async createSandbox(_input: ProviderCreateSandboxInput): Promise<never> {
+    this.createCalls++
+    throw this.createError
+  }
+}
+
+class SnapshotSignalProvider extends FakeSandboxProvider {
+  inspectSnapshotSignal?: AbortSignal
+
+  override async inspectSnapshot(input: ProviderSnapshotOperationInput) {
+    this.inspectSnapshotCalls++
+    this.inspectSnapshotSignal = input.signal
+    input.signal.throwIfAborted()
+    return super.inspectSnapshot(input)
+  }
+}
+
+class FailingCompletionIdempotencyRepository extends InMemoryIdempotencyRepository {
+  #failCompletion = true
+
+  override async compareAndSwap(record: import("@waterbox/core/records").IdempotencyRecord, expectedVersion: number) {
+    if (this.#failCompletion && record.state === "completed") {
+      this.#failCompletion = false
+      throw new Error("injected idempotency completion failure")
+    }
+    return super.compareAndSwap(record, expectedVersion)
   }
 }
 
@@ -424,4 +590,13 @@ function snapshotRecord(
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   }
+}
+
+function serializeError(error: unknown): string {
+  return JSON.stringify(error, (_key, value) => {
+    if (value instanceof Error) {
+      return Object.fromEntries(Object.getOwnPropertyNames(value).map((name) => [name, value[name as keyof Error]]))
+    }
+    return value
+  })
 }

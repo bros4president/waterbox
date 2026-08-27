@@ -84,8 +84,21 @@ export class SandboxService {
   ): Promise<Sandbox> {
     const requestHash = await hashCreateRequest(request)
     const now = this.#now()
-    const sandboxId = this.#sandboxId()
     let reservation: IdempotencyRecord | undefined
+    let reservationCanFail = true
+
+    if (options.idempotencyKey !== undefined) {
+      const existing = await this.#deps.idempotency.get({
+        accountId: identity.accountId,
+        scope: CREATE_SCOPE,
+        key: options.idempotencyKey,
+      })
+      if (existing !== undefined) {
+        return this.#resolveExistingCreate(identity, options.idempotencyKey, requestHash)
+      }
+    }
+
+    const sandboxId = this.#sandboxId()
 
     if (options.idempotencyKey !== undefined) {
       reservation = {
@@ -108,7 +121,7 @@ export class SandboxService {
     try {
       const source = request.sourceSnapshotId === undefined
         ? undefined
-        : await this.#getReadySnapshotRecord(identity, request.sourceSnapshotId)
+        : await this.#getReadySnapshotRecord(identity, request.sourceSnapshotId, options.signal ?? NEVER_ABORTED)
       const providerName = source?.provider ?? this.#deps.defaultProvider
       const provider = this.#provider(providerName)
       if (source !== undefined && !provider.capabilities.createFromSnapshot) {
@@ -145,12 +158,26 @@ export class SandboxService {
         throw domainError
       }
 
-      const completed = await this.#applySandboxObservation(record, "provisioning", observation)
-      if (reservation !== undefined) await this.#completeIdempotency(reservation)
+      let completed
+      try {
+        completed = await this.#applySandboxObservation(record, "provisioning", observation)
+      } catch (error) {
+        const domainError = error instanceof DomainError ? error : mapProviderError(error)
+        await this.#failSandbox({ ...record, providerRef: observation.providerRef }, "provisioning", domainError)
+        throw domainError
+      }
+      reservationCanFail = false
+      if (reservation !== undefined) {
+        try {
+          await this.#completeIdempotency(reservation)
+        } catch {
+          throw new DomainError("conflict", "The sandbox was created but idempotency completion is pending")
+        }
+      }
       return toSandbox(completed)
     } catch (error) {
       const domainError = error instanceof DomainError ? error : mapProviderError(error)
-      if (reservation !== undefined) await this.#failIdempotency(reservation, domainError)
+      if (reservation !== undefined && reservationCanFail) await this.#failIdempotency(reservation, domainError)
       throw domainError
     }
   }
@@ -332,6 +359,19 @@ export class SandboxService {
       throw new DomainError("idempotency_conflict", "The idempotency key was used with a different request")
     }
     if (record.state === "in_progress") {
+      const sandbox = await this.#deps.sandboxes.get(identity.accountId, record.resourceId)
+      if (sandbox?.state === "failed") {
+        const failure = new DomainError(
+          sandbox.lastError?.code ?? "provider_failure",
+          sandbox.lastError?.message ?? "The sandbox creation failed",
+        )
+        await this.#failIdempotency(record, failure)
+        throw failure
+      }
+      if (sandbox !== undefined && sandbox.state !== "provisioning") {
+        await this.#completeIdempotency(record)
+        return this.getSandbox(identity, record.resourceId)
+      }
       throw new DomainError("idempotency_in_progress", "The idempotent request is still in progress")
     }
     if (record.state === "failed") {
@@ -606,8 +646,12 @@ export class SandboxService {
     return record
   }
 
-  async #getReadySnapshotRecord(identity: Identity, snapshotId: SnapshotId): Promise<SnapshotRecord> {
-    const record = await this.#reconcileSnapshot(await this.#getSnapshotRecord(identity, snapshotId), NEVER_ABORTED)
+  async #getReadySnapshotRecord(
+    identity: Identity,
+    snapshotId: SnapshotId,
+    signal: AbortSignal,
+  ): Promise<SnapshotRecord> {
+    const record = await this.#reconcileSnapshot(await this.#getSnapshotRecord(identity, snapshotId), signal)
     if (record.state !== "ready") throw invalidState("create a sandbox from the snapshot", record.state)
     return record
   }

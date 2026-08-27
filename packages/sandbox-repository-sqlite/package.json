@@ -1,0 +1,13 @@
+{
+  "name": "@waterbox/repository-sqlite",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@waterbox/contracts": "workspace:*",
+    "@waterbox/core": "workspace:*",
+    "zod": "4.1.8"
+  }
+}

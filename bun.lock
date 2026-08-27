@@ -39,6 +39,10 @@
     },
     "packages/receiver": {
       "name": "@oc-remote/receiver",
+      "dependencies": {
+        "@earendil-works/pi-coding-agent": "0.84.2",
+        "@waterbox/runtime": "workspace:*",
+      },
     },
     "packages/sandbox-contracts": {
       "name": "@waterbox/contracts",
@@ -48,6 +52,34 @@
     },
     "packages/sandbox-core": {
       "name": "@waterbox/core",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+      },
+    },
+    "packages/sandbox-daemon": {
+      "name": "@waterbox/daemon",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/runtime": "workspace:*",
+      },
+    },
+    "packages/sandbox-provider-box": {
+      "name": "@waterbox/provider-box",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+      },
+    },
+    "packages/sandbox-repository-sqlite": {
+      "name": "@waterbox/repository-sqlite",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+        "zod": "4.1.8",
+      },
+    },
+    "packages/sandbox-runtime": {
+      "name": "@waterbox/runtime",
       "dependencies": {
         "@waterbox/contracts": "workspace:*",
       },
@@ -288,6 +320,14 @@
     "@waterbox/contracts": ["@waterbox/contracts@workspace:packages/sandbox-contracts"],
 
     "@waterbox/core": ["@waterbox/core@workspace:packages/sandbox-core"],
+
+    "@waterbox/daemon": ["@waterbox/daemon@workspace:packages/sandbox-daemon"],
+
+    "@waterbox/provider-box": ["@waterbox/provider-box@workspace:packages/sandbox-provider-box"],
+
+    "@waterbox/repository-sqlite": ["@waterbox/repository-sqlite@workspace:packages/sandbox-repository-sqlite"],
+
+    "@waterbox/runtime": ["@waterbox/runtime@workspace:packages/sandbox-runtime"],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
 
