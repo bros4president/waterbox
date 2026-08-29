@@ -48,11 +48,11 @@ The V1 runtime remains the canonical seven-tool runtime. The Pi-wrapper decision
 
 ### Runtime And Daemon
 
-- Keep the incremental 1 MiB raw-body limit, fatal UTF-8, JSON and canonical Zod validation, caller and shutdown cancellation, process-group termination, bash NDJSON, path containment, symlink rejection, atomic writes, and patch rollback.
+- Keep the incremental 1 MiB raw-body limit, fatal UTF-8, JSON and canonical Zod validation, caller and shutdown cancellation, process-group termination, bash NDJSON, atomic writes, and patch preflight. The later agent-owned-sandbox policy intentionally removed workspace containment and symlink rejection.
 - Remove exact Content-Length equality and delayed trailing-byte machinery.
 - Remove synthetic hostile/non-settling/rejecting reader-cancellation handling and dedicated tests.
-- Remove daemon mutation serialization. The runtime is the sole queue owner for write, edit, and patch.
-- Retain focused overflow, cancellation, all-tool, streaming, process-tree, and queued-mutation cancellation tests.
+- Remove daemon and runtime mutation serialization. Every invocation dispatches independently; operation-local atomic writes remain, and patch reports operations completed before a commit failure rather than attempting rollback across concurrent commands.
+- Retain focused overflow, cancellation, all-tool, streaming, process-tree, and concurrent-mutation tests.
 - Preserve existing v0 receiver and Pi behavior and their build/test paths.
 
 ### Box And Probe

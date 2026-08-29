@@ -1,6 +1,6 @@
 # Waterbox Control Plane V1
 
-Status: implemented through Phase H automated verification; Phase F manual verification and the Phase H live Box smoke remain authorization-gated
+Status: implemented through Phase J with live Direct Box MCP verification; demo Cloud MCP verification is blocked by local model-provider authentication
 
 This document is the stable architecture and phase-status plan for the Waterbox control plane. The approved cleanup of the draft implementation is tracked separately in [`control-plane-v1-remediation.md`](./control-plane-v1-remediation.md); that remediation plan governs until its stopping condition is met.
 
@@ -39,16 +39,18 @@ repositories       providers
 
 V1 runs the API locally, stores metadata in SQLite using DynamoDB-compatible key-value access patterns, and provisions Box sandboxes. A later deployment can replace the local runtime and repositories with Lambda and DynamoDB without changing core, API routes, or providers.
 
-The local MCP is intentionally deferred until the HTTP API and everything behind it are complete.
+The supported local MCP composes the same core directly for user-owned providers. The earlier HTTP-backed MCP remains an experimental Cloud demo and an independent regression path.
 
 ## Settled Decisions
 
 - Package scope: `@waterbox/*`.
 - Existing packages are preserved as working v0 references during this project.
 - New control-plane code is built in parallel rather than by rewriting v0 in place.
-- The HTTP API is the canonical public interface.
+- The HTTP API is the canonical Cloud control-plane interface.
 - There is no hosted/remote MCP interface.
-- A later local stdio MCP will call the HTTP API and may retain an active sandbox selection in process memory.
+- The supported local stdio MCP composes core, SQLite, and the selected user-owned provider directly. Lifecycle tools return explicit resource IDs, and sandbox operations require their target sandbox ID.
+- The MCP configuration recognizes `waterbox` as the future managed provider but rejects it as unsupported until Cloud integration is implemented.
+- The experimental HTTP-backed MCP is preserved as the Cloud demo; it does not share production code with the supported Direct MCP.
 - Hono is shared in `@waterbox/api`; local and future Lambda apps are thin runtime adapters.
 - Zod schemas are canonical runtime contracts. `@hono/zod-openapi` generates OpenAPI 3.1 routes and documents.
 - Core receives resolved identities. It never parses credentials.
@@ -64,12 +66,13 @@ The local MCP is intentionally deferred until the HTTP API and everything behind
 - Box is the first provider.
 - Box user sandboxes use `noEnv: true` and never receive the Box account API key.
 - Box follows the stop/resume-around-usage pattern. Stop archives the sandbox, resume restores the same sandbox, and delete is permanent.
-- The Box daemon is baked into a deterministic named system snapshot, enabled as a systemd service, and exposed with Box protected hosting. The protected endpoint, including its `_token`, is secret provider state and is never returned publicly.
+- The Box V2 system template contains a one-shot Waterbox CLI. The Box provider invokes it through the authenticated command endpoint with a versioned serialized canonical invocation; it does not expose an HTTP daemon or persist hosting credentials.
 - The Box system template is deployment configuration, not a user snapshot record.
 - A repeatable system-template build remains a pending, probe-driven Phase F deliverable. Its bootstrap box will omit `from`.
 - Lambda MicroVM and Vercel Sandbox providers are expected later. Each provider composes mandatory lifecycle and tool transport with cohesive optional stop/resume and snapshot groups.
 - Core and repository ports must not require joins, foreign keys, scans, or multi-record transactions.
 - Commands and other potentially mutating operations are never automatically retried after an ambiguous provider failure.
+- Waterbox normalizes contracts and may add explicit cross-provider features, but adapters do not impose command scheduling where the provider does not require it. Each invocation is dispatched independently and provider concurrency remains authoritative.
 
 ## Package Graph
 
@@ -83,6 +86,7 @@ packages/sandbox-runtime            @waterbox/runtime
 packages/sandbox-daemon             @waterbox/daemon
 packages/sandbox-provider-box       @waterbox/provider-box
 packages/sandbox-api                @waterbox/api
+packages/mcp                        @waterbox/mcp
 apps/api-local                      @waterbox/api-local (private)
 ```
 
@@ -95,6 +99,7 @@ Dependency direction:
     |       ^
     |       +-- @waterbox/repository-sqlite
     |       +-- @waterbox/provider-box
+    |       +-- @waterbox/mcp
     |
     +-- @waterbox/runtime
     |       ^
@@ -111,7 +116,6 @@ Deferred packages:
 
 ```text
 @waterbox/client
-@waterbox/mcp
 @waterbox/repository-dynamodb
 @waterbox/provider-lambda-microvms
 apps/api-lambda
@@ -346,14 +350,13 @@ SQLite may use transactions internally to implement one-record compare-and-swap.
 - Pass only sandbox-specific configuration explicitly.
 - Never pass `BOX_API_KEY` or account credentials into a sandbox.
 - Create with `from` set to the configured internal named system snapshot unless a user named snapshot is supplied. Bootstrap creation for the system snapshot omits `from`.
-- User snapshots remain based on the system template and therefore retain the daemon.
-- The daemon binary and systemd service are baked into the system template.
-- Register the daemon port using protected Box hosting and store the protected URL as secret provider state.
-- Use the official `/boxes/{id}/host` contract with public access disabled and refresh the secret URL after resume.
+- User snapshots remain based on the system template and therefore retain the one-shot CLI.
+- The CLI bundle, pinned Bun runtime, launcher, and required Linux tools are baked into the system template; no daemon or hosting credential is installed.
+- Execute one canonical CLI invocation through Box's authenticated `/boxes/{id}/commands` endpoint for each tool call.
 - A successful stop preserves provider snapshots and pauses billing.
 - Treat delete as permanent destruction, never as idle cleanup.
 - Resume automatically before tool execution when required.
-- Wait for `ready` or `idle` before daemon setup or calls.
+- Wait for `ready` or `idle` before command calls.
 - Snapshot capture is asynchronous and must be polled/reconciled.
 - User and system snapshots use `POST /named-snapshots` and `GET`/`DELETE /named-snapshots/{name}`; statuses are `saving`, `ready`, and `failed`. Names are safe non-reserved 1..63 character handles, and the opaque provider reference stores the deterministic name.
 - Generate an internal provider snapshot name from account and Waterbox snapshot IDs. Never use the optional user display name as provider identity.
@@ -524,9 +527,9 @@ Deliverables:
 
 - Add `@waterbox/runtime` containing provider-neutral implementations for read, write, edit, patch, glob, grep, and bash.
 - Add `@waterbox/daemon` as a thin HTTP host for the runtime.
-- Reuse the proven path safety, atomic write, edit, patch rollback, bounded search/read, bash process-group termination, output truncation, NDJSON streaming, and cancellation behavior from `packages/receiver`.
+- Reuse the proven atomic write, edit, bounded search/read, bash process-group termination, output truncation, NDJSON streaming, and cancellation behavior from `packages/receiver`; patch preflights all hunks and reports any operations completed before a commit failure.
 - Keep the existing receiver working. Prefer moving shared implementation behind compatibility exports over copying divergent implementations.
-- Make workspace root explicit daemon configuration.
+- Make the default workspace explicit daemon configuration without treating it as a security boundary inside the provider sandbox.
 - Expose health, canonical tool catalog, and canonical tool execution routes.
 - Ensure bash streams stdout/stderr/final events in order.
 - Support graceful shutdown and cancellation.
@@ -538,9 +541,9 @@ Required tests:
 - Existing receiver tests continue to pass unchanged or with import-only adjustments.
 - Runtime tests cover all seven tools.
 - Daemon contract tests invoke every tool through HTTP.
-- Traversal and symlink protections remain intact.
+- Runtime tests prove that relative paths default to the workspace while absolute paths, traversal, and symbolic links can address the full provider sandbox.
 - Bash streams before completion and cancellation kills the process tree.
-- Runtime mutation requests follow the documented serialization behavior; the daemon adds no second queue.
+- Runtime requests dispatch independently without a daemon or adapter queue.
 
 Non-goals:
 
@@ -632,14 +635,14 @@ Goal: reproducibly produce the provider-owned deterministic named Box system sna
 
 Deliverables:
 
-- Add a script under `scripts/` for building/updating the Waterbox Box system template.
-- Compile or package the daemon into a self-contained Linux artifact.
+- Add a script under `scripts/` for building a new immutable versioned Waterbox Box system template.
+- Package the one-shot CLI into a self-contained Linux Bun artifact.
 - Create a tagged no-env temporary Box using an idempotency key and deliberately omit `from`.
-- Upload/install the daemon and its required runtime dependencies.
-- Install and enable a systemd unit that starts the daemon after every boot/resume/fork.
-- Verify daemon health from inside the Box before snapshotting.
+- Upload/install the CLI and its required runtime dependencies.
+- Install a root launcher without a daemon, service, port, or provider credential.
+- Verify CLI health from inside the Box before snapshotting.
 - Stop the template source cleanly so filesystem state is captured.
-- Save/replace the deterministic named system snapshot and store its name as the provider template reference.
+- Save a new deterministic versioned named system snapshot and store its name as the provider template reference; refuse same-name replacement.
 - Emit machine-readable deployment metadata under `.waterbox/` without committing secrets.
 - Ensure temporary build boxes are stopped or deleted on failure according to a documented safe cleanup policy.
 - Document required environment variables and a dry-run or validation mode where practical.
@@ -654,9 +657,9 @@ Manual verification:
 
 - With explicit Box credentials, build the template.
 - Create a Box from the template.
-- Confirm systemd starts the daemon after boot.
-- Confirm stop/resume restarts the daemon.
-- Confirm a user snapshot restored into a new sandbox retains the daemon.
+- Confirm CLI health after boot and stop/resume.
+- Confirm a user snapshot restored into a new sandbox retains the CLI.
+- Confirm concurrent Box commands are not serialized by Waterbox.
 
 Non-goals:
 
@@ -673,7 +676,7 @@ Acceptance criteria:
 
 Delegation prompt:
 
-> Read `docs/plans/control-plane-v1.md` and implement Phase F only. Add a repeatable, secret-safe Box system-template builder for the shared daemon. Keep it separate from API startup and preserve existing AWS deployment scripts. Implement testable request/command construction, document manual verification, run all automated checks, then update Phase F status and the implementation log.
+> Read `docs/plans/control-plane-v1.md` and implement Phase F only. Add a repeatable, secret-safe Box system-template builder for the one-shot CLI. Keep it separate from API startup and preserve existing AWS deployment scripts. Implement testable request/command construction, document manual verification, run all automated checks, then update Phase F status and the implementation log.
 
 ## Phase G: Hono API Package
 
@@ -804,13 +807,17 @@ Proposed package: `@waterbox/client`.
 
 It will consume the canonical HTTP API, own bearer headers and NDJSON parsing, propagate cancellation, and retry only explicitly safe/idempotent requests. It must not import core, repositories, providers, Hono routing, or MCP.
 
-## Deferred Phase J: Local MCP
+## Phase J: Direct MCP
 
-This phase requires a separate approval after the typed client.
+Status: automated and live Direct Box verification complete; demo Cloud regression blocked before resource creation by local model-provider authentication
 
-Proposed package: `@waterbox/mcp`.
+Package: `@waterbox/mcp`.
 
-It will be a local stdio MCP process configured with API URL and key, use `@waterbox/client`, retain at most one process-local active sandbox selection, expose server-wide remote-workspace instructions plus boundary-first tool descriptions, and map API stream events to MCP progress when supported. It will not compose core or know provider details.
+The supported MCP is a bundled Bun stdio process. Its `box` branch composes SQLite repositories, core, and the Box provider under one fixed local identity. It exposes sandbox creation/live provider probing/deletion, user snapshot listing/creation/deletion, and encrypted local-file transfer, requires explicit resource IDs for targeted operations, validates every tool call and event with canonical contracts, and persists resources when the MCP process exits.
+
+Configuration explicitly selects a provider. The `waterbox` branch exists as the future managed Cloud direction but currently fails before opening SQLite or requiring Box credentials. The experimental HTTP-backed MCP remains unchanged as the Cloud demo and regression path.
+
+The package includes official registry metadata for an npm stdio package and a required secret Box credential. Public registry publication, managed Cloud authentication, and migration between Direct and Cloud remain deferred.
 
 ## Cross-Cutting Verification
 
@@ -835,8 +842,8 @@ Focused tests should remain local to the core, repository, and first provider un
 - SQLite process-local behavior must not become an implicit distributed locking contract.
 - A crash during a lifecycle transition requires reconciliation from provider state.
 - Stop can be refused if Box cannot safely snapshot. Core must preserve the failure and must not silently force-stop.
-- Tool execution can mutate outside `/workspace` through bash. This is intentional full-Linux authority inside the sandbox.
-- The current v0 mutation queue does not serialize bash with file mutations. Phase D must document the retained behavior rather than silently claiming stronger ordering.
+- Every tool can mutate outside `/workspace`; relative paths merely default there. This is intentional full-Linux authority inside the provider sandbox.
+- Concurrent commands have no Waterbox-defined ordering. Atomic writes and optimistic patch commit checks reduce accidental overwrite; patch reports partial completion instead of performing concurrency-unsafe rollback. No cross-command filesystem transaction or scheduler is claimed.
 
 ## Explicitly Deferred Decisions
 
@@ -858,7 +865,7 @@ These do not block V1 phases A-H:
 - 2026-08-26: Phase A completed with canonical strict contracts for identity, resources, lifecycle, pagination, all seven tools, stable errors, and public/provider data separation while preserving v0 contracts.
 - 2026-08-27: Phase B completed with the narrowed multi-provider core: mandatory lifecycle/tool operations, cohesive optional stop/resume and snapshot groups, account isolation, source-provider snapshot creation, CAS transitions, durable create idempotency, automatic resume, cancellation, ambiguity handling, and secret-safe errors.
 - 2026-08-27: Phase C completed with three Dynamo-shaped SQLite repositories, authoritative versioned documents, account-partition keyset pagination, strict canonical resource-key cursors, persisted idempotency expiry, malformed-document rejection, and no unused delete/list ports or cursor-key configuration.
-- 2026-08-27: Phase D completed with the shared provider-neutral runtime and thin daemon. The runtime solely serializes file mutations; the daemon retains a 1 MiB incremental body limit, strict UTF-8/JSON/Zod validation, request and shutdown cancellation, NDJSON streaming, and no synthetic framing machinery. Process-group termination, path/symlink safety, atomic writes, patch rollback, v0 receiver behavior, and Pi endpoints remain covered.
+- 2026-08-27: Phase D completed with the shared provider-neutral runtime and thin daemon. The runtime solely serializes file mutations; the daemon retains a 1 MiB incremental body limit, strict UTF-8/JSON/Zod validation, request and shutdown cancellation, NDJSON streaming, and no synthetic framing machinery. Process-group termination, atomic writes, patch rollback, v0 receiver behavior, and Pi endpoints remain covered.
 - 2026-08-27: Phase E is documentation-aligned with focused fake-HTTP coverage for `noEnv` creation, exact idempotency replay, stop/resume, snapshots and snapshot-sourced creation, protected hosting, permanent deletion, every canonical tool, cancellation, ambiguity without retry, identity correlation, bounded response handling, and secret redaction. A separately authorized real capability probe remains the gate for calibrating provider behavior.
 - 2026-08-27: Phase F was reset to pending. The mock-hardened builder and its tests/script were removed before shipment. A minimal raw-fetch capability probe now records the required create replay, lifecycle, marker, snapshot, restore, stop/resume, and cleanup observations only when separately credentialed and explicitly authorized; no real Box call occurred during remediation.
 - 2026-08-27: Remediation verification passed 201 tests with 906 assertions, typecheck, diff checking, standalone daemon compilation, v0 receiver tests and Node bundle syntax, plugin tests, and Pi MCP tests. Four independent review lenses approved the corrected core/repository, runtime/daemon, Box/probe, and scope boundaries. No generated daemon binary, credentials, or provider resources were committed or used.
@@ -866,3 +873,7 @@ These do not block V1 phases A-H:
 - 2026-08-27: Phase F implementation added a credential-gated, provider-specific system-template builder with local validation, an explicit Linux x86-64 baseline daemon target and preflight ELF validation, deterministic secret-free bootstrap construction, daemon upload and systemd installation, local health verification, stop-before-save behavior, conservative opt-in same-name replacement, strict OpenAPI response correlation, incrementally bounded response parsing, non-secret `.waterbox/` metadata, and cleanup/deletion polling. Credential-free fake-HTTP tests cover construction, exact lost-create replay through structured `idempotency_in_progress` and subsequent 5xx outcomes, accepted-resource cleanup, sequencing, required response fields, metadata validation, replacement refusal, response cancellation, and redaction. Verification passed 210 tests with 952 assertions, typecheck, diff checking, standalone Linux x86-64 baseline daemon compilation, the v0 receiver Node bundle syntax check, and 45 explicit receiver/plugin/Pi MCP tests. No live Box operation or Phase G/H work was performed; artifact upload-size feasibility and the documented manual template, reboot/resume, protected-hosting, and user-snapshot verification remain authorization-gated.
 - 2026-08-27: Phase G added the provider-neutral `@waterbox/api` Web application with an injected core-compatible service surface and bearer `IdentityResolver`, all canonical public routes, strict canonical input and output validation, stable secret-safe error envelopes and request IDs, deterministic OpenAPI 3.1 generation, and incremental canonical NDJSON with disconnect cancellation. Fake-only route tests cover authentication, complete dispatch, malformed and unknown input, cross-boundary redaction, error mapping, incremental streaming, cancellation, and OpenAPI contents and determinism. Verification passed 218 tests with 1,029 expectations, 8 focused API tests with 77 expectations, typecheck, diff checking, import-boundary inspection, standalone Linux x86-64 baseline daemon compilation, v0 receiver Node bundle syntax, and 45 explicit receiver/plugin/Pi MCP tests. No credentials, live provider operations, runtime adapter, repository/provider composition, Phase H, client, or MCP work was added.
 - 2026-08-27: Phase H added the private local Bun application composing strict secret-safe environment configuration, a fixed development identity, SQLite repositories, core, Box, and the shared API, with graceful server/database shutdown, placeholder configuration, local curl documentation, and root start/test/smoke scripts. Five credential-free real-listener tests cover authentication, health/OpenAPI, SQLite reconstruction, lifecycle, snapshots and snapshot-sourced creation, all seven tools through a fake provider and canonical daemon, incremental bash delivery, pre-first-chunk disconnect cancellation, and public/log redaction. Nine fake smoke-safety tests cover authorization and redaction, ambiguous and accepted-but-unparsed exact create replay, definite no-retry, incremental NDJSON, bounded cleanup/pagination with cursor-cycle rejection, discovery-failure cleanup, and the complete fake flow. The separately gated isolated-account Box smoke uses unique public snapshot names, baseline-diff sandbox recovery, bounded deletion reconciliation, and nonterminal-resource verification; the public sandbox DTO has no ownership marker, so stronger cleanup guarantees are explicitly not claimed. Verification passed 232 tests with 1,120 expectations, including 14 focused Phase H tests with 91 expectations. The live smoke was not run. No credentials were loaded, no live provider operation occurred, and no hosted deployment, DynamoDB, Lambda, typed client, or MCP work was added.
+- 2026-08-28: Phase J added the supported bundled Bun `@waterbox/mcp` package with canonical eight-tool handling, single-flight process-local sandbox selection, persistent Direct state, package-local composition of SQLite, core, and Box under one local identity, explicit `box` and unsupported `waterbox` provider branches, npm/registry metadata, and a separately gated cleanup-safe live Direct smoke. The experimental HTTP-backed MCP remains unchanged as the Cloud demo. Automated verification passed 248 tests with 1,199 expectations, typecheck, diff checking, MCP bundling, package dry-run, and Box template validation. The authorized Direct smoke completed all seven canonical tools and reconciled the isolated Box account to its zero-resource baseline. The demo Cloud regression was attempted after Direct passed, but local `opencode2` model-provider authentication failed before sandbox creation; cleanup again confirmed the zero-resource baseline.
+- 2026-08-28: The agent-owned-sandbox policy removed Waterbox's secondary `/workspace` containment, traversal rejection, symlink rejection, ignore-file filtering, and unprivileged Box CLI execution. Relative paths and commands still default to `/workspace`, while every canonical tool can address the full provider sandbox and Box runs the CLI as root. The immutable `waterbox-system-v3` template was built and live-verified with all seven tools under `/root`, including UID 0 bash. Bounded diagnostics identified Box's benign deleted-working-directory shell warning; the launcher now changes to the recreated workspace and the provider ignores only that exact warning. Final emergency cleanup reconciled the isolated account to zero visible and zero active boxes.
+- 2026-08-28: The supported Direct MCP replaced its process-local selected-sandbox facade with explicit resource ownership. It exposes idempotent sandbox creation, live provider status probing, sandbox deletion, user snapshot listing/creation/deletion, and all seven canonical operations with required sandbox IDs. Provider system templates remain outside the user-owned snapshot namespace and cannot be deleted through the MCP. Automated verification passed 255 tests, typecheck, package build/dry-run, template validation, and diff checking. The authorized live smoke probed Box directly, exercised all seven operations, created and deleted one user snapshot and sandbox through the MCP, then reconciled the isolated account to zero visible and zero active boxes.
+- 2026-08-29: Command execution was aligned with the provider-proxy boundary. The runtime mutation queue and Box-wide launcher lock were removed, each invocation now dispatches independently, and patch reports partial completion instead of risking rollback over concurrent changes. Waterbox still performs one provider request with no command retry or deduplication; native provider concurrency remains authoritative. The immutable Box template advanced to `waterbox-system-v5`.
