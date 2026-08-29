@@ -14,7 +14,6 @@ const EnvironmentSchema = z.object({
   BOX_API_BASE_URL: z.url().default("https://ascii.dev/api/box/v1"),
   BOX_API_KEY: secret,
   BOX_SYSTEM_TEMPLATE_REF: nonSecret,
-  WATERBOX_DAEMON_PORT: port.default(8788),
   BOX_POLL_INTERVAL_MS: positiveInteger.default(1_000),
   BOX_POLL_TIMEOUT_MS: positiveInteger.default(120_000),
 }).strict()
@@ -29,7 +28,6 @@ export interface LocalApiConfig {
     apiBaseUrl: string
     apiKey: string
     systemTemplateRef: string
-    daemonPort: number
     polling: { intervalMs: number; timeoutMs: number }
   }
 }
@@ -57,7 +55,6 @@ export function parseLocalApiConfig(environment: Record<string, string | undefin
       apiBaseUrl: parsed.data.BOX_API_BASE_URL,
       apiKey: parsed.data.BOX_API_KEY,
       systemTemplateRef: parsed.data.BOX_SYSTEM_TEMPLATE_REF,
-      daemonPort: parsed.data.WATERBOX_DAEMON_PORT,
       polling: { intervalMs: parsed.data.BOX_POLL_INTERVAL_MS, timeoutMs: parsed.data.BOX_POLL_TIMEOUT_MS },
     },
   }

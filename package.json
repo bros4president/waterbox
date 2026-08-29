@@ -9,12 +9,17 @@
   "scripts": {
     "deploy": "bun run scripts/deploy.ts",
     "smoke": "bun run scripts/smoke.ts",
+    "demo:opencode2": "OPENCODE_CONFIG=$PWD/opencode.v2.json OPENCODE_CONFIG_PROJECT_DISABLE=true node_modules/.bin/opencode2",
     "smoke:pi-mcp": "bun run scripts/pi-mcp-smoke.ts",
     "chat:pi-mcp": "bun run scripts/pi-mcp-chat.ts",
-    "build:box-template": "bun run --cwd packages/sandbox-daemon build && bun run scripts/build-box-system-template.ts",
+    "build:box-template": "bun run --cwd packages/sandbox-cli build && bun run scripts/build-box-system-template.ts",
     "start:api-local": "bun run apps/api-local/src/main.ts",
     "test:api-local": "bun test apps/api-local/test/integration.test.ts",
     "smoke:control-plane-box": "bun run scripts/control-plane-box-smoke.ts",
+    "experiment:control-plane-mcp": "bun run scripts/control-plane-mcp-experiment.ts",
+    "chat:control-plane-mcp": "bun run scripts/control-plane-mcp-experiment.ts --interactive",
+    "build:mcp": "bun run --cwd packages/mcp build",
+    "smoke:mcp-direct": "bun run build:mcp && bun run scripts/direct-mcp-smoke.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
@@ -29,7 +34,7 @@
     "@opencode-ai/plugin": "0.0.0-beta-17823"
   },
   "devDependencies": {
-    "@opencode-ai/cli": "0.0.0-beta-17963",
+    "@opencode-ai/cli": "0.0.0-dev-18434",
     "@types/bun": "latest",
     "@types/node": "^24.3.0",
     "typescript": "^5.9.2"

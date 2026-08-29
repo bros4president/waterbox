@@ -6,7 +6,7 @@ development-only fixed bearer identity; do not expose the listener publicly.
 
 The examples below assume `URL=http://127.0.0.1:8787`, `KEY` is the configured development
 key, and `SANDBOX`/`SNAPSHOT` contain Waterbox public IDs. Responses never contain Box IDs,
-protected hosting URLs, provider references, or account IDs.
+serialized CLI invocations, provider references, or account IDs.
 
 ```sh
 curl -H "Authorization: Bearer $KEY" "$URL/health"
@@ -23,6 +23,10 @@ curl -H "Authorization: Bearer $KEY" "$URL/v1/snapshots"
 curl -H "Authorization: Bearer $KEY" "$URL/v1/snapshots/$SNAPSHOT"
 curl -X DELETE -H "Authorization: Bearer $KEY" "$URL/v1/snapshots/$SNAPSHOT"
 
+# Secure file transfer is a two-step age/X25519 protocol:
+curl -X POST -H "Authorization: Bearer $KEY" "$URL/v1/sandboxes/$SANDBOX/secure-file-transfers"
+curl -X PUT -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"targetPath":"/root/.aws/credentials","ciphertext":"<canonical-base64-age-file>"}' "$URL/v1/sandboxes/$SANDBOX/secure-file-transfers/$TRANSFER"
+
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"filePath":"/workspace/a.txt"}' "$URL/v1/sandboxes/$SANDBOX/tools/read"
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"filePath":"/workspace/a.txt","content":"hello"}' "$URL/v1/sandboxes/$SANDBOX/tools/write"
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"filePath":"/workspace/a.txt","oldString":"hello","newString":"world"}' "$URL/v1/sandboxes/$SANDBOX/tools/edit"
@@ -31,6 +35,8 @@ curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json'
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"pattern":"world","path":"/workspace"}' "$URL/v1/sandboxes/$SANDBOX/tools/grep"
 curl -N -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 1; printf world"}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
 ```
+
+The initiation response contains `transferId`, an `age1...` recipient, algorithm `age-x25519`, and a fixed ten-minute `expiresAt`. Encrypt an existing local file with a standard age implementation, Base64-encode the binary age file, and consume the transfer once before expiry. Plaintext is limited to 1 MiB. The API and provider transport handle only ciphertext; the destination is decrypted and readable inside the sandbox. Creating another transfer is the recovery path after expiry or an uncertain consumption outcome.
 
 The real Box smoke flow is destructive and separately gated. It is never run by `bun test`.
 Run it only against an otherwise idle, dedicated development account: sandbox DTOs expose
@@ -42,3 +48,16 @@ After starting the local API with Box configuration, set `WATERBOX_BOX_SMOKE_AUT
 with bounded GET polling and verifies no run-owned sandbox remains nonterminal. If exact replay
 and isolated-account discovery cannot recover an accepted resource, the script reports cleanup
 as incomplete; the public V1 sandbox shape cannot support a stronger ownership guarantee.
+
+For a manual OpenCode session over the temporary local API and experimental MCP, run:
+
+```sh
+WATERBOX_MCP_EXPERIMENT_AUTHORIZATION=I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES \
+WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT=YES \
+BOX_SYSTEM_TEMPLATE_REF=waterbox-system-v5 \
+bun run chat:control-plane-mcp
+```
+
+The command opens the repository-pinned OpenCode TUI. Ask it to create a remote sandbox,
+then use the `remote` tools normally. Exiting the TUI stops the temporary API and performs
+bounded API and provider-level cleanup. Run it only against an isolated development account.

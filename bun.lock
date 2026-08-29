@@ -15,7 +15,7 @@
         "@opencode-ai/plugin": "0.0.0-beta-17823",
       },
       "devDependencies": {
-        "@opencode-ai/cli": "0.0.0-beta-17963",
+        "@opencode-ai/cli": "0.0.0-dev-18434",
         "@types/bun": "latest",
         "@types/node": "^24.3.0",
         "typescript": "^5.9.2",
@@ -33,6 +33,29 @@
       },
       "devDependencies": {
         "@waterbox/daemon": "workspace:*",
+      },
+    },
+    "packages/experimental-control-plane-mcp": {
+      "name": "@waterbox/experimental-control-plane-mcp",
+      "dependencies": {
+        "@modelcontextprotocol/sdk": "1.25.3",
+        "@waterbox/contracts": "workspace:*",
+      },
+    },
+    "packages/mcp": {
+      "name": "@waterbox/mcp",
+      "version": "0.1.0",
+      "bin": {
+        "waterbox-mcp": "./dist/waterbox-mcp.js",
+      },
+      "devDependencies": {
+        "@modelcontextprotocol/sdk": "1.25.3",
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+        "@waterbox/provider-box": "workspace:*",
+        "@waterbox/repository-sqlite": "workspace:*",
+        "age-encryption": "0.3.1",
+        "zod": "4.1.8",
       },
     },
     "packages/pi-mcp": {
@@ -68,6 +91,15 @@
         "zod": "^4.1.5",
       },
     },
+    "packages/sandbox-cli": {
+      "name": "@waterbox/cli",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/runtime": "workspace:*",
+        "age-encryption": "0.3.1",
+        "zod": "^4.1.5",
+      },
+    },
     "packages/sandbox-contracts": {
       "name": "@waterbox/contracts",
       "dependencies": {
@@ -90,6 +122,7 @@
     "packages/sandbox-provider-box": {
       "name": "@waterbox/provider-box",
       "dependencies": {
+        "@waterbox/cli": "workspace:*",
         "@waterbox/contracts": "workspace:*",
         "@waterbox/core": "workspace:*",
       },
@@ -106,6 +139,7 @@
       "name": "@waterbox/runtime",
       "dependencies": {
         "@waterbox/contracts": "workspace:*",
+        "age-encryption": "0.3.1",
       },
     },
   },
@@ -247,6 +281,14 @@
 
     "@msgpackr-extract/msgpackr-extract-win32-x64": ["@msgpackr-extract/msgpackr-extract-win32-x64@3.0.4", "", { "os": "win32", "cpu": "x64" }, "sha512-CmCXPQrkbwExx3j946/PtHWHbYJiCRBRDl4BlkRQcJB/YOwQxJRTpoo7aTsortjgoJ1x7opzTSxn7C+ASSLVjQ=="],
 
+    "@noble/ciphers": ["@noble/ciphers@2.4.0", "", {}, "sha512-AnjFn0Jv92laAkvMrghlFZq4qQCIN/4DxFV/eooqtC2YTjB7kBeLMS2T9KJX4Dn+ZVXLOwK0lSgqDtx9gvxtiw=="],
+
+    "@noble/curves": ["@noble/curves@2.4.0", "", { "dependencies": { "@noble/hashes": "2.4.0" } }, "sha512-P4/62zrgfH33CneE3Dn4WhJVA22YUU0eR51wKIan4NVRvwsA0YnPTwWGpNbpuacSujmSFLvyzpyuR30+fbq2Ew=="],
+
+    "@noble/hashes": ["@noble/hashes@2.4.0", "", {}, "sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA=="],
+
+    "@noble/post-quantum": ["@noble/post-quantum@0.5.4", "", { "dependencies": { "@noble/curves": "~2.0.0", "@noble/hashes": "~2.0.0" } }, "sha512-leww0zzIirrvwaYMPI9fj6aRIlA/c6Y0/lifQQ1YOOyHEr0MNH3yYpjXeiVG+tWdPps4XxGclFWX2INPO3Yo5w=="],
+
     "@oc-remote/pi-mcp": ["@oc-remote/pi-mcp@workspace:packages/pi-mcp"],
 
     "@oc-remote/plugin": ["@oc-remote/plugin@workspace:packages/plugin"],
@@ -257,31 +299,29 @@
 
     "@opencode-ai/ai": ["@opencode-ai/ai@0.0.0-beta-17823", "", { "dependencies": { "@opencode-ai/schema": "0.0.0-beta-17823", "@smithy/eventstream-codec": "4.2.14", "@smithy/util-utf8": "4.2.2", "aws4fetch": "1.0.20", "effect": "4.0.0-rc.110", "google-auth-library": "10.5.0" } }, "sha512-vLKEKVG2Ir9iZXeCrEuybKQQUXGidXkW1hU41Y7w0+Iz8Qgw8ld7LWj05878lUdOekvk1Ra6qFQ1DUAfVvVOYQ=="],
 
-    "@opencode-ai/cli": ["@opencode-ai/cli@0.0.0-beta-17963", "", { "optionalDependencies": { "@opencode-ai/cli-darwin-arm64": "0.0.0-beta-17963", "@opencode-ai/cli-darwin-x64": "0.0.0-beta-17963", "@opencode-ai/cli-darwin-x64-baseline": "0.0.0-beta-17963", "@opencode-ai/cli-linux-arm64": "0.0.0-beta-17963", "@opencode-ai/cli-linux-arm64-musl": "0.0.0-beta-17963", "@opencode-ai/cli-linux-x64": "0.0.0-beta-17963", "@opencode-ai/cli-linux-x64-baseline": "0.0.0-beta-17963", "@opencode-ai/cli-linux-x64-baseline-musl": "0.0.0-beta-17963", "@opencode-ai/cli-linux-x64-musl": "0.0.0-beta-17963", "@opencode-ai/cli-windows-arm64": "0.0.0-beta-17963", "@opencode-ai/cli-windows-x64": "0.0.0-beta-17963", "@opencode-ai/cli-windows-x64-baseline": "0.0.0-beta-17963" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "opencode2": "bin/opencode2.exe" } }, "sha512-cOGHC28YCW/4nfO6Fy4kVCD5HHUrjgkTPqf3NaZ1cBRGhSe4rQysa+ojZploQOiekyyi3lcN1Kw7O6q4rzPMWg=="],
+    "@opencode-ai/cli": ["@opencode-ai/cli@0.0.0-dev-18434", "", { "optionalDependencies": { "@opencode-ai/cli-darwin-arm64": "0.0.0-dev-18434", "@opencode-ai/cli-darwin-x64": "0.0.0-dev-18434", "@opencode-ai/cli-darwin-x64-baseline": "0.0.0-dev-18434", "@opencode-ai/cli-linux-arm64": "0.0.0-dev-18434", "@opencode-ai/cli-linux-arm64-musl": "0.0.0-dev-18434", "@opencode-ai/cli-linux-x64": "0.0.0-dev-18434", "@opencode-ai/cli-linux-x64-baseline": "0.0.0-dev-18434", "@opencode-ai/cli-linux-x64-baseline-musl": "0.0.0-dev-18434", "@opencode-ai/cli-linux-x64-musl": "0.0.0-dev-18434", "@opencode-ai/cli-windows-arm64": "0.0.0-dev-18434", "@opencode-ai/cli-windows-x64": "0.0.0-dev-18434", "@opencode-ai/cli-windows-x64-baseline": "0.0.0-dev-18434" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "opencode2": "bin/opencode2.exe" } }, "sha512-vHvfH7yH7htRupJbZasYqyPvBYGN9cS6d68dNQU1P/Tvst5iRm4Y9+Z7VUcbLKZ9up87PgAgubWTtrL6s1WOEQ=="],
 
-    "@opencode-ai/cli-darwin-arm64": ["@opencode-ai/cli-darwin-arm64@0.0.0-beta-17963", "", { "os": "darwin", "cpu": "arm64" }, "sha512-x9E0ik26iYfis6ZjDTh9dUeugGvuAueYPEeE5B6u+KCw0njoGmptlxJO92of09grVZokg5ojFx58KvZLhcrOXA=="],
+    "@opencode-ai/cli-darwin-arm64": ["@opencode-ai/cli-darwin-arm64@0.0.0-dev-18434", "", { "os": "darwin", "cpu": "arm64" }, "sha512-rDgzeGAbQiw8pmQMmYThsWUwIny3XJcC1poFTDLzuNstAOMQVcts6RF41geSIh2hXSAB7Z74n9SbW2xkeZ1Afw=="],
 
-    "@opencode-ai/cli-darwin-x64": ["@opencode-ai/cli-darwin-x64@0.0.0-beta-17963", "", { "os": "darwin", "cpu": "x64" }, "sha512-IE4ffm5vsEEDiYoellEzMublXJdYGd1bmg6vZiX8SCl1TtKVvqJsDc3uKaVxXRso6INyd8LRzeRMO/Je9LUcvQ=="],
+    "@opencode-ai/cli-darwin-x64": ["@opencode-ai/cli-darwin-x64@0.0.0-dev-18434", "", { "os": "darwin", "cpu": "x64" }, "sha512-UVi/M5J/qXsq9q/IZTDyZzplkktb4hJeE0ZWMLonLuEQ3u/FRWATrSeYs8x0+Ko1tx7WrRRnfx9yrRIXm5hjzQ=="],
 
-    "@opencode-ai/cli-darwin-x64-baseline": ["@opencode-ai/cli-darwin-x64-baseline@0.0.0-beta-17963", "", { "os": "darwin", "cpu": "x64" }, "sha512-m0vQ5DbCo/66PtX3F4enUM3wPDqSYfp9osN4GO8ZVgeHZm+UUwgxYlBO9IDPXFSw6NJe2O5ng+M3yRYhyahObA=="],
+    "@opencode-ai/cli-darwin-x64-baseline": ["@opencode-ai/cli-darwin-x64-baseline@0.0.0-dev-18434", "", { "os": "darwin", "cpu": "x64" }, "sha512-GOk2EsupxJDn5BWv4P9wN85bXeFTSXitfT5bAaWGqmc9x06339CveWCG0lqeAQl++kpvq9YSOS2W0JvafhlO4Q=="],
 
-    "@opencode-ai/cli-linux-arm64": ["@opencode-ai/cli-linux-arm64@0.0.0-beta-17963", "", { "os": "linux", "cpu": "arm64" }, "sha512-3cnYeFZk9N3YikKp9zQF2oeYJ2SIyhwNB0UNQ5GY27JAB5ToS+TXmxRQg7E3P9VvuF3bsNV/r3F7cjoApAPihQ=="],
+    "@opencode-ai/cli-linux-arm64": ["@opencode-ai/cli-linux-arm64@0.0.0-dev-18434", "", { "os": "linux", "cpu": "arm64" }, "sha512-px6uKWG8X0FXldBc7ujhDw3bTxyTG2RHUQ9ZfV6jJgxe22f3Rp4mQT0IfLDOoZYRgxaJWghAOSbQFwi3SS2Rvw=="],
 
-    "@opencode-ai/cli-linux-arm64-musl": ["@opencode-ai/cli-linux-arm64-musl@0.0.0-beta-17963", "", { "os": "linux", "cpu": "arm64" }, "sha512-OBYPAOaB5cx8h0jIyPOdDgq4LYPtAFHsmrjlMPxEimZSGgn8NRFiGlxN8Jizk5XUJcRCjeB9tH8azeXDOKSBHQ=="],
+    "@opencode-ai/cli-linux-arm64-musl": ["@opencode-ai/cli-linux-arm64-musl@0.0.0-dev-18434", "", { "os": "linux", "cpu": "arm64" }, "sha512-Bg+T19HTDDNeAt7OzpAzhLgJsGBwy48N+fb4aEghJPNyTALT0euePTx4Kf+tVASChwIiN3Vwfjy9l32oWbx9bQ=="],
 
-    "@opencode-ai/cli-linux-x64": ["@opencode-ai/cli-linux-x64@0.0.0-beta-17963", "", { "os": "linux", "cpu": "x64" }, "sha512-GK25+LmmnoQNsf6OXZzx13fZPkm66/XrOUsEYZL2S9PoeQgrIPyxopGd5aGzA3ErBxRZ4tGB9c5uvDzhu8GW4Q=="],
+    "@opencode-ai/cli-linux-x64": ["@opencode-ai/cli-linux-x64@0.0.0-dev-18434", "", { "os": "linux", "cpu": "x64" }, "sha512-V+8ju0Fuz5bBHtqmrwnHEb1U4lKSqX3f5FJK91Oum9klZdxZz8aukPm3wtxY5OVOTGkT7d4Azz4KTjrisnTYsw=="],
 
-    "@opencode-ai/cli-linux-x64-baseline": ["@opencode-ai/cli-linux-x64-baseline@0.0.0-beta-17963", "", { "os": "linux", "cpu": "x64" }, "sha512-7cqBL7uggNSqXvQHOa0pHOnzr81HOZYLd4T8ym1FIRgu8TAUT8ZWCW/7Jr8JHG8/nuR95KvT9/ptZIn5QcCiTw=="],
+    "@opencode-ai/cli-linux-x64-baseline": ["@opencode-ai/cli-linux-x64-baseline@0.0.0-dev-18434", "", { "os": "linux", "cpu": "x64" }, "sha512-jziGdTKrx0jbsMQNT1MLtBQejAuv2nTLLDsFpXeXZlc59YfmIcE/Jrv/ppY4wuiRY7afGkdZrvUgIV8h+iAREg=="],
 
-    "@opencode-ai/cli-linux-x64-baseline-musl": ["@opencode-ai/cli-linux-x64-baseline-musl@0.0.0-beta-17963", "", { "os": "linux", "cpu": "x64" }, "sha512-MEePx2IATZk2NFyZ8cNVhXrxeTcPE9atkbW+lHFTVIO+34LrBEjs3h2fxCTX8+NWgCa2XLHbJcBBKePtUxdBhQ=="],
+    "@opencode-ai/cli-linux-x64-baseline-musl": ["@opencode-ai/cli-linux-x64-baseline-musl@0.0.0-dev-18434", "", { "os": "linux", "cpu": "x64" }, "sha512-ASS4gye2F09SQNqnN6iDGUO25RTxYAxu5r9WhfrUYDbpTsKrxFMHzpQSRZW/Kb3ik/RfBz+ArGTgVR6cjdOZ7A=="],
 
-    "@opencode-ai/cli-linux-x64-musl": ["@opencode-ai/cli-linux-x64-musl@0.0.0-beta-17963", "", { "os": "linux", "cpu": "x64" }, "sha512-psLsZCVRxD2HuqwtjCoYsRT2CqYJGWP0je43s4sUOb9OlsZQTcTSxrG1qOWICHGz1dPO1TAdb09+QEj7GkXFVA=="],
+    "@opencode-ai/cli-windows-arm64": ["@opencode-ai/cli-windows-arm64@0.0.0-dev-18434", "", { "os": "win32", "cpu": "arm64" }, "sha512-Lp8uGY39tXf/zqSsN+0Qh5hKnX2vKC5xFek/3rfEniggJZjaKKIzoDcGRWMp50yY6O5VR0KxxG8JrAmKaB9OIg=="],
 
-    "@opencode-ai/cli-windows-arm64": ["@opencode-ai/cli-windows-arm64@0.0.0-beta-17963", "", { "os": "win32", "cpu": "arm64" }, "sha512-rRAsTSR0tTLcCnQfr4pkI4GO19NQHcN+tmEthjb5Sy8+x0ApqY+5qOK7FjN7bkr4nBUZkvO/KLq4S4+50aFnxw=="],
+    "@opencode-ai/cli-windows-x64": ["@opencode-ai/cli-windows-x64@0.0.0-dev-18434", "", { "os": "win32", "cpu": "x64" }, "sha512-ZJmhqZFKhngavjYkP5AK+7/IuzCLO12zhWCci4QwV+OGBsTVouMRDHhcor+Pjkq+Sqs1JRHZTU9y5YqGMTgqFw=="],
 
-    "@opencode-ai/cli-windows-x64": ["@opencode-ai/cli-windows-x64@0.0.0-beta-17963", "", { "os": "win32", "cpu": "x64" }, "sha512-y6WtVxcILaqiSOyBgBDOMfPcnGB2WDXmmyDkqwWx9xFhvPkpwfP2PkM/OIDAax0wD4L9DPjB6d5bufRswfZ9aQ=="],
-
-    "@opencode-ai/cli-windows-x64-baseline": ["@opencode-ai/cli-windows-x64-baseline@0.0.0-beta-17963", "", { "os": "win32", "cpu": "x64" }, "sha512-A1av5XDFE/2dTrnoVRTegMFhGmseNjyWEWXqTt4ujAkrvpuwoOkLzhlkwdgkghNT7hpLx4do0K1IU5oPOryrDw=="],
+    "@opencode-ai/cli-windows-x64-baseline": ["@opencode-ai/cli-windows-x64-baseline@0.0.0-dev-18434", "", { "os": "win32", "cpu": "x64" }, "sha512-1MJkovlpR7ULTtvTF6MUn9U/RFflx61Tyx4Bt+JPES+16GtulH56UxbkjKFkElxKN+TvJRczt5n6H72px10rzw=="],
 
     "@opencode-ai/client": ["@opencode-ai/client@0.0.0-beta-17823", "", { "dependencies": { "@opencode-ai/protocol": "0.0.0-beta-17823", "@opencode-ai/schema": "0.0.0-beta-17823" }, "peerDependencies": { "effect": "4.0.0-rc.110", "solid-js": ">=1.9.0" }, "optionalPeers": ["effect", "solid-js"] }, "sha512-pM/5ZthFe4o+j42EIzG31QsucQhY5pLikoC58fT+J5LIbvvkDaKn1pPxGqeh31B61LSv3qiD+FbYOzesH8b7dQ=="],
 
@@ -314,6 +354,8 @@
     "@protobufjs/pool": ["@protobufjs/pool@1.1.0", "", {}, "sha512-0kELaGSIDBKvcgS4zkjz1PeddatrjYcmMWOlAuAPwAeccUrPHdUqo/J6LiymHHEiJT5NrF1UVwxY14f+fy4WQw=="],
 
     "@protobufjs/utf8": ["@protobufjs/utf8@1.1.2", "", {}, "sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug=="],
+
+    "@scure/base": ["@scure/base@2.4.0", "", {}, "sha512-thZ1TuJwFwBblOhgsjDKvvGirBxNp+wSvY/DR6tJBJOTDhdAAcHJ8Vbr2eFnqaxeca4+t0i9KBf+uHYGWwZORg=="],
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
@@ -351,11 +393,17 @@
 
     "@waterbox/api-local": ["@waterbox/api-local@workspace:apps/api-local"],
 
+    "@waterbox/cli": ["@waterbox/cli@workspace:packages/sandbox-cli"],
+
     "@waterbox/contracts": ["@waterbox/contracts@workspace:packages/sandbox-contracts"],
 
     "@waterbox/core": ["@waterbox/core@workspace:packages/sandbox-core"],
 
     "@waterbox/daemon": ["@waterbox/daemon@workspace:packages/sandbox-daemon"],
+
+    "@waterbox/experimental-control-plane-mcp": ["@waterbox/experimental-control-plane-mcp@workspace:packages/experimental-control-plane-mcp"],
+
+    "@waterbox/mcp": ["@waterbox/mcp@workspace:packages/mcp"],
 
     "@waterbox/provider-box": ["@waterbox/provider-box@workspace:packages/sandbox-provider-box"],
 
@@ -364,6 +412,8 @@
     "@waterbox/runtime": ["@waterbox/runtime@workspace:packages/sandbox-runtime"],
 
     "accepts": ["accepts@2.0.0", "", { "dependencies": { "mime-types": "^3.0.0", "negotiator": "^1.0.0" } }, "sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng=="],
+
+    "age-encryption": ["age-encryption@0.3.1", "", { "dependencies": { "@noble/ciphers": "^2.1.1", "@noble/curves": "^2.0.1", "@noble/hashes": "^2.0.1", "@noble/post-quantum": "^0.5.3", "@scure/base": "^2.0.0" } }, "sha512-bYgd7lxM7tEANmb9bXf7xTFB3Qpq+JGKinVSdFh5MV+t2fJJZSTdKhWkvXTFJQGysZd+K9Dt3F+n+4DKazXlnQ=="],
 
     "agent-base": ["agent-base@7.1.4", "", {}, "sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ=="],
 
@@ -720,6 +770,10 @@
     "@aws-sdk/client-bedrock-runtime/@aws-sdk/token-providers": ["@aws-sdk/token-providers@3.1048.0", "", { "dependencies": { "@aws-sdk/core": "^3.974.11", "@aws-sdk/nested-clients": "^3.997.9", "@aws-sdk/types": "^3.973.8", "@smithy/core": "^3.24.2", "@smithy/types": "^4.14.1", "tslib": "^2.6.2" } }, "sha512-k0y/GcuesuSfWyUM0WamrGyeZmltRYaPbHO82UDA6mZ/doB+FOHKutikPAtSXMn/hDz970cF+iRuuiYO9VEbAA=="],
 
     "@earendil-works/pi-ai/@smithy/node-http-handler": ["@smithy/node-http-handler@4.7.3", "", { "dependencies": { "@smithy/core": "^3.24.3", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-/jPhevcTFPMVl6KNjbaI47iOg1zxC7IsnX4PQDGVZKMFceOXtB8IEYaB7a9VvkP/3oC60WzTeKocvSI7vLT0vA=="],
+
+    "@noble/post-quantum/@noble/curves": ["@noble/curves@2.0.1", "", { "dependencies": { "@noble/hashes": "2.0.1" } }, "sha512-vs1Az2OOTBiP4q0pwjW5aF0xp9n4MxVrmkFBxc6EKZc6ddYx5gaZiAsZoq0uRRXWbi3AT/sBqn05eRPtn1JCPw=="],
+
+    "@noble/post-quantum/@noble/hashes": ["@noble/hashes@2.0.1", "", {}, "sha512-XlOlEbQcE9fmuXxrVTXCTlG2nlRXa9Rj3rr5Ue/+tX+nmkgbX720YHh0VR3hBF9xDvwnb8D2shVGOwNx+ulArw=="],
 
     "body-parser/content-type": ["content-type@2.1.0", "", {}, "sha512-mj7UPXE0jaqaOsukNZRUEfEi2AcL7C/vwmwcHV0O97eO1E1pxBZuyjlZrx5seTaNBg1U6+o35wpa35Qfcc+7ag=="],
 

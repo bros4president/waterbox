@@ -99,7 +99,7 @@ async function fixture(ids = [sandboxId, secondSandboxId]) {
   const provider = new DaemonBackedProvider(`http://127.0.0.1:${daemonServer.port}`)
   const config: LocalApiConfig = {
     host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: apiKey, accountId,
-    box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", systemTemplateRef: "unused-template", daemonPort: 8788, polling: { intervalMs: 1, timeoutMs: 10 } },
+    box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", systemTemplateRef: "unused-template", polling: { intervalMs: 1, timeoutMs: 10 } },
   }
   const create = () => createLocalControlPlane(config, { provider, clock: new FixedClock(), ids: new SequenceIdGenerator(ids, [snapshotId]) })
   const plane = create()
