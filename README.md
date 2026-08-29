@@ -26,9 +26,9 @@ The project-local tools use:
 
 The AWS profile is resolved with the standard AWS SDK credential chain. No access keys are stored by this project.
 
-The plugin options are configured in the project-local `opencode.json`.
+The plugin options are configured in `opencode.v2.json`. The file is not named `opencode.json` so the machine's OpenCode V1 does not auto-discover the incompatible V2 configuration.
 
-OpenCode 2 loads the local plugin from `packages/plugin/src/index.ts`. The plugin is pinned to the same beta version as the `opencode2` CLI because the V2 API is still changing.
+The `demo:opencode2` command passes that configuration explicitly to the pinned `opencode2` CLI, which loads the local plugin from `packages/plugin/src/index.ts`. The plugin is pinned to the same beta version as the CLI because the V2 API is still changing.
 
 ## Commands
 
@@ -50,7 +50,13 @@ Deployment state is written to `.oc-remote/deployment.json`.
 
 ## Demo
 
-Start OpenCode from this directory, then ask it to:
+Start the isolated OpenCode V2 demo from this directory:
+
+```bash
+bun run demo:opencode2
+```
+
+Then ask it to:
 
 ```text
 Clone https://github.com/octocat/Hello-World.git into /workspace/hello-world,
