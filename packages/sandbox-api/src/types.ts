@@ -29,6 +29,8 @@ export type WaterboxCore = Pick<SandboxService,
   | "getSnapshot"
   | "listSnapshots"
   | "deleteSnapshot"
+  | "initiateSecureFileTransfer"
+  | "consumeSecureFileTransfer"
   | "executeTool"
 >
 

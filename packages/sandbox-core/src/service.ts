@@ -9,6 +9,10 @@ import {
   type SandboxId,
   type SandboxPage,
   type SandboxState,
+  type SecureTransferConsumeRequest,
+  type SecureTransferDelivered,
+  type SecureTransferId,
+  type SecureTransferInitiated,
   type Snapshot,
   type SnapshotId,
   type SnapshotPage,
@@ -16,6 +20,7 @@ import {
   type ToolName,
 } from "@waterbox/contracts"
 import { DomainError, errorRecord, mapProviderError } from "./errors.ts"
+import { ProviderError } from "./provider.ts"
 import type {
   Clock,
   IdempotencyRepository,
@@ -198,6 +203,38 @@ export class SandboxService {
   async getSandbox(identity: Identity, sandboxId: SandboxId, signal?: AbortSignal): Promise<Sandbox> {
     const record = await this.#getSandboxRecord(identity, sandboxId)
     return toSandbox(await this.#reconcileSandbox(record, signal ?? NEVER_ABORTED))
+  }
+
+  async probeSandbox(identity: Identity, sandboxId: SandboxId, signal: AbortSignal = NEVER_ABORTED): Promise<Sandbox> {
+    let current = await this.#getSandboxRecord(identity, sandboxId)
+    for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
+      signal.throwIfAborted()
+      const provider = this.#provider(current.provider)
+      let observation
+      try {
+        observation = await provider.inspectSandbox({ accountId: current.accountId, providerRef: current.providerRef, signal })
+        signal.throwIfAborted()
+      } catch (error) {
+        if (signal.aborted) throw signal.reason
+        throw mapProviderError(error)
+      }
+      if (isTransitionalSandbox(current.state)) return toSandbox(await this.#applySandboxObservation(current, current.state, observation))
+      if (!isAllowedLiveSandboxObservation(current.state, observation.state)) {
+        throw new DomainError("provider_failure", "The provider returned an invalid live sandbox state")
+      }
+      if (current.state === observation.state) return toSandbox(current)
+      const updated: SandboxRecord = {
+        ...current,
+        providerRef: observation.providerRef,
+        state: observation.state,
+        version: current.version + 1,
+        updatedAt: this.#now(),
+        lastError: undefined,
+      }
+      if (await this.#deps.sandboxes.compareAndSwap(updated, current.version)) return toSandbox(updated)
+      current = await this.#getSandboxRecord(identity, sandboxId)
+    }
+    throw new DomainError("conflict", "The sandbox changed concurrently")
   }
 
   async listSandboxes(identity: Identity, request: CursorPaginationRequest = {}, signal?: AbortSignal): Promise<SandboxPage> {
@@ -398,6 +435,41 @@ export class SandboxService {
       throw mapProviderError(error)
     }
     return mapToolErrors(events, providerSignal)
+  }
+
+  async initiateSecureFileTransfer(identity: Identity, sandboxId: SandboxId, signal: AbortSignal = NEVER_ABORTED): Promise<SecureTransferInitiated> {
+    signal.throwIfAborted()
+    const existing = await this.#getSandboxRecord(identity, sandboxId)
+    const transfers = this.#requireSecureFileTransfer(this.#provider(existing.provider))
+    const sandbox = await this.#ensureRunning(identity, sandboxId, signal)
+    try {
+      const result = await transfers.initiate({ accountId: identity.accountId, providerRef: sandbox.providerRef, signal })
+      signal.throwIfAborted()
+      return result
+    } catch (error) {
+      if (signal.aborted) throw signal.reason
+      throw mapProviderError(error)
+    }
+  }
+
+  async consumeSecureFileTransfer(
+    identity: Identity,
+    sandboxId: SandboxId,
+    transferId: SecureTransferId,
+    request: SecureTransferConsumeRequest,
+    signal: AbortSignal = NEVER_ABORTED,
+  ): Promise<SecureTransferDelivered> {
+    signal.throwIfAborted()
+    const existing = await this.#getSandboxRecord(identity, sandboxId)
+    const transfers = this.#requireSecureFileTransfer(this.#provider(existing.provider))
+    const sandbox = await this.#ensureRunning(identity, sandboxId, signal)
+    try {
+      const result = await transfers.consume({ accountId: identity.accountId, providerRef: sandbox.providerRef, transferId, ...request, signal })
+      return result
+    } catch (error) {
+      if (signal.aborted && !(error instanceof ProviderError && error.kind === "ambiguous_execution")) throw signal.reason
+      throw mapProviderError(error)
+    }
   }
 
   async #resolveExistingCreate(identity: Identity, key: string, requestHash: string): Promise<Sandbox> {
@@ -748,6 +820,11 @@ export class SandboxService {
     return provider.snapshots
   }
 
+  #requireSecureFileTransfer(provider: SandboxProvider): NonNullable<SandboxProvider["secureFileTransfer"]> {
+    if (provider.secureFileTransfer === undefined) throw new DomainError("unsupported_capability", "The provider does not support secure file transfer")
+    return provider.secureFileTransfer
+  }
+
   #sandboxId(): SandboxId {
     const parsed = SandboxIdSchema.safeParse(this.#deps.ids.sandboxId())
     if (!parsed.success) throw new DomainError("internal_error", "The ID generator returned an invalid sandbox ID")
@@ -829,6 +906,14 @@ function isStaleSandboxObservation(transition: SandboxState, observed: SandboxSt
   return false
 }
 
+function isAllowedLiveSandboxObservation(current: SandboxState, observed: SandboxState): boolean {
+  if (current === "terminated") return observed === "terminated"
+  if (current === "running" || current === "stopped" || current === "failed") {
+    return observed === "running" || observed === "stopped" || observed === "terminated" || observed === "failed"
+  }
+  return false
+}
+
 function isAllowedSnapshotObservation(transition: SnapshotState, observed: SnapshotState): boolean {
   if (observed === transition || observed === "failed") return true
   if (transition === "creating") return observed === "ready"
@@ -844,7 +929,7 @@ async function* mapToolErrors<T>(events: AsyncIterable<T>, signal: AbortSignal):
   try {
     for await (const event of events) yield event
   } catch (error) {
-    if (signal.aborted) throw signal.reason
+    if (signal.aborted && !(error instanceof ProviderError && error.kind === "ambiguous_execution")) throw signal.reason
     throw mapProviderError(error)
   }
 }

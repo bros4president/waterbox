@@ -3,6 +3,8 @@ import type {
   SandboxState,
   SnapshotId,
   SnapshotState,
+  SecureTransferDelivered,
+  SecureTransferInitiated,
   ToolName,
 } from "@waterbox/contracts"
 import type {
@@ -17,6 +19,7 @@ import type {
   ProviderCreateSandboxInput,
   ProviderCreateSnapshotInput,
   ProviderExecuteInput,
+  ProviderConsumeSecureTransferInput,
   ProviderOperationInput,
   ProviderSandboxObservation,
   ProviderSnapshotObservation,
@@ -174,6 +177,7 @@ export class FakeSandboxProvider implements SandboxProvider {
   readonly name: string
   readonly stopResume?: NonNullable<SandboxProvider["stopResume"]>
   readonly snapshots?: NonNullable<SandboxProvider["snapshots"]>
+  readonly secureFileTransfer?: NonNullable<SandboxProvider["secureFileTransfer"]>
   createCalls = 0
   inspectSandboxCalls = 0
   stopCalls = 0
@@ -192,10 +196,11 @@ export class FakeSandboxProvider implements SandboxProvider {
   readonly lifecycleInputs: Array<{ operation: "inspect" | "stop" | "resume" | "delete"; input: ProviderOperationInput }> = []
   readonly snapshotInputs: Array<{ operation: "create" | "inspect" | "delete"; input: ProviderCreateSnapshotInput | ProviderSnapshotOperationInput }> = []
   readonly toolInputs: ProviderExecuteInput[] = []
+  readonly secureTransferInputs: Array<ProviderOperationInput | ProviderConsumeSecureTransferInput> = []
   readonly sandboxStates = new Map<string, SandboxState>()
   readonly snapshotStates = new Map<string, SnapshotState>()
 
-  constructor(options: { name?: string; stopResume?: boolean; snapshots?: boolean } = {}) {
+  constructor(options: { name?: string; stopResume?: boolean; snapshots?: boolean; secureFileTransfer?: boolean } = {}) {
     this.name = options.name ?? "fake"
     if (options.stopResume !== false) {
       this.stopResume = {
@@ -208,6 +213,12 @@ export class FakeSandboxProvider implements SandboxProvider {
         create: (input) => this.createSnapshot(input),
         inspect: (input) => this.inspectSnapshot(input),
         delete: (input) => this.deleteSnapshot(input),
+      }
+    }
+    if (options.secureFileTransfer !== false) {
+      this.secureFileTransfer = {
+        initiate: (input) => this.initiateSecureTransfer(input),
+        consume: (input) => this.consumeSecureTransfer(input),
       }
     }
   }
@@ -285,6 +296,21 @@ export class FakeSandboxProvider implements SandboxProvider {
       if (error !== undefined) throw error
       yield { type: "result", title: input.toolName, output: "ok", metadata: {} } as ToolEventByName[N]
     })()
+  }
+
+  protected async initiateSecureTransfer(input: ProviderOperationInput): Promise<SecureTransferInitiated> {
+    this.secureTransferInputs.push(input)
+    return {
+      transferId: "123e4567-e89b-42d3-a456-426614174000",
+      publicKey: `age1${"q".repeat(58)}`,
+      algorithm: "age-x25519",
+      expiresAt: "2026-01-01T00:10:00.000Z",
+    }
+  }
+
+  protected async consumeSecureTransfer(input: ProviderConsumeSecureTransferInput): Promise<SecureTransferDelivered> {
+    this.secureTransferInputs.push(input)
+    return { transferId: input.transferId, targetPath: input.targetPath, bytes: 1 }
   }
 }
 

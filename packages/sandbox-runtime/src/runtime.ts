@@ -1,6 +1,6 @@
 import { constants } from "node:fs"
-import { lstat, mkdir, open, realpath, rename, rm } from "node:fs/promises"
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
+import { link, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises"
+import { dirname, relative, resolve, sep } from "node:path"
 import { StringDecoder } from "node:string_decoder"
 import { spawn, type ChildProcess } from "node:child_process"
 import {
@@ -99,84 +99,38 @@ export function runtimeErrorStatus(error: unknown): number {
   return 500
 }
 
-function assertContained(root: string, candidate: string): void {
-  const rel = relative(root, candidate)
-  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
-    throw new RuntimeError(400, "Path must stay inside the workspace")
-  }
-}
-
 function lexicalPath(root: string, input: string): string {
   if (input.includes("\0")) throw new RuntimeError(400, "Path contains a null byte")
-  const candidate = resolve(root, input)
-  assertContained(root, candidate)
-  return candidate
-}
-
-async function rejectSymlinkComponents(root: string, candidate: string, allowMissing: boolean): Promise<void> {
-  const rel = relative(root, candidate)
-  let current = root
-  for (const component of rel.split(sep).filter(Boolean)) {
-    current = resolve(current, component)
-    try {
-      const stat = await lstat(current)
-      if (stat.isSymbolicLink()) throw new HttpError(400, "Symbolic links are not allowed in workspace paths")
-    } catch (error) {
-      if (allowMissing && isRecord(error) && error.code === "ENOENT") return
-      throw error
-    }
-  }
+  return resolve(root, input)
 }
 
 async function existingPath(root: string, input: string): Promise<string> {
   const candidate = lexicalPath(root, input)
-  await rejectSymlinkComponents(root, candidate, false)
-  const canonical = await realpath(candidate)
-  assertContained(root, canonical)
-  return canonical
+  return await realpath(candidate)
 }
 
 async function ensureParent(root: string, candidate: string): Promise<string> {
   const parent = dirname(candidate)
-  await rejectSymlinkComponents(root, parent, true)
-  const rel = relative(root, parent)
-  let current = root
-  for (const component of rel.split(sep).filter(Boolean)) {
-    current = resolve(current, component)
-    try {
-      const stat = await lstat(current)
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        throw new HttpError(400, "Write parent must be a directory without symbolic links")
-      }
-    } catch (error) {
-      if (!isRecord(error) || error.code !== "ENOENT") throw error
-      await mkdir(current)
-      const created = await lstat(current)
-      if (created.isSymbolicLink() || !created.isDirectory()) {
-        throw new HttpError(400, "Write parent changed while it was being created")
-      }
-    }
-  }
+  await mkdir(parent, { recursive: true })
   const canonical = await realpath(parent)
-  assertContained(root, canonical)
+  if (!(await lstat(canonical)).isDirectory()) throw new HttpError(400, "Write parent must be a directory")
   return canonical
 }
 
-async function preflightParent(root: string, candidate: string): Promise<void> {
-  const rel = relative(root, dirname(candidate))
-  let current = root
-  for (const component of rel.split(sep).filter(Boolean)) {
-    current = resolve(current, component)
-    try {
-      const stat = await lstat(current)
-      if (stat.isSymbolicLink() || !stat.isDirectory()) {
-        throw new HttpError(400, "Write parent must be a directory without symbolic links")
-      }
-    } catch (error) {
-      if (isRecord(error) && error.code === "ENOENT") return
-      throw error
-    }
+async function preflightParent(_root: string, candidate: string): Promise<void> {
+  try {
+    const parent = await realpath(dirname(candidate))
+    if (!(await lstat(parent)).isDirectory()) throw new HttpError(400, "Write parent must be a directory")
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return
+    throw error
   }
+}
+
+function displayPath(root: string, path: string): string {
+  const rel = relative(root, path)
+  if (rel !== ".." && !rel.startsWith(`..${sep}`)) return rel || "."
+  return path
 }
 
 async function readTool(root: string, body: Record<string, unknown>): Promise<ToolResponse<ReadMetadata>> {
@@ -187,7 +141,7 @@ async function readTool(root: string, body: Record<string, unknown>): Promise<To
   }
   const path = await existingPath(root, args.filePath)
   const result = await readFilesystem(path, args)
-  const filePath = relative(root, path) || "."
+  const filePath = displayPath(root, path)
   if (result.type === "directory") {
     return {
       title: `Read directory ${filePath}`,
@@ -219,7 +173,6 @@ async function readTool(root: string, body: Record<string, unknown>): Promise<To
 
 async function atomicWrite(root: string, target: string, content: string, mode?: number): Promise<void> {
   if (target === root) throw new HttpError(400, "filePath must refer to a file")
-  await rejectSymlinkComponents(root, target, true)
   const parent = await ensureParent(root, target)
   const temp = resolve(parent, `.${process.pid}-${crypto.randomUUID()}.tmp`)
   let handle
@@ -230,7 +183,6 @@ async function atomicWrite(root: string, target: string, content: string, mode?:
     await handle.sync()
     await handle.close()
     handle = undefined
-    await rejectSymlinkComponents(root, target, true)
     await rename(temp, target)
   } finally {
     await handle?.close().catch(() => undefined)
@@ -238,14 +190,33 @@ async function atomicWrite(root: string, target: string, content: string, mode?:
   }
 }
 
-async function existingMode(root: string, target: string): Promise<number | undefined> {
-  await rejectSymlinkComponents(root, target, true)
+async function atomicCreate(root: string, target: string, content: string, mode?: number): Promise<void> {
+  if (target === root) throw new HttpError(400, "filePath must refer to a file")
+  const parent = await ensureParent(root, target)
+  const temp = resolve(parent, `.${process.pid}-${crypto.randomUUID()}.tmp`)
+  let handle
   try {
-    const stat = await lstat(target)
+    handle = await open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600)
+    if (mode !== undefined) await handle.chmod(mode)
+    await handle.writeFile(content, "utf8")
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+    await link(temp, target)
+  } finally {
+    await handle?.close().catch(() => undefined)
+    await rm(temp, { force: true }).catch(() => undefined)
+  }
+}
+
+async function existingTarget(target: string): Promise<{ path: string; mode?: number }> {
+  try {
+    const path = await realpath(target)
+    const stat = await lstat(path)
     if (!stat.isFile()) throw new HttpError(400, "filePath must refer to a regular file")
-    return stat.mode & 0o7777
+    return { path, mode: stat.mode & 0o7777 }
   } catch (error) {
-    if (isRecord(error) && error.code === "ENOENT") return undefined
+    if (isRecord(error) && error.code === "ENOENT") return { path: target }
     throw error
   }
 }
@@ -255,13 +226,14 @@ async function writeTool(root: string, body: Record<string, unknown>): Promise<T
     filePath: requiredString(body.filePath, "filePath"),
     content: typeof body.content === "string" ? body.content : (() => { throw new HttpError(400, "content must be a string") })(),
   }
-  const target = lexicalPath(root, args.filePath)
-  const mode = await existingMode(root, target)
-  await atomicWrite(root, target, args.content, mode)
+  const requested = lexicalPath(root, args.filePath)
+  const target = await existingTarget(requested)
+  await atomicWrite(root, target.path, args.content, target.mode)
+  const filePath = displayPath(root, target.path)
   return {
-    title: `Wrote ${relative(root, target)}`,
+    title: `Wrote ${filePath}`,
     output: "File written successfully",
-    metadata: { filePath: relative(root, target), bytes: Buffer.byteLength(args.content) },
+    metadata: { filePath, bytes: Buffer.byteLength(args.content) },
   }
 }
 
@@ -278,14 +250,14 @@ function optionalBoolean(value: unknown, name: string): boolean | undefined {
 async function searchRoot(root: string, path: string | undefined): Promise<{ path: string; label: string }> {
   const target = path === undefined ? root : await existingPath(root, path)
   if (!(await lstat(target)).isDirectory()) throw new HttpError(400, "path must refer to a directory")
-  return { path: target, label: relative(root, target) || "." }
+  return { path: target, label: displayPath(root, target) }
 }
 
 async function searchTarget(root: string, path: string | undefined): Promise<{ target: string; label: string }> {
   const target = path === undefined ? root : await existingPath(root, path)
   const stat = await lstat(target)
   if (!stat.isDirectory() && !stat.isFile()) throw new HttpError(400, "path must refer to a regular file or directory")
-  const label = relative(root, target) || "."
+  const label = displayPath(root, target)
   return { target: label.replaceAll("\\", "/"), label }
 }
 
@@ -352,7 +324,7 @@ async function editTool(root: string, body: Record<string, unknown>): Promise<To
   const result = editText(source.content, args.oldString, args.newString, args.replaceAll)
   const content = joinEditBom(result.content, result.bom)
   await atomicWrite(root, source.path, content, source.mode)
-  const filePath = relative(root, source.path)
+  const filePath = displayPath(root, source.path)
   return {
     title: `Edited ${filePath}`,
     output: `Replaced ${result.replacements} occurrence${result.replacements === 1 ? "" : "s"} in ${filePath}`,
@@ -383,13 +355,10 @@ async function patchTool(root: string, body: Record<string, unknown>): Promise<T
     if (destination === root) throw new HttpError(400, "Patch paths must refer to files")
     for (const path of destination === undefined ? [source] : [source, destination]) {
       if ([...touched].some((other) => path === other || path.startsWith(`${other}${sep}`) || other.startsWith(`${path}${sep}`))) {
-        throw new HttpError(409, `Patch contains conflicting operations for ${relative(root, path)}`)
+        throw new HttpError(409, `Patch contains conflicting operations for ${displayPath(root, path)}`)
       }
       touched.add(path)
     }
-    await rejectSymlinkComponents(root, source, hunk.type === "add")
-    if (destination !== undefined) await rejectSymlinkComponents(root, destination, true)
-
     if (hunk.type === "add") {
       if (await pathExists(source)) throw new HttpError(409, `Cannot add existing path: ${hunk.path}`)
       await preflightParent(root, source)
@@ -397,8 +366,15 @@ async function patchTool(root: string, body: Record<string, unknown>): Promise<T
       continue
     }
     const current = await readEditable(root, hunk.path)
+    if (current.path !== source) {
+      touched.delete(source)
+      if ([...touched].some((other) => current.path === other || current.path.startsWith(`${other}${sep}`) || other.startsWith(`${current.path}${sep}`))) {
+        throw new HttpError(409, `Patch contains conflicting operations for ${displayPath(root, current.path)}`)
+      }
+      touched.add(current.path)
+    }
     if (destination !== undefined && await pathExists(destination)) {
-      throw new HttpError(409, `Move destination already exists: ${relative(root, destination)}`)
+      throw new HttpError(409, `Move destination already exists: ${displayPath(root, destination)}`)
     }
     if (destination !== undefined) await preflightParent(root, destination)
     if (hunk.type === "delete") prepared.push({ hunk, source: current.path, original: current.content, mode: current.mode })
@@ -421,37 +397,36 @@ async function patchTool(root: string, body: Record<string, unknown>): Promise<T
   }
 
   const metadata: PatchMetadata = { added: [], updated: [], deleted: [], moved: [] }
-  const applied: PreparedPatch[] = []
   try {
     for (const item of prepared) {
       if (item.hunk.type === "delete") {
-        await rejectSymlinkComponents(root, item.source, false)
+        if (!await fileMatches(item.source, item.original!, item.mode)) throw new HttpError(409, `Patch source changed concurrently: ${item.hunk.path}`)
         await rm(item.source)
-        applied.push(item)
         metadata.deleted.push(item.hunk.path)
       } else if (item.hunk.type === "add") {
-        await atomicWrite(root, item.source, item.content!)
-        applied.push(item)
+        await atomicCreate(root, item.source, item.content!)
         metadata.added.push(item.hunk.path)
       } else if (item.destination !== undefined) {
-        await atomicWrite(root, item.destination, item.content!, item.mode)
-        applied.push(item)
-        await rejectSymlinkComponents(root, item.source, false)
+        if (!await fileMatches(item.source, item.original!, item.mode)) throw new HttpError(409, `Patch source changed concurrently: ${item.hunk.path}`)
+        await atomicCreate(root, item.destination, item.content!, item.mode)
+        if (!await fileMatches(item.source, item.original!, item.mode)) throw new HttpError(409, `Patch source changed concurrently: ${item.hunk.path}`)
         await rm(item.source)
         metadata.moved.push({ from: item.hunk.path, to: item.hunk.movePath! })
       } else {
+        if (!await fileMatches(item.source, item.original!, item.mode)) throw new HttpError(409, `Patch source changed concurrently: ${item.hunk.path}`)
         await atomicWrite(root, item.source, item.content!, item.mode)
-        applied.push(item)
         metadata.updated.push(item.hunk.path)
       }
     }
   } catch (error) {
-    const failures = await rollbackPatch(root, applied)
     const reason = error instanceof Error ? error.message : "unknown commit error"
-    const rollback = failures.length === 0
-      ? "Applied operations were rolled back."
-      : `Rollback was incomplete: ${failures.join("; ")}`
-    throw new HttpError(500, `Patch commit failed: ${reason}. ${rollback}`)
+    const completed = [
+      ...metadata.added.map((path) => `A ${path}`),
+      ...metadata.updated.map((path) => `M ${path}`),
+      ...metadata.deleted.map((path) => `D ${path}`),
+      ...metadata.moved.map((move) => `R ${move.from} -> ${move.to}`),
+    ]
+    throw new HttpError(500, `Patch commit failed: ${reason}. ${completed.length === 0 ? "No operations completed." : `Operations completed before failure: ${completed.join(", ")}`}`)
   }
   const lines = [
     ...metadata.added.map((path) => `A ${path}`),
@@ -462,34 +437,14 @@ async function patchTool(root: string, body: Record<string, unknown>): Promise<T
   return { title: "Applied patch", output: lines.join("\n"), metadata }
 }
 
-async function rollbackPatch(root: string, applied: PreparedPatch[]): Promise<string[]> {
-  const failures: string[] = []
-  const attempt = async (description: string, operation: () => Promise<void>) => {
-    try {
-      await operation()
-    } catch (error) {
-      failures.push(`${description}: ${error instanceof Error ? error.message : "unknown error"}`)
-    }
+async function fileMatches(path: string, content: string, mode = 0o600): Promise<boolean> {
+  try {
+    const metadata = await lstat(path)
+    return metadata.isFile() && (metadata.mode & 0o7777) === mode && await readFile(path, "utf8") === content
+  } catch (error) {
+    if (isRecord(error) && error.code === "ENOENT") return false
+    throw error
   }
-  for (const item of [...applied].reverse()) {
-    if (item.hunk.type === "add") {
-      await attempt(`remove ${item.hunk.path}`, async () => {
-        if (!await pathExists(item.source)) return
-        await rejectSymlinkComponents(root, item.source, false)
-        await rm(item.source)
-      })
-      continue
-    }
-    if (item.destination !== undefined) {
-      await attempt(`remove ${relative(root, item.destination)}`, async () => {
-        if (!await pathExists(item.destination!)) return
-        await rejectSymlinkComponents(root, item.destination!, false)
-        await rm(item.destination!)
-      })
-    }
-    await attempt(`restore ${item.hunk.path}`, () => atomicWrite(root, item.source, item.original!, item.mode))
-  }
-  return failures
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -619,7 +574,7 @@ async function bashTool(root: string, body: Record<string, unknown>, signal: Abo
         const metadata: Omit<BashMetadata, "outputTruncated"> = {
           command: args.command,
           ...(args.description === undefined ? {} : { description: args.description }),
-          workdir: relative(root, cwd) || ".",
+          workdir: displayPath(root, cwd),
           exitCode,
           signal: exitSignal,
           timedOut,
@@ -651,28 +606,15 @@ async function bashTool(root: string, body: Record<string, unknown>, signal: Abo
 export function createRuntime(options: RuntimeOptions): Runtime {
   const configuredRoot = resolve(options.workspaceRoot)
   const shutdownController = new AbortController()
-  let mutations: Promise<void> = Promise.resolve()
-  const mutate = <Result>(operation: () => Promise<Result>): Promise<Result> => {
-    const result = mutations.then(operation, operation)
-    mutations = result.then(() => undefined, () => undefined)
-    return result
-  }
   return {
     async execute(name, body, signal = new AbortController().signal) {
       const combinedSignal = AbortSignal.any([signal, shutdownController.signal])
-      if (name === "write" || name === "edit" || name === "patch") {
-        return await mutate(async () => {
-          combinedSignal.throwIfAborted()
-          const root = await realpath(configuredRoot)
-          combinedSignal.throwIfAborted()
-          if (name === "write") return { type: "result", ...await writeTool(root, body) }
-          if (name === "edit") return { type: "result", ...await editTool(root, body) }
-          return { type: "result", ...await patchTool(root, body) }
-        })
-      }
       combinedSignal.throwIfAborted()
       const root = await realpath(configuredRoot)
       combinedSignal.throwIfAborted()
+      if (name === "write") return { type: "result", ...await writeTool(root, body) }
+      if (name === "edit") return { type: "result", ...await editTool(root, body) }
+      if (name === "patch") return { type: "result", ...await patchTool(root, body) }
       if (name === "read") return { type: "result", ...await readTool(root, body) }
       if (name === "glob") return { type: "result", ...await globTool(root, body, combinedSignal) }
       if (name === "grep") return { type: "result", ...await grepTool(root, body, combinedSignal) }

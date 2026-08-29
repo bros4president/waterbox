@@ -14,6 +14,7 @@ import {
   PatchToolArgumentsSchema,
   ReadToolArgumentsSchema,
   SandboxPathRequestSchema,
+  SecureTransferConsumeRequestSchema,
   SnapshotPathRequestSchema,
   ToolPathRequestSchema,
   WriteToolArgumentsSchema,
@@ -86,6 +87,17 @@ const cases: RequestCase[] = [
     schema: ListSnapshotsRequestSchema,
     valid: [{}, { cursor: "next-page", limit: 100 }],
     invalid: [{ limit: 1.5 }, { limit: "many" }, { provider: "box" }],
+  },
+  {
+    name: "consume secure file transfer",
+    schema: SecureTransferConsumeRequestSchema,
+    valid: [{ targetPath: "/root/.aws/credentials", ciphertext: "Y2lwaGVy" }],
+    invalid: [
+      { targetPath: "", ciphertext: "Y2lwaGVy" },
+      { targetPath: "secret", ciphertext: "not base64" },
+      { targetPath: "secret", ciphertext: "YQ=" },
+      { targetPath: "secret", ciphertext: "YQ==", accountId: "acct" },
+    ],
   },
   {
     name: "read tool",

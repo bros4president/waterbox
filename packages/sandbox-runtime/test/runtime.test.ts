@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema, PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema } from "@waterbox/contracts"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { Readable } from "node:stream"
@@ -26,23 +26,76 @@ describe("provider-neutral canonical runtime", () => {
     expect(events.map((event) => event.type)).toEqual(["stdout", "stderr", "result"])
   })
 
-  test("caller abort and shutdown cancel queued mutations before filesystem work", async () => {
+  test.skipIf(process.platform === "win32")("treats the provider sandbox as the boundary, not the workspace", async () => {
+    const sandbox = await mkdtemp(join(tmpdir(), "waterbox-owned-sandbox-"))
+    roots.push(sandbox)
+    const workspace = join(sandbox, "workspace")
+    const system = join(sandbox, "system")
+    await mkdir(workspace)
+    await mkdir(system)
+    const canonicalSystem = await realpath(system)
+    await symlink(system, join(workspace, "system-link"), "dir")
+    const runtime = createRuntime({ workspaceRoot: workspace })
+
+    await runtime.execute("write", { filePath: "relative.txt", content: "workspace" })
+    await runtime.execute("write", { filePath: join(system, "absolute.txt"), content: "absolute" })
+    await runtime.execute("write", { filePath: "../system/traversal.txt", content: "traversal" })
+    await runtime.execute("write", { filePath: "system-link/symlink.txt", content: "symlink" })
+    await runtime.execute("write", { filePath: ".git/config", content: "owned=true" })
+    await runtime.execute("write", { filePath: ".gitignore", content: "ignored.txt\n" })
+    await runtime.execute("write", { filePath: "ignored.txt", content: "visible despite ignore rules" })
+
+    expect(await readFile(join(workspace, "relative.txt"), "utf8")).toBe("workspace")
+    expect(await readFile(join(system, "absolute.txt"), "utf8")).toBe("absolute")
+    expect(await readFile(join(system, "traversal.txt"), "utf8")).toBe("traversal")
+    expect(await readFile(join(system, "symlink.txt"), "utf8")).toBe("symlink")
+    expect(await runtime.execute("read", { filePath: "system-link/symlink.txt" })).toMatchObject({
+      type: "result",
+      output: "symlink",
+      metadata: { filePath: join(canonicalSystem, "symlink.txt") },
+    })
+    expect(await runtime.execute("glob", { pattern: "**/*" })).toMatchObject({
+      output: expect.stringContaining(".git/config"),
+    })
+    expect(await runtime.execute("grep", { pattern: "visible despite ignore rules" })).toMatchObject({
+      output: expect.stringContaining("ignored.txt"),
+    })
+
+    const stream = await runtime.execute("bash", { command: "pwd", workdir: system }) as ReadableStream
+    let terminal: any
+    for await (const event of stream) if (event.type === "result") terminal = event
+    expect(terminal).toMatchObject({ metadata: { workdir: canonicalSystem, exitCode: 0 } })
+  })
+
+  test("caller abort and shutdown reject mutations before filesystem work", async () => {
     const runtime = await fixture()
-    const largePatch = `*** Begin Patch\n${Array.from({ length: 80 }, (_, index) => `*** Add File: hold-${index}.txt\n+${"x".repeat(5_000)}`).join("\n")}\n*** End Patch`
-    const first = runtime.execute("patch", { patchText: largePatch }).catch(() => undefined)
     const caller = new AbortController()
-    const aborted = runtime.execute("write", { filePath: "aborted.txt", content: "bad" }, caller.signal)
     caller.abort()
-    await expect(aborted).rejects.toMatchObject({ name: "AbortError" })
-    await first
+    await expect(runtime.execute("write", { filePath: "aborted.txt", content: "bad" }, caller.signal)).rejects.toMatchObject({ name: "AbortError" })
     await expect(Bun.file(join(roots.at(-1)!, "aborted.txt")).exists()).resolves.toBe(false)
 
-    const another = runtime.execute("patch", { patchText: `*** Begin Patch\n*** Add File: shutdown-holder.txt\n+holder\n*** End Patch` }).catch(() => undefined)
-    const shutdownQueued = runtime.execute("write", { filePath: "shutdown.txt", content: "bad" })
     runtime.shutdown()
-    await expect(shutdownQueued).rejects.toMatchObject({ name: "AbortError" })
-    await another
+    await expect(runtime.execute("write", { filePath: "shutdown.txt", content: "bad" })).rejects.toMatchObject({ name: "AbortError" })
     await expect(Bun.file(join(roots.at(-1)!, "shutdown.txt")).exists()).resolves.toBe(false)
+  })
+
+  test("runs mutations independently and reports partial patch completion without rolling back newer work", async () => {
+    const runtime = await fixture()
+    const root = roots.at(-1)!
+    await writeFile(join(root, "target.txt"), "original")
+    await writeFile(join(root, "fail.txt"), "remove me")
+    const holders = Array.from({ length: 80 }, (_, index) => `*** Add File: hold-${index}.txt\n+${"x".repeat(5_000)}`).join("\n")
+    const patch = runtime.execute("patch", { patchText: `*** Begin Patch\n*** Update File: target.txt\n@@\n-original\n+patched\n${holders}\n*** Delete File: fail.txt\n*** End Patch` })
+    let patchStarted = false
+    for (let attempt = 0; attempt < 1_000; attempt++) {
+      if ((await readFile(join(root, "target.txt"), "utf8")).trim() === "patched") { patchStarted = true; break }
+      await Bun.sleep(1)
+    }
+    expect(patchStarted).toBeTrue()
+    await runtime.execute("write", { filePath: "target.txt", content: "newer" })
+    await rm(join(root, "fail.txt"))
+    await expect(patch).rejects.toThrow("Operations completed before failure")
+    expect(await readFile(join(root, "target.txt"), "utf8")).toBe("newer")
   })
 
   test.skipIf(process.platform === "win32")("escalates cancellation for TERM-resistant process-group descendants", async () => {

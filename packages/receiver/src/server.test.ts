@@ -88,7 +88,7 @@ describe("receiver handler", () => {
     expect((await receiver.handleRequest(post("/v1/tools/read", { filePath: "binary" }))).status).toBe(400)
   })
 
-  test.skipIf(!hasRipgrep)("globs and greps within contained paths with useful no-match and invalid-regex responses", async () => {
+  test.skipIf(!hasRipgrep)("globs and greps arbitrary sandbox paths with useful no-match and invalid-regex responses", async () => {
     const root = await workspace()
     await mkdir(join(root, "src"))
     await writeFile(join(root, "src/a.ts"), "const alpha = 1\n")
@@ -104,7 +104,7 @@ describe("receiver handler", () => {
     expect(fileGrep).toMatchObject({ output: "src/b.js:1: const alpha = 2", metadata: { path: "src/b.js", matches: 1 } })
     expect(await (await receiver.handleRequest(post("/v1/tools/grep", { pattern: "absent" }))).json()).toMatchObject({ output: "No matches found", metadata: { matches: 0 } })
     expect((await receiver.handleRequest(post("/v1/tools/grep", { pattern: "[" }))).status).toBe(400)
-    expect((await receiver.handleRequest(post("/v1/tools/glob", { pattern: "*", path: "../" }))).status).toBe(400)
+    expect((await receiver.handleRequest(post("/v1/tools/glob", { pattern: "*", path: "../" }))).status).toBe(200)
   })
 
   test("edits exact and fuzzy text, reports ambiguity, replaces all, and preserves BOM and mode", async () => {
@@ -161,7 +161,7 @@ describe("receiver handler", () => {
     await expect(readFile(join(root, "move.txt"))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
-  test("patch preflight rejects invalid, conflicting, traversal, and symlink operations without mutation", async () => {
+  test("patch preflight rejects invalid and conflicting operations while allowing full sandbox paths", async () => {
     const root = await workspace()
     const outside = await workspace()
     await writeFile(join(root, "source.txt"), "original\n")
@@ -180,21 +180,24 @@ describe("receiver handler", () => {
     expect(await readFile(join(root, "source.txt"), "utf8")).toBe("original\n")
     await expect(readFile(join(root, "should-not-exist.txt"))).rejects.toMatchObject({ code: "ENOENT" })
 
-    const traversal = "*** Begin Patch\n*** Add File: ../escape\n+bad\n*** End Patch"
+    const traversal = `*** Begin Patch\n*** Add File: ${join(outside, "escape")}\n+allowed\n*** End Patch`
     const symlinkPatch = "*** Begin Patch\n*** Update File: link/outside.txt\n@@\n-outside\n+bad\n*** End Patch"
     const conflict = "*** Begin Patch\n*** Delete File: source.txt\n*** Delete File: source.txt\n*** End Patch"
     const ancestorConflict = "*** Begin Patch\n*** Add File: parent\n+file\n*** Add File: parent/child\n+child\n*** End Patch"
-    expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: traversal }))).status).toBe(400)
-    expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: symlinkPatch }))).status).toBe(400)
+    const aliasConflict = `*** Begin Patch\n*** Update File: link/outside.txt\n@@\n-bad\n+first\n*** Update File: ${join(outside, "outside.txt")}\n@@\n-bad\n+second\n*** End Patch`
+    expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: traversal }))).status).toBe(200)
+    expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: symlinkPatch }))).status).toBe(200)
     expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: conflict }))).status).toBe(409)
     expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: ancestorConflict }))).status).toBe(409)
+    expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: aliasConflict }))).status).toBe(409)
     await expect(readFile(join(root, "parent"))).rejects.toMatchObject({ code: "ENOENT" })
-    expect(await readFile(join(outside, "outside.txt"), "utf8")).toBe("outside\n")
+    expect(await readFile(join(outside, "escape"), "utf8")).toBe("allowed")
+    expect(await readFile(join(outside, "outside.txt"), "utf8")).toBe("bad\n")
     expect(await readFile(join(root, "source.txt"), "utf8")).toBe("original\n")
     expect((await receiver.handleRequest(post("/v1/tools/patch", { patchText: "not a patch" }))).status).toBe(400)
   })
 
-  test("rolls back prior patch operations when a later commit unexpectedly fails", async () => {
+  test("reports prior patch operations when a later commit unexpectedly fails", async () => {
     const root = await workspace()
     const receiver = createReceiver({ workspaceRoot: root })
     const middle = Array.from({ length: 40 }, (_, index) => `*** Add File: middle-${index}.txt\n+${"x".repeat(5_000)}`).join("\n")
@@ -222,23 +225,24 @@ ${middle}
     const response = await receiver.handleRequest(post("/v1/tools/patch", { patchText }))
     await racer
     expect(response.status).toBe(500)
-    expect(await response.json()).toMatchObject({ output: expect.stringContaining("Applied operations were rolled back") })
-    await expect(readFile(join(root, "marker.txt"))).rejects.toMatchObject({ code: "ENOENT" })
-    await expect(readFile(join(root, "middle-0.txt"))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await response.json()).toMatchObject({ output: expect.stringContaining("Operations completed before failure") })
+    expect(await readFile(join(root, "marker.txt"), "utf8")).toBe("marker")
+    expect(await readFile(join(root, "middle-0.txt"), "utf8")).toBe("x".repeat(5_000))
     expect((await lstat(join(root, "forced-failure.txt"))).isDirectory()).toBe(true)
   })
 
-  test("rejects traversal and symlink escapes for every filesystem tool", async () => {
+  test("allows absolute paths, traversal, and symlinks across the provider sandbox", async () => {
     const root = await workspace()
     const outside = await workspace()
     await writeFile(join(outside, "secret"), "secret")
     await symlink(outside, join(root, "link"))
     const receiver = createReceiver({ workspaceRoot: root })
 
-    expect((await receiver.handleRequest(post("/v1/tools/read", { filePath: "../secret" }))).status).toBe(400)
-    expect((await receiver.handleRequest(post("/v1/tools/read", { filePath: "link/secret" }))).status).toBe(400)
-    expect((await receiver.handleRequest(post("/v1/tools/write", { filePath: "link/new", content: "bad" }))).status).toBe(400)
-    expect((await receiver.handleRequest(post("/v1/tools/bash", { command: "pwd", workdir: "link" }))).status).toBe(400)
+    expect((await receiver.handleRequest(post("/v1/tools/read", { filePath: join(outside, "secret") }))).status).toBe(200)
+    expect((await receiver.handleRequest(post("/v1/tools/read", { filePath: "link/secret" }))).status).toBe(200)
+    expect((await receiver.handleRequest(post("/v1/tools/write", { filePath: "link/new", content: "allowed" }))).status).toBe(200)
+    expect(await readFile(join(outside, "new"), "utf8")).toBe("allowed")
+    expect((await receiver.handleRequest(post("/v1/tools/bash", { command: "pwd", workdir: "link" }))).status).toBe(200)
   })
 
   test("streams stdout, stderr, and a final bash result as NDJSON", async () => {
@@ -269,14 +273,14 @@ ${middle}
     expect(events.at(-1)).toMatchObject({ type: "result", metadata: { aborted: true, timedOut: false } })
   })
 
-  test("does not follow a symlink created where a file will be replaced", async () => {
+  test("follows a symlink when an existing file is replaced", async () => {
     const root = await workspace()
     const outside = await workspace()
     await mkdir(join(root, "safe"))
     await writeFile(join(outside, "target"), "outside")
     await symlink(join(outside, "target"), join(root, "safe/file"))
     const receiver = createReceiver({ workspaceRoot: root })
-    expect((await receiver.handleRequest(post("/v1/tools/write", { filePath: "safe/file", content: "inside" }))).status).toBe(400)
-    expect(await readFile(join(outside, "target"), "utf8")).toBe("outside")
+    expect((await receiver.handleRequest(post("/v1/tools/write", { filePath: "safe/file", content: "inside" }))).status).toBe(200)
+    expect(await readFile(join(outside, "target"), "utf8")).toBe("inside")
   })
 })

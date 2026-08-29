@@ -10,6 +10,7 @@
     "./patch": "./src/vendor/opencode-patch.ts"
   },
   "dependencies": {
-    "@waterbox/contracts": "workspace:*"
+    "@waterbox/contracts": "workspace:*",
+    "age-encryption": "0.3.1"
   }
 }

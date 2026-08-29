@@ -4,7 +4,7 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "scripts": {
-    "build": "bun build ./src/main.ts --compile --target=bun-linux-x64-baseline --outfile ./dist/waterbox-daemon"
+    "build": "bun build ./src/main.ts --target=bun --outfile ./dist/waterbox-daemon.js"
   },
   "dependencies": {
     "@waterbox/contracts": "workspace:*",

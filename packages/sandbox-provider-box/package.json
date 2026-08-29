@@ -4,6 +4,7 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
+    "@waterbox/cli": "workspace:*",
     "@waterbox/contracts": "workspace:*",
     "@waterbox/core": "workspace:*"
   }

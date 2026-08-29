@@ -11,6 +11,10 @@ import type {
   PatchToolEvent,
   ReadToolArguments,
   ReadToolEvent,
+  SecureTransferConsumeRequest,
+  SecureTransferDelivered,
+  SecureTransferId,
+  SecureTransferInitiated,
   SandboxId,
   SandboxState,
   SnapshotId,
@@ -81,7 +85,11 @@ export interface ProviderExecuteInput<N extends ToolName = ToolName> extends Pro
   arguments: ToolArgumentsByName[N]
 }
 
-export type ProviderErrorKind = "failure" | "limit" | "ambiguous_execution"
+export interface ProviderConsumeSecureTransferInput extends ProviderOperationInput, SecureTransferConsumeRequest {
+  transferId: SecureTransferId
+}
+
+export type ProviderErrorKind = "failure" | "limit" | "ambiguous_execution" | "expired" | "consumed"
 
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind
@@ -107,5 +115,9 @@ export interface SandboxProvider {
     create(input: ProviderCreateSnapshotInput): Promise<ProviderSnapshotObservation>
     inspect(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation>
     delete(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation>
+  }
+  readonly secureFileTransfer?: {
+    initiate(input: ProviderOperationInput): Promise<SecureTransferInitiated>
+    consume(input: ProviderConsumeSecureTransferInput): Promise<SecureTransferDelivered>
   }
 }

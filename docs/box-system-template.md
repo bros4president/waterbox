@@ -1,88 +1,80 @@
 # Box system template
 
-Phase F provides a credential-gated builder for the deterministic named Box snapshot
-used as Waterbox's system template. It compiles the shared daemon, creates a temporary
-`noEnv` Box without a `from` source, installs the daemon and ripgrep, enables a systemd
-service, verifies local health, stops the source, and saves the named snapshot.
-The daemon build explicitly targets Bun's Linux x86-64 baseline executable format, and
-the builder validates the ELF class, byte order, and machine before its first Box request.
-
-The builder is separate from API startup and never runs under `bun test`. It uses only
-the official Box v1 file, command, lifecycle, named-snapshot, and deletion endpoints.
-It never sends the Box API key in a Box body, environment, command, uploaded file, or
-metadata document.
+The Box system template contains the one-shot Waterbox CLI used by the Box provider.
+It does not run a daemon, install a systemd service, listen on a port, or register Box
+hosting. Tool calls use the authenticated Box command endpoint.
 
 ## Validation and configuration
 
-Build the standalone daemon and validate local inputs without contacting Box:
-
-```sh
-bun run --cwd packages/sandbox-daemon build
-bun run scripts/build-box-system-template.ts --validate
-```
-
-The root command compiles the daemon before invoking the builder:
+Build and validate locally without contacting Box:
 
 ```sh
 bun run build:box-template --validate
 ```
 
-A live build additionally requires both `BOX_API_KEY` and the exact explicit
-authorization printed by `bun run build:box-template --help`. Optional settings are:
+A live build requires `BOX_API_KEY` and the explicit authorization printed by
+`bun run build:box-template --help`. Optional settings are:
 
-- `BOX_API_BASE_URL` (defaults to the full official v1 API URL)
-- `WATERBOX_BOX_TEMPLATE_NAME` (defaults to `waterbox-system-v1`)
-- `WATERBOX_DAEMON_ARTIFACT`
+- `BOX_API_BASE_URL`
+- `WATERBOX_BOX_TEMPLATE_NAME` (defaults to `waterbox-system-v5`)
+- `WATERBOX_CLI_ARTIFACT`
 - `WATERBOX_TEMPLATE_METADATA` (defaults to `.waterbox/box-system-template.json`)
-- `WATERBOX_DAEMON_PORT` (defaults to `8080`)
-- the three `BOX_TEMPLATE_*_MS` polling/request timing controls shown by `--help`
+- the `BOX_TEMPLATE_*_MS` timing controls shown by `--help`
 
-Use `--replace` only after reviewing the currently named snapshot. Without it, the
-builder refuses to mutate an existing same-name template. The official contract says
-a same-name save replaces the previous artifact only once the new save is ready, but
-the builder still sends that mutation exactly once and never retries an ambiguous save.
-If the save outcome is ambiguous, it preserves the stopped source Box for operator
-reconciliation and does not write new deployment metadata.
+The builder always refuses an existing name; changed artifacts require a new immutable
+versioned template. It never retries an ambiguous snapshot mutation and preserves the
+stopped source Box for reconciliation.
 
-## Installation and metadata
+## Installation
 
-The artifact is uploaded only to `/tmp`, then a privileged command installs it at
-`/usr/local/bin/waterbox-daemon`. The systemd service uses `/workspace`, listens on the
-configured port, starts after network availability, restarts on failure, and is enabled
-for boot/resume/snapshot restore. The source is stopped before `POST /named-snapshots`.
+The builder creates a temporary `noEnv` Box, uploads the Bun bundle, and installs:
 
-On a ready snapshot, the builder writes mode-0600 JSON under `.waterbox/` containing
-only schema version, provider name, deterministic template reference, daemon port, and
-build timestamp. `.waterbox/` is gitignored. The API runtime needs only `templateRef`
-and the daemon port; the file contains no API credential, Box identifier, or protected
-URL.
+- pinned Bun under `/usr/local/bin`
+- the CLI bundle at `/usr/local/lib/waterbox-cli.js`
+- the `waterbox` launcher at `/usr/local/bin/waterbox`
+- `ripgrep`
 
-The official file-write schema does not state an upload-size ceiling. Whether the
-compiled standalone artifact fits the live endpoint remains a manual verification item;
-the builder correlates the returned path, base64 encoding, and exact decoded byte size.
+The launcher recreates `/workspace` after snapshot restore and uses it as the default for
+relative paths and shell commands. The CLI runs as root and accepts absolute paths,
+workspace traversal, and normal symbolic links across the entire Box filesystem. The Box
+itself is the security boundary; Waterbox does not impose a second filesystem boundary
+inside an agent-owned sandbox. Box does not preserve `/workspace` in a named snapshot.
 
-The builder permanently deletes its stopped temporary source with the exact confirmation
-header and polls the deletion operation. A `blocked` operation is reported as
-`accepted_pending`; it does not claim that this particular source has been physically
-deleted or released capacity, and an operator must reconcile it.
-Before snapshot mutation, failures trigger bounded best-effort source deletion. After an
-ambiguous snapshot mutation, preserving the stopped source takes precedence over cleanup.
+Each invocation is sent independently through Box's command endpoint. Waterbox does not
+queue, serialize, throttle, deduplicate, or retry commands; provider concurrency behavior
+is authoritative. The builder checksum-verifies the pinned Bun archive and verifies
+`waterbox health`, stops the source, saves `waterbox-system-v5`, writes schema-v2 local
+metadata, and permanently deletes the source. Metadata contains only the template name,
+artifact kind, CLI protocol version, and build timestamp.
 
-## Manual verification (explicit authorization required)
+## Tool protocol
 
-No live operation is part of automated tests. In an authorized session:
+The provider validates canonical arguments and sends one command:
 
-1. Run the live builder and retain its sanitized NDJSON observations.
-2. Create a `noEnv` Box with `from` equal to the emitted template reference.
-3. Confirm `systemctl is-enabled waterbox-daemon` and `systemctl is-active
-   waterbox-daemon`, and call its local `/health` endpoint.
-4. Register the configured daemon port with `POST /boxes/{id}/host` using
-   `{ "public": false }`; treat the returned protected URL and token as credentials.
-5. Stop and resume the same Box, then confirm the service and health endpoint again.
-6. Save a unique user named snapshot, restore it into a second `noEnv` Box, and confirm
-   the daemon remains active.
-7. Permanently delete both verification Boxes and the user snapshot, then reconcile any
-   accepted-pending deletion operations.
+```text
+/usr/local/bin/waterbox run j1.<unpadded-base64url-json>
+```
 
-Never paste live identifiers, protected URLs, API keys, or unredacted error bodies into
-logs, issues, commits, or verification records.
+The envelope contains `protocolVersion`, `tool`, and `arguments`. Encoded input is bounded
+to 96 KiB and decoded input to 72 KiB. The CLI validates the same canonical schemas and
+prints exactly one canonical result line. Bash output is buffered by Box and represented
+by its terminal result rather than incremental chunks.
+
+## Secure file transfer
+
+`waterbox transfer-initiate` creates a fresh age/X25519 identity under `/run/waterbox/transfers`, returns only its public recipient and fixed ten-minute expiry, and schedules removal through a transient systemd timer. The provider uploads only ciphertext to a random `/tmp` path, then invokes `waterbox transfer-consume t1.<metadata>`. Consumption atomically claims and destroys the identity, decrypts at most 1 MiB, writes the destination with mode `0600`, and removes the uploaded ciphertext. Transfer identities are runtime state and are not stored in Waterbox repositories.
+
+## Manual verification
+
+In an explicitly authorized session:
+
+1. Build `waterbox-system-v5` and retain only sanitized observations.
+2. Create a `noEnv` Box from the emitted template reference.
+3. Run `waterbox health` through `POST /boxes/{id}/commands`.
+4. Execute all seven canonical tools through the control plane.
+5. Verify stop/resume and snapshot restore retain the CLI.
+6. Permanently delete verification resources and reconcile pending deletion operations.
+
+Never log API keys, serialized invocations, provider IDs, or unredacted response bodies.
+The MCP experiment additionally requires `WATERBOX_MCP_EXPERIMENT_AUTHORIZATION` with
+the builder's exact authorization phrase and `WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT=YES`.

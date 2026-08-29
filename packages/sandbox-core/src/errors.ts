@@ -20,6 +20,8 @@ export function mapProviderError(error: unknown): DomainError {
     if (error.kind === "ambiguous_execution") {
       return new DomainError("ambiguous_execution", "The provider execution outcome is unknown")
     }
+    if (error.kind === "expired") return new DomainError("transfer_expired", "The secure file transfer expired")
+    if (error.kind === "consumed") return new DomainError("transfer_consumed", "The secure file transfer was already consumed")
     return new DomainError("provider_failure", "The provider operation failed")
   }
   return new DomainError("provider_failure", "The provider operation failed")

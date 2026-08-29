@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DomainError } from "@waterbox/core"
+import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH } from "@waterbox/contracts"
 import { createWaterboxApi, type WaterboxCore } from "../src/index.ts"
 
 const sandbox = {
@@ -19,6 +20,8 @@ const snapshot = {
   createdAt: sandbox.createdAt,
   updatedAt: sandbox.updatedAt,
 }
+const transfer = { transferId: "123e4567-e89b-42d3-a456-426614174000", publicKey: `age1${"q".repeat(58)}`, algorithm: "age-x25519" as const, expiresAt: "2026-08-29T00:10:00.000Z" }
+const delivery = { transferId: transfer.transferId, targetPath: "/root/.aws/credentials", bytes: 6 }
 
 function api(overrides: Partial<Record<keyof WaterboxCore, Function>> = {}, credential = "good") {
   const calls: Array<[string, ...unknown[]]> = []
@@ -37,6 +40,8 @@ function api(overrides: Partial<Record<keyof WaterboxCore, Function>> = {}, cred
     getSnapshot: method("getSnapshot", snapshot),
     listSnapshots: method("listSnapshots", { items: [snapshot] }),
     deleteSnapshot: method("deleteSnapshot", { ...snapshot, state: "deleted" }),
+    initiateSecureFileTransfer: method("initiateSecureFileTransfer", transfer),
+    consumeSecureFileTransfer: method("consumeSecureFileTransfer", delivery),
     executeTool: method("executeTool", (async function* () {
       yield { type: "result", title: "read", output: "ok", metadata: { filePath: "/workspace/a", offset: 1 } }
     })()),
@@ -88,6 +93,8 @@ describe("Waterbox API", () => {
       ["listSnapshots", "/v1/snapshots?limit=10", { headers: auth }, 200],
       ["getSnapshot", `/v1/snapshots/${snapshot.snapshotId}`, { headers: auth }, 200],
       ["deleteSnapshot", `/v1/snapshots/${snapshot.snapshotId}`, { method: "DELETE", headers: auth }, 200],
+      ["initiateSecureFileTransfer", `/v1/sandboxes/${sandbox.sandboxId}/secure-file-transfers`, { method: "POST", headers: auth }, 201],
+      ["consumeSecureFileTransfer", `/v1/sandboxes/${sandbox.sandboxId}/secure-file-transfers/${transfer.transferId}`, { method: "PUT", headers: jsonHeaders, body: JSON.stringify({ targetPath: delivery.targetPath, ciphertext: "Y2lwaGVy" }) }, 200],
     ]
     for (const [name, path, init, status] of cases) {
       const response = await app.request(path, init)
@@ -111,6 +118,53 @@ describe("Waterbox API", () => {
       app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/unknown`, { method: "POST", headers: jsonHeaders, body: "{}" }),
     ]
     for (const pending of requests) expect((await pending).status).toBe(400)
+  })
+
+  test("bounds secure transfer JSON before dispatch and never echoes ciphertext", async () => {
+    const { app, calls } = api()
+    const oversized = JSON.stringify({ targetPath: "secret", ciphertext: "A".repeat(MAX_SECURE_CIPHERTEXT_BASE64_LENGTH + 9_000) })
+    const rejected = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/secure-file-transfers/${transfer.transferId}`, { method: "PUT", headers: jsonHeaders, body: oversized })
+    expect(rejected.status).toBe(413)
+    expect(calls.some(([name]) => name === "consumeSecureFileTransfer")).toBe(false)
+
+    const secretCiphertext = Buffer.from("not-plaintext-secret").toString("base64")
+    const accepted = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/secure-file-transfers/${transfer.transferId}`, { method: "PUT", headers: jsonHeaders, body: JSON.stringify({ targetPath: delivery.targetPath, ciphertext: secretCiphertext }) })
+    expect(accepted.status).toBe(200)
+    expect(await accepted.text()).not.toContain(secretCiphertext)
+  })
+
+  test("bounds chunked transfer bodies, rejects malformed lengths, and cancels aborted reads", async () => {
+    const { app } = api()
+    const url = `http://localhost/v1/sandboxes/${sandbox.sandboxId}/secure-file-transfers/${transfer.transferId}`
+    const maximum = MAX_SECURE_CIPHERTEXT_BASE64_LENGTH + 8_192
+    const request = (body: ReadableStream<Uint8Array>, extra: RequestInit = {}) => new Request(url, {
+      method: "PUT", headers: jsonHeaders, body, duplex: "half", ...extra,
+    } as RequestInit & { duplex: "half" })
+
+    const exact = await app.fetch(request(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(maximum)); controller.close() } })))
+    expect(exact.status).toBe(400)
+
+    let overflowCancelled = false
+    const overflow = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(maximum)); controller.enqueue(new Uint8Array(1)) },
+      cancel() { overflowCancelled = true },
+    })
+    expect((await app.fetch(request(overflow))).status).toBe(413)
+    expect(overflowCancelled).toBeTrue()
+
+    let malformedCancelled = false
+    const malformed = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(1)) }, cancel() { malformedCancelled = true } })
+    expect((await app.fetch(request(malformed, { headers: { ...jsonHeaders, "content-length": "invalid" } }))).status).toBe(400)
+    expect(malformedCancelled).toBeTrue()
+
+    let abortedCancelled = false
+    const controller = new AbortController()
+    const stalled = new ReadableStream<Uint8Array>({ cancel() { abortedCancelled = true } })
+    const pending = app.fetch(request(stalled, { signal: controller.signal }))
+    await Promise.resolve()
+    controller.abort(new DOMException("client left", "AbortError"))
+    expect((await pending).status).toBe(400)
+    expect(abortedCancelled).toBeTrue()
   })
 
   test("maps domain errors to stable, secret-safe envelopes", async () => {
@@ -153,6 +207,13 @@ describe("Waterbox API", () => {
     expect(signal.aborted).toBeTrue()
     release()
     await cancelling
+  })
+
+  test("returns a normal error envelope when the provider fails before its first event", async () => {
+    const { app } = api({ executeTool: async () => ({ async *[Symbol.asyncIterator]() { throw new DomainError("ambiguous_execution", "unknown") } }) })
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/read`, { method: "POST", headers: jsonHeaders, body: '{"filePath":"x"}' })
+    expect(response.status).toBe(502)
+    expect(await response.json()).toMatchObject({ error: { code: "ambiguous_execution" } })
   })
 
   test("generates deterministic OpenAPI 3.1 with every route, auth, errors, and NDJSON", async () => {

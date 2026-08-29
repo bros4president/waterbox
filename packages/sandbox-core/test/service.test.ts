@@ -94,13 +94,27 @@ describe("account ownership", () => {
   })
 
   test("one account cannot access another account's resources", async () => {
-    const { service } = harness()
+    const { service, provider } = harness()
     const sandbox = await service.createSandbox(alice, {})
     const snapshot = await service.createSnapshot(alice, sandbox.sandboxId, {})
 
     await expectDomainError(service.getSandbox(bob, sandbox.sandboxId), "not_found")
+    await expectDomainError(service.probeSandbox(bob, sandbox.sandboxId), "not_found")
     await expectDomainError(service.getSnapshot(bob, snapshot.snapshotId), "not_found")
     await expectDomainError(service.deleteSandbox(bob, sandbox.sandboxId), "not_found")
+    expect(provider.inspectSandboxCalls).toBe(0)
+  })
+
+  test("live probe always inspects the provider and persists out-of-band state", async () => {
+    const { service, provider, sandboxes } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(sandbox.sandboxId, "stopped")
+
+    expect((await service.probeSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
+    provider.sandboxStates.set(sandbox.sandboxId, "terminated")
+    expect((await service.probeSandbox(alice, sandbox.sandboxId)).state).toBe("terminated")
+    expect(provider.inspectSandboxCalls).toBe(2)
   })
 
   test("list operations stay inside the account partition and retain opaque cursors", async () => {
@@ -118,6 +132,57 @@ describe("account ownership", () => {
     expect(first.nextCursor).toStartWith("test-cursor:")
     expect(second.items).toHaveLength(1)
     expect(second.items[0]?.sandboxId).not.toBe(first.items[0]?.sandboxId)
+  })
+})
+
+describe("secure file transfer", () => {
+  test("preserves account, provider reference, signal, and ciphertext without persistence", async () => {
+    const { service, provider, sandboxes } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    const controller = new AbortController()
+    const initiated = await service.initiateSecureFileTransfer(alice, sandbox.sandboxId, controller.signal)
+    const request = { targetPath: "/root/.aws/credentials", ciphertext: Buffer.from("ciphertext-only").toString("base64") }
+    const delivered = await service.consumeSecureFileTransfer(alice, sandbox.sandboxId, initiated.transferId, request, controller.signal)
+
+    expect(delivered).toMatchObject({ transferId: initiated.transferId, targetPath: request.targetPath })
+    expect(provider.secureTransferInputs).toHaveLength(2)
+    expect(provider.secureTransferInputs[1]).toMatchObject({ accountId: alice.accountId, transferId: initiated.transferId, ...request, signal: controller.signal })
+    expect(JSON.stringify(await sandboxes.get(alice.accountId, sandbox.sandboxId))).not.toContain("ciphertext-only")
+  })
+
+  test("enforces ownership and capability before dispatch and resumes stopped sandboxes", async () => {
+    const { service, provider } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, sandbox.sandboxId)
+    await service.initiateSecureFileTransfer(alice, sandbox.sandboxId)
+    expect(provider.resumeCalls).toBe(1)
+
+    await expectDomainError(service.initiateSecureFileTransfer(bob, sandbox.sandboxId), "not_found")
+    const unsupported = harness({ provider: new FakeSandboxProvider({ secureFileTransfer: false }) })
+    const unsupportedSandbox = await unsupported.service.createSandbox(alice, {})
+    await expectDomainError(unsupported.service.initiateSecureFileTransfer(alice, unsupportedSandbox.sandboxId), "unsupported_capability")
+  })
+
+  test("maps transfer expiry and consumption to typed domain outcomes", async () => {
+    for (const [kind, code] of [["expired", "transfer_expired"], ["consumed", "transfer_consumed"]] as const) {
+      const provider = new FakeSandboxProvider()
+      provider.secureFileTransfer!.consume = async () => { throw new ProviderError(kind, "private provider details") }
+      const { service } = harness({ provider })
+      const sandbox = await service.createSandbox(alice, {})
+      await expectDomainError(service.consumeSecureFileTransfer(alice, sandbox.sandboxId, "123e4567-e89b-42d3-a456-426614174000", { targetPath: "x", ciphertext: "YQ==" }), code)
+    }
+  })
+
+  test("preserves ambiguous consumption when cancellation races with dispatch", async () => {
+    const provider = new FakeSandboxProvider()
+    const controller = new AbortController()
+    provider.secureFileTransfer!.consume = async () => {
+      controller.abort(new DOMException("caller left", "AbortError"))
+      throw new ProviderError("ambiguous_execution", "response lost")
+    }
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    await expectDomainError(service.consumeSecureFileTransfer(alice, sandbox.sandboxId, "123e4567-e89b-42d3-a456-426614174000", { targetPath: "x", ciphertext: "YQ==" }, controller.signal), "ambiguous_execution")
   })
 })
 
@@ -625,6 +690,19 @@ describe("execution and reconciliation", () => {
 
     await expectDomainError(collect(events), "ambiguous_execution")
     expect(provider.executeCalls).toBe(1)
+  })
+
+  test("preserves ambiguous tool execution when cancellation races with dispatch", async () => {
+    const provider = new FakeSandboxProvider()
+    const controller = new AbortController()
+    provider.executeTool = ((input: Parameters<FakeSandboxProvider["executeTool"]>[0]) => (async function* () {
+      controller.abort(new DOMException("caller left", "AbortError"))
+      throw new ProviderError("ambiguous_execution", "response lost")
+    })()) as FakeSandboxProvider["executeTool"]
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    const events = await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "touch /workspace/a" }, controller.signal)
+    await expectDomainError(collect(events), "ambiguous_execution")
   })
 
   test("get reconciles transitional sandbox and snapshot provider states", async () => {

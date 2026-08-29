@@ -1,11 +1,21 @@
 # @waterbox/provider-box
 
-`BoxSandboxProvider` implements the provider-neutral core port over the Box Public API v1 and the canonical Waterbox daemon protocol. Box response DTOs, resource identifiers, API credentials, and protected-hosting URLs are private implementation details stored only in opaque provider references.
+`BoxSandboxProvider` implements the provider-neutral core port over Box Public API v1.
+Lifecycle and snapshots use first-class Box endpoints. Tool execution invokes the
+one-shot Waterbox CLI through `POST /boxes/{id}/commands`; no hosted daemon or protected
+URL is used or persisted.
 
-Configuration is explicit and injectable. Production composition supplies the full API base URL (normally `https://ascii.dev/api/box/v1`), API key, deterministic named system-snapshot reference, daemon port, polling policy, clock, and `fetch`. Tests use fake fetch implementations; this package never reads environment variables and does not include a real Box smoke test.
+Configuration supplies the API base URL, API key, V2 system-template reference, polling
+policy, clock, and `fetch`. User Boxes are `noEnv` and receive only a non-secret sandbox
+tag. Opaque V2 references contain the Box ID only; legacy daemon references are rejected.
 
-The adapter follows the official operation-specific success envelopes and provider states. User boxes are `noEnv`, receive only a non-secret Waterbox sandbox tag, and use named snapshot names as opaque provider references. Permanent box deletion is confirmed with `X-Ascii-Confirm-Delete` and reconciled through the asynchronous deletion operation; named snapshot deletion is separate.
+Canonical tool arguments are encoded as a bounded, versioned base64url envelope and sent
+as one `waterbox run` argument. Commands are never retried. Lost responses, Box 5xx,
+timeouts, truncation, malformed CLI output, and internal CLI failures are surfaced as
+ambiguous execution. Definite API 4xx and structured CLI rejections are ordinary provider
+failures. Bash returns one buffered terminal event because Box commands are synchronous.
 
-Mutating Box and daemon calls are issued once. In particular, daemon transport failures after dispatch and `502 box_direct_failed` responses are surfaced as ambiguous execution errors and are never automatically retried.
-
-Protected hosting URLs may carry credentials in their path and query. Tool routes are appended after that path without replacing it, and the query is preserved. Daemon responses are media-type checked, byte bounded, decoded with fatal UTF-8 handling, and validated against the canonical event schemas. Bash accepts only ordered output events followed by exactly one terminal result.
+Each tool invocation is sent as one independent Box command request. The adapter does not
+queue, serialize, deduplicate, or throttle command execution. Any provider-side command
+ordering or concurrency limit is surfaced as Box behavior rather than recreated by
+Waterbox.

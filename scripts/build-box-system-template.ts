@@ -1,9 +1,11 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
+import { dirname, posix, resolve } from "node:path"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
 const DEFAULT_BASE_URL = "https://ascii.dev/api/box/v1"
-const DEFAULT_TEMPLATE = "waterbox-system-v1"
+const DEFAULT_TEMPLATE = "waterbox-system-v5"
+const BUN_VERSION = "1.3.2"
+const BUN_LINUX_X64_BASELINE_SHA256 = "7ff09a4a519e8206d60d7b763072cbf3642f8370690165586d303faf21692172"
 const MAX_RESPONSE_BYTES = 1_048_576
 const BOX_STATES = new Set(["init", "provisioning", "provisioned", "cloning", "ready", "idle", "running", "archiving", "archived", "error"])
 const SNAPSHOT_STATES = new Set(["saving", "ready", "failed"])
@@ -19,11 +21,9 @@ export interface TemplateConfig {
   templateName: string
   artifactPath: string
   metadataPath: string
-  daemonPort: number
   pollIntervalMs: number
   pollTimeoutMs: number
   requestTimeoutMs: number
-  replace: boolean
 }
 
 export interface TemplateDependencies {
@@ -36,18 +36,20 @@ export interface TemplateDependencies {
 }
 
 export interface TemplateMetadata {
-  schemaVersion: 1
+  schemaVersion: 2
   provider: "box"
   templateRef: string
-  daemonPort: number
+  artifactKind: "waterbox-cli"
+  cliProtocolVersion: 1
   builtAt: string
 }
 
 export function builderHelp(): string {
-  return `Build: bun run build:box-template --run [--replace]\nValidate only: bun run build:box-template --validate\nRequired for live build: BOX_API_KEY and BOX_TEMPLATE_BUILD_AUTHORIZATION=${AUTHORIZATION}\nOptional: BOX_API_BASE_URL, WATERBOX_BOX_TEMPLATE_NAME, WATERBOX_DAEMON_ARTIFACT, WATERBOX_TEMPLATE_METADATA, WATERBOX_DAEMON_PORT, BOX_TEMPLATE_POLL_INTERVAL_MS, BOX_TEMPLATE_POLL_TIMEOUT_MS, BOX_TEMPLATE_REQUEST_TIMEOUT_MS`
+  return `Build: bun run build:box-template --run\nValidate only: bun run build:box-template --validate\nRequired for live build: BOX_API_KEY and BOX_TEMPLATE_BUILD_AUTHORIZATION=${AUTHORIZATION}\nOptional: BOX_API_BASE_URL, WATERBOX_BOX_TEMPLATE_NAME, WATERBOX_CLI_ARTIFACT, WATERBOX_TEMPLATE_METADATA, BOX_TEMPLATE_POLL_INTERVAL_MS, BOX_TEMPLATE_POLL_TIMEOUT_MS, BOX_TEMPLATE_REQUEST_TIMEOUT_MS`
 }
 
 export function loadTemplateConfig(env: NodeJS.ProcessEnv, argv: readonly string[]): TemplateConfig {
+  if (argv.some((value) => value !== "--validate" && value !== "--run")) throw new Error(`Unknown option. ${builderHelp()}`)
   const validate = argv.includes("--validate")
   const run = argv.includes("--run")
   if (validate === run) throw new Error(`Choose exactly one of --validate or --run. ${builderHelp()}`)
@@ -55,18 +57,16 @@ export function loadTemplateConfig(env: NodeJS.ProcessEnv, argv: readonly string
   if (run && !plain(env.BOX_API_KEY)) throw new Error("BOX_API_KEY is required")
   const templateName = env.WATERBOX_BOX_TEMPLATE_NAME ?? DEFAULT_TEMPLATE
   validateSnapshotName(templateName)
-  const artifactPath = resolve(env.WATERBOX_DAEMON_ARTIFACT ?? "packages/sandbox-daemon/dist/waterbox-daemon")
+  const artifactPath = resolve(env.WATERBOX_CLI_ARTIFACT ?? "packages/sandbox-cli/dist/waterbox-cli.js")
   return {
     apiBaseUrl: cleanUrl(env.BOX_API_BASE_URL ?? DEFAULT_BASE_URL),
     apiKey: run ? env.BOX_API_KEY! : "",
     templateName,
     artifactPath,
     metadataPath: resolve(env.WATERBOX_TEMPLATE_METADATA ?? ".waterbox/box-system-template.json"),
-    daemonPort: positiveInteger(env.WATERBOX_DAEMON_PORT ?? "8080", "WATERBOX_DAEMON_PORT", 65_535),
     pollIntervalMs: positiveInteger(env.BOX_TEMPLATE_POLL_INTERVAL_MS ?? "1000", "BOX_TEMPLATE_POLL_INTERVAL_MS"),
     pollTimeoutMs: positiveInteger(env.BOX_TEMPLATE_POLL_TIMEOUT_MS ?? "600000", "BOX_TEMPLATE_POLL_TIMEOUT_MS"),
     requestTimeoutMs: positiveInteger(env.BOX_TEMPLATE_REQUEST_TIMEOUT_MS ?? "30000", "BOX_TEMPLATE_REQUEST_TIMEOUT_MS"),
-    replace: argv.includes("--replace"),
   }
 }
 
@@ -77,46 +77,49 @@ export function createTemplateRequest(runId: string): { body: { noEnv: true; env
   return { body: { noEnv: true, env: { WATERBOX_SANDBOX_ID: tag }, ttlSeconds: 1800 }, idempotencyKey: tag }
 }
 
-export function installCommand(port: number): string {
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid daemon port")
-  const unit = `[Unit]\nDescription=Waterbox sandbox daemon\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nUser=root\nEnvironment=WORKSPACE_ROOT=/workspace\nEnvironment=PORT=${port}\nExecStart=/usr/local/bin/waterbox-daemon\nRestart=always\nRestartSec=2\nNoNewPrivileges=true\n\n[Install]\nWantedBy=multi-user.target\n`
+export function installCommand(bunVersion = BUN_VERSION): string {
+  if (bunVersion !== BUN_VERSION) throw new Error("Invalid Bun version")
+  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace\ncd /workspace\nexec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/bun /usr/local/lib/waterbox-cli.js "$@"\n`
   return [
     "set -eu",
-    "install -d -m 0755 /workspace",
-    "install -m 0755 /tmp/waterbox-daemon /usr/local/bin/waterbox-daemon",
-    "if ! command -v rg >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep curl && rm -rf /var/lib/apt/lists/*; fi",
-    `printf '%s' '${unit.replaceAll("'", "'\\''")}' > /etc/systemd/system/waterbox-daemon.service`,
-    "chmod 0644 /etc/systemd/system/waterbox-daemon.service",
-    "systemctl daemon-reload",
-    "systemctl enable --now waterbox-daemon.service",
-    `for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:${port}/health >/dev/null && exit 0; sleep 1; done`,
-    "systemctl --no-pager status waterbox-daemon.service >&2 || true",
-    "exit 1",
+    "sudo -n true",
+    "sudo install -d -m 0755 -o \"$(id -u)\" -g \"$(id -g)\" /workspace",
+    "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep unzip ca-certificates curl && sudo rm -rf /var/lib/apt/lists/*",
+    `curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-baseline.zip -o /tmp/bun.zip`,
+    `printf '%s  %s\n' '${BUN_LINUX_X64_BASELINE_SHA256}' /tmp/bun.zip | sha256sum -c -`,
+    "rm -rf /tmp/bun-runtime && unzip -q /tmp/bun.zip -d /tmp/bun-runtime",
+    "sudo install -m 0755 /tmp/bun-runtime/bun-linux-x64-baseline/bun /usr/local/bin/bun",
+    "sudo install -d -m 0755 /usr/local/lib",
+    "sudo install -m 0644 /tmp/waterbox-cli.js /usr/local/lib/waterbox-cli.js",
+    `printf '%s' '${launcher.replaceAll("'", "'\\''")}' | sudo tee /usr/local/bin/waterbox >/dev/null`,
+    "sudo chmod 0755 /usr/local/bin/waterbox",
+    "waterbox health",
   ].join("\n")
 }
 
 export function parseMetadata(text: string): TemplateMetadata {
   let value: unknown
   try { value = JSON.parse(text) } catch { throw new Error("Template metadata is not valid JSON") }
-  if (!object(value) || value.schemaVersion !== 1 || value.provider !== "box" || !plain(value.templateRef) || !validSnapshotName(value.templateRef) || !Number.isInteger(value.daemonPort) || Number(value.daemonPort) < 1 || Number(value.daemonPort) > 65_535 || !plain(value.builtAt) || Number.isNaN(Date.parse(value.builtAt))) throw new Error("Template metadata is invalid")
+  if (!object(value) || value.schemaVersion !== 2 || value.provider !== "box" || !plain(value.templateRef) || !validSnapshotName(value.templateRef) || value.artifactKind !== "waterbox-cli" || value.cliProtocolVersion !== 1 || !plain(value.builtAt) || Number.isNaN(Date.parse(value.builtAt))) throw new Error("Template metadata is invalid")
   return value as unknown as TemplateMetadata
 }
 
-export function validateDaemonArtifact(artifact: Uint8Array): void {
-  if (artifact.byteLength < 64 || artifact[0] !== 0x7f || artifact[1] !== 0x45 || artifact[2] !== 0x4c || artifact[3] !== 0x46) throw new Error("Daemon artifact must be a Linux ELF executable")
-  if (artifact[4] !== 2 || artifact[5] !== 1 || artifact[18] !== 0x3e || artifact[19] !== 0) throw new Error("Daemon artifact must target Linux x86-64")
+export function validateCliArtifact(artifact: Uint8Array): void {
+  let text: string
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(artifact) } catch { throw new Error("CLI artifact must be a Bun JavaScript bundle") }
+  if (!text.startsWith("// @bun\n") || !text.includes("WORKSPACE_ROOT")) throw new Error("CLI artifact must be a Bun JavaScript bundle")
 }
 
 export async function runTemplateBuild(config: TemplateConfig, dependencies: TemplateDependencies): Promise<TemplateMetadata> {
   const artifact = await dependencies.readArtifact(config.artifactPath)
-  validateDaemonArtifact(artifact)
+  validateCliArtifact(artifact)
   const request = createTemplateRequest(dependencies.randomId())
   const client = new BoxTemplateClient(config, dependencies)
   let boxId: string | undefined
   let snapshotMutationAmbiguous = false
   try {
     const existing = await client.getSnapshotIfPresent(config.templateName)
-    if (existing !== undefined && !config.replace) throw new Error("Template already exists; pass --replace to update it")
+    if (existing !== undefined) throw new Error("Template already exists; use a new immutable versioned name")
     if (existing === "saving") throw new Error("Template snapshot save is already in progress")
     dependencies.log({ stage: "source-create", status: "requesting" })
     const created = await createBoxWithRecovery(client, request.body, request.idempotencyKey)
@@ -124,18 +127,20 @@ export async function runTemplateBuild(config: TemplateConfig, dependencies: Tem
     dependencies.log({ stage: "source-create", status: "accepted" })
     await client.waitForBox(boxId, READY_STATES, "source-readiness")
     await client.uploadArtifact(boxId, artifact)
-    dependencies.log({ stage: "daemon-upload", status: "completed", bytes: artifact.byteLength })
-    parseCommand(await client.json("POST", `/boxes/${segment(boxId)}/commands`, { body: { command: installCommand(config.daemonPort), timeoutSeconds: 600 } }))
-    parseCommand(await client.json("POST", `/boxes/${segment(boxId)}/commands`, { body: { command: `curl -fsS http://127.0.0.1:${config.daemonPort}/health`, timeoutSeconds: 30 } }))
-    dependencies.log({ stage: "daemon-health", status: "verified" })
+    dependencies.log({ stage: "cli-upload", status: "completed", bytes: artifact.byteLength })
+    parseCommand(await client.json("POST", `/boxes/${segment(boxId)}/commands`, { body: { command: installCommand(), timeoutSeconds: 600 } }))
+    dependencies.log({ stage: "cli-health", status: "verified" })
     parseAction(await client.json("POST", `/boxes/${segment(boxId)}/stop`), boxId, "box.stopping")
     await client.waitForBox(boxId, new Set(["archived"]), "source-stop")
-    dependencies.log({ stage: "snapshot-save", status: "requesting", replacing: existing !== undefined })
-    snapshotMutationAmbiguous = true
-    parseSnapshot(await client.json("POST", "/named-snapshots", { body: { boxId, name: config.templateName } }), "snapshot.named.saving", config.templateName, boxId)
-    snapshotMutationAmbiguous = false
+    dependencies.log({ stage: "snapshot-save", status: "requesting" })
+    try {
+      parseSnapshot(await client.json("POST", "/named-snapshots", { body: { boxId, name: config.templateName } }), "snapshot.named.saving", config.templateName, boxId)
+    } catch (error) {
+      snapshotMutationAmbiguous = !(error instanceof BoxHttpError && error.status < 500)
+      throw error
+    }
     await client.waitForSnapshot(config.templateName, boxId)
-    const metadata: TemplateMetadata = { schemaVersion: 1, provider: "box", templateRef: config.templateName, daemonPort: config.daemonPort, builtAt: new Date().toISOString() }
+    const metadata: TemplateMetadata = { schemaVersion: 2, provider: "box", templateRef: config.templateName, artifactKind: "waterbox-cli", cliProtocolVersion: 1, builtAt: new Date().toISOString() }
     await dependencies.writeMetadata(config.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`)
     dependencies.log({ stage: "metadata", status: "written" })
     const cleanupStatus = await client.deleteBox(boxId)
@@ -167,7 +172,7 @@ class BoxTemplateClient {
   }
 
   async uploadArtifact(boxId: string, artifact: Uint8Array): Promise<void> {
-    const value = await this.json("PUT", `/boxes/${segment(boxId)}/files`, { body: { path: "/tmp/waterbox-daemon", content: Buffer.from(artifact).toString("base64"), encoding: "base64" } })
+    const value = await this.json("PUT", `/boxes/${segment(boxId)}/files`, { body: { path: "/tmp/waterbox-cli.js", content: Buffer.from(artifact).toString("base64"), encoding: "base64" } })
     parseArtifactUpload(value, artifact.byteLength)
   }
 
@@ -228,8 +233,8 @@ function validBox(value: unknown, expectedId?: string): value is Record<string, 
 export function parseCreatedBox(value: unknown): { id: string } { if (!object(value) || value.ok !== true || value.type !== "box.created" || !plain(value.status) || !BOX_STATES.has(value.status) || !(Number.isSafeInteger(value.ttlSeconds) && Number(value.ttlSeconds) >= 1 || value.ttlSeconds === null) || !validBox(value.box) || (value.status !== "provisioning" && value.status !== value.box.state)) throw new Error("Box returned an invalid create response"); return { id: String(value.box.id) } }
 function infoBox(value: unknown, id: string): string { if (!object(value) || value.ok !== true || value.type !== "box.info" || !validBox(value.box, id)) throw new Error("Box returned an invalid lifecycle response"); return String(value.box.state) }
 export function parseAction(value: unknown, id: string, type: string): void { if (!object(value) || value.ok !== true || value.type !== type || value.id !== id || !plain(value.status) || (value.box !== undefined && value.box !== null && !validBox(value.box, id))) throw new Error("Box returned an invalid action response") }
-export function parseCommand(value: unknown): void { if (!object(value) || value.ok !== true || value.type !== "command.finished" || value.success !== true || value.exitCode !== 0 || typeof value.stdout !== "string" || typeof value.stderr !== "string" || value.timedOut !== false) throw new Error("Box command failed") }
-export function parseArtifactUpload(value: unknown, expectedSize: number): void { if (!object(value) || value.ok !== true || value.type !== "file.written" || value.success !== true || value.path !== "/tmp/waterbox-daemon" || value.encoding !== "base64" || !Number.isSafeInteger(value.size) || value.size !== expectedSize) throw new Error("Box returned an invalid artifact upload response") }
+export function parseCommand(value: unknown): void { if (!object(value) || value.ok !== true || value.type !== "command.finished" || typeof value.stdout !== "string" || typeof value.stderr !== "string" || typeof value.exitCode !== "number" || typeof value.timedOut !== "boolean") throw new Error("Box returned an invalid command response"); if (value.success !== true || value.exitCode !== 0 || value.timedOut !== false) { const detail = value.stderr.trim().slice(-1_000).replace(/[\r\n\t]+/g, " "); throw new Error(`Box command failed${detail ? `: ${detail}` : ""}`) } }
+export function parseArtifactUpload(value: unknown, expectedSize: number): void { if (!object(value) || value.ok !== true || value.type !== "file.written" || value.success !== true || typeof value.path !== "string" || posix.resolve("/home/user", value.path) !== "/tmp/waterbox-cli.js" || value.encoding !== "base64" || !Number.isSafeInteger(value.size) || value.size !== expectedSize) throw new Error("Box returned an invalid artifact upload response") }
 export function parseSnapshot(value: unknown, type: string, name: string, sourceBoxId?: string): string { if (!object(value) || value.ok !== true || value.type !== type || !object(value.snapshot) || (type === "snapshot.named.saving" && (value.status !== "saving" || value.snapshot.status !== "saving")) || value.snapshot.name !== name || !plain(value.snapshot.status) || !SNAPSHOT_STATES.has(value.snapshot.status) || !plain(value.snapshot.sourceBoxId) || !BOX_ID.test(value.snapshot.sourceBoxId) || !validDate(value.snapshot.createdAt) || (sourceBoxId !== undefined && value.snapshot.sourceBoxId !== sourceBoxId) || (value.snapshot.status === "ready" && !plain(value.snapshot.snapshotId))) throw new Error("Box returned an invalid named snapshot response"); return value.snapshot.status }
 function validDeletion(value: unknown, boxId: string, operationId?: string): value is Record<string, unknown> { return object(value) && plain(value.id) && DELETION_ID.test(value.id) && (operationId === undefined || value.id === operationId) && value.kind === "box" && value.targetId === boxId && ["explicit", "zdr", "account"].includes(String(value.reason)) && plain(value.status) && DELETION_STATES.has(value.status) && Number.isInteger(value.attemptCount) && Number(value.attemptCount) >= 0 && validDate(value.requestedAt) && (value.completedAt === null || validDate(value.completedAt)) }
 function deletionResponse(value: unknown, boxId: string): string { if (!object(value) || value.ok !== true || value.type !== "box.deleting" || !validDeletion(value.operation, boxId)) throw new Error("Box returned an invalid deletion response"); return String(value.operation.id) }
@@ -245,8 +250,8 @@ async function main(): Promise<void> {
   if (process.env.NODE_ENV === "test" || process.argv.some(value => value.includes("bun-test"))) throw new Error("Live Box template builds are disabled under bun test")
   const config = loadTemplateConfig(process.env, process.argv.slice(2))
   const artifact = await readFile(config.artifactPath)
-  validateDaemonArtifact(artifact)
-  if (process.argv.includes("--validate")) { console.log(JSON.stringify({ valid: true, artifactBytes: artifact.byteLength, templateRef: config.templateName, daemonPort: config.daemonPort })); return }
+  validateCliArtifact(artifact)
+  if (process.argv.includes("--validate")) { console.log(JSON.stringify({ valid: true, artifactBytes: artifact.byteLength, templateRef: config.templateName, cliProtocolVersion: 1 })); return }
   const dependencies: TemplateDependencies = {
     fetch,
     sleep: (milliseconds, signal) => new Promise((resolveSleep, reject) => { const timer = setTimeout(resolveSleep, milliseconds); signal.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason) }, { once: true }) }),

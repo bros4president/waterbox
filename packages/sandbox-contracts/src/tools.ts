@@ -2,7 +2,7 @@ import { z } from "zod"
 
 const NonEmptyStringSchema = z.string().min(1)
 const PositiveIntegerSchema = z.number().int().positive()
-const FilePathSchema = NonEmptyStringSchema.max(4_096)
+export const FilePathSchema = NonEmptyStringSchema.max(4_096)
 
 export const ToolNameSchema = z.enum(["read", "write", "edit", "patch", "glob", "grep", "bash"])
 

@@ -12,6 +12,8 @@ export const ErrorCodeSchema = z.enum([
   "provider_failure",
   "provider_limit",
   "ambiguous_execution",
+  "transfer_expired",
+  "transfer_consumed",
   "internal_error",
 ])
 

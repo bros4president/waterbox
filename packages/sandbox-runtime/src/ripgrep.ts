@@ -53,7 +53,7 @@ export class RipgrepTimeoutError extends RipgrepError {
 }
 
 export async function ripgrepGlob(root: string, pattern?: string, options: RipgrepOptions = {}): Promise<RipgrepGlobResult> {
-  const args = ["--no-config", "--files", "--hidden", "--glob", "!.git", "--glob", "!.git/**"]
+  const args = ["--no-config", "--files", "--hidden", "--no-ignore"]
   if (pattern !== undefined) args.push("--glob", pattern)
   for (const glob of options.globs ?? []) args.push("--glob", glob)
   args.push(".")
@@ -67,7 +67,7 @@ export async function ripgrepGlob(root: string, pattern?: string, options: Ripgr
 }
 
 export async function ripgrepSearch(root: string, pattern: string, options: RipgrepOptions = {}): Promise<RipgrepSearchResult> {
-  const args = ["--no-config", "--json", "--hidden", "--no-messages", "--glob", "!.git", "--glob", "!.git/**"]
+  const args = ["--no-config", "--json", "--hidden", "--no-ignore", "--no-messages"]
   for (const glob of options.globs ?? []) args.push("--glob", glob)
   const target = options.target ?? "."
   if (target.length === 0 || target.includes("\0")) throw new RangeError("target must be a non-empty path")
