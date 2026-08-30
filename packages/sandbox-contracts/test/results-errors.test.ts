@@ -37,6 +37,7 @@ describe("tool results and events", () => {
   test("accepts ordered NDJSON-compatible bash event shapes", () => {
     const result = {
       ...base,
+      outcome: "completed",
       metadata: {
         command: "pwd",
         workdir: "/workspace",
@@ -57,6 +58,33 @@ describe("tool results and events", () => {
       ...result,
       metadata: { ...result.metadata, outputTruncated: true },
     }).success).toBe(true)
+    expect(BashToolResultSchema.safeParse({
+      title: "Bash command dispatched",
+      output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
+      outcome: "dispatched",
+      metadata: {
+        command: "sleep 20",
+        workdir: ".",
+        timeout: 20_000,
+        jobId: "job_0123456789abcdef0123456789abcdef",
+        outputPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/output.log",
+        statusPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
+        pollAfterMs: 2_000,
+      },
+    }).success).toBe(true)
+    expect(BashToolResultSchema.safeParse({
+      title: "Bash command dispatched",
+      output: "Command dispatched",
+      outcome: "dispatched",
+      metadata: {
+        command: "sleep 20",
+        workdir: ".",
+        jobId: "job_0123456789abcdef0123456789abcdef",
+        outputPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/output.log",
+        statusPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
+        pollAfterMs: 2_000,
+      },
+    }).success).toBe(true)
   })
 
   test("rejects malformed event variants and unknown fields", () => {
@@ -66,12 +94,14 @@ describe("tool results and events", () => {
     expect(ReadToolEventSchema.safeParse({ type: "stdout", data: "x" }).success).toBe(false)
     expect(BashToolEventSchema.safeParse({
       type: "result",
+      outcome: "completed",
       title: "complete",
       output: "ok",
       metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 12 },
     }).success).toBe(false)
     expect(BashToolEventSchema.safeParse({
       type: "result",
+      outcome: "completed",
       title: "complete",
       output: "ok",
       metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 12, outputTruncated: "no" },

@@ -163,10 +163,14 @@ export async function emergencyCleanup(baseUrl: string, apiKey: string, baseline
     const response = await fetch(`${baseUrl}/boxes/${encodeURIComponent(item.id)}`, { method: "DELETE", headers: { authorization: `Bearer ${apiKey}`, accept: "application/json", "x-ascii-confirm-delete": item.id }, signal: AbortSignal.timeout(30_000) })
     await response.body?.cancel().catch(() => {})
   }
-  await Bun.sleep(2_000)
-  const [afterList, limits] = await Promise.all([boxJson(baseUrl, apiKey, "/boxes"), boxJson(baseUrl, apiKey, "/limits")])
-  const visibleExtras = Array.isArray(afterList?.boxes) ? afterList.boxes.filter((item: any) => typeof item?.id === "string" && !baseline.ids.has(item.id)).length : -1
-  return { visibleExtras, activeBoxes: Number(limits?.activeBoxes) }
+  const deadline = Date.now() + 180_000
+  while (true) {
+    const [afterList, limits] = await Promise.all([boxJson(baseUrl, apiKey, "/boxes"), boxJson(baseUrl, apiKey, "/limits")])
+    const visibleExtras = Array.isArray(afterList?.boxes) ? afterList.boxes.filter((item: any) => typeof item?.id === "string" && !baseline.ids.has(item.id)).length : -1
+    const activeBoxes = Number(limits?.activeBoxes)
+    if (visibleExtras === 0 && activeBoxes === baseline.activeBoxes || Date.now() >= deadline) return { visibleExtras, activeBoxes }
+    await Bun.sleep(2_000)
+  }
 }
 
 export async function collectCliDiagnostics(baseUrl: string, apiKey: string, baseline: BoxBaseline): Promise<Record<string, unknown>> {

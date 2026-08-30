@@ -14,6 +14,8 @@ as one `waterbox run` argument. Commands are never retried. Lost responses, Box 
 timeouts, truncation, malformed CLI output, and internal CLI failures are surfaced as
 ambiguous execution. Definite API 4xx and structured CLI rejections are ordinary provider
 failures. Bash returns one buffered terminal event because Box commands are synchronous.
+That event may report completed execution or detached dispatch; the adapter forwards either
+receipt unchanged and does not read or poll its output/status files.
 
 Each tool invocation is sent as one independent Box command request. The adapter does not
 queue, serialize, deduplicate, or throttle command execution. Any provider-side command

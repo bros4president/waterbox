@@ -110,8 +110,9 @@ export const GrepToolResultSchema = z.object({
   }).strict(),
 }).strict()
 
-export const BashToolResultSchema = z.object({
+export const CompletedBashToolResultSchema = z.object({
   ...ToolResultBaseShape,
+  outcome: z.literal("completed"),
   metadata: z.object({
     command: z.string(),
     description: z.string().optional(),
@@ -125,16 +126,37 @@ export const BashToolResultSchema = z.object({
   }).strict(),
 }).strict()
 
+export const DispatchedBashToolResultSchema = z.object({
+  ...ToolResultBaseShape,
+  outcome: z.literal("dispatched"),
+  metadata: z.object({
+    command: z.string(),
+    description: z.string().optional(),
+    workdir: z.string(),
+    timeout: PositiveIntegerSchema.max(2_147_483_647).optional(),
+    jobId: z.string().regex(/^job_[0-9a-f]{32}$/),
+    outputPath: FilePathSchema,
+    statusPath: FilePathSchema,
+    pollAfterMs: PositiveIntegerSchema,
+  }).strict(),
+}).strict()
+
+export const BashToolResultSchema = z.discriminatedUnion("outcome", [
+  CompletedBashToolResultSchema,
+  DispatchedBashToolResultSchema,
+])
+
 export const ReadToolEventSchema = ReadToolResultSchema.extend({ type: z.literal("result") })
 export const WriteToolEventSchema = WriteToolResultSchema.extend({ type: z.literal("result") })
 export const EditToolEventSchema = EditToolResultSchema.extend({ type: z.literal("result") })
 export const PatchToolEventSchema = PatchToolResultSchema.extend({ type: z.literal("result") })
 export const GlobToolEventSchema = GlobToolResultSchema.extend({ type: z.literal("result") })
 export const GrepToolEventSchema = GrepToolResultSchema.extend({ type: z.literal("result") })
-export const BashToolEventSchema = z.discriminatedUnion("type", [
+export const BashToolEventSchema = z.union([
   z.object({ type: z.literal("stdout"), data: z.string() }).strict(),
   z.object({ type: z.literal("stderr"), data: z.string() }).strict(),
-  BashToolResultSchema.extend({ type: z.literal("result") }),
+  CompletedBashToolResultSchema.extend({ type: z.literal("result") }),
+  DispatchedBashToolResultSchema.extend({ type: z.literal("result") }),
 ])
 
 export type ToolName = z.infer<typeof ToolNameSchema>
@@ -152,6 +174,8 @@ export type PatchToolResult = z.infer<typeof PatchToolResultSchema>
 export type GlobToolResult = z.infer<typeof GlobToolResultSchema>
 export type GrepToolResult = z.infer<typeof GrepToolResultSchema>
 export type BashToolResult = z.infer<typeof BashToolResultSchema>
+export type CompletedBashToolResult = z.infer<typeof CompletedBashToolResultSchema>
+export type DispatchedBashToolResult = z.infer<typeof DispatchedBashToolResultSchema>
 export type ReadToolEvent = z.infer<typeof ReadToolEventSchema>
 export type WriteToolEvent = z.infer<typeof WriteToolEventSchema>
 export type EditToolEvent = z.infer<typeof EditToolEventSchema>

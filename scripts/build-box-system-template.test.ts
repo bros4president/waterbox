@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test"
-import { boundedJson, createTemplateRequest, installCommand, loadTemplateConfig, parseAction, parseArtifactUpload, parseCommand, parseCreatedBox, parseMetadata, parseSnapshot, runTemplateBuild, validateCliArtifact, type TemplateConfig, type TemplateDependencies } from "./build-box-system-template.ts"
+import { boundedJson, createTemplateRequest, installCommand, loadTemplateConfig, parseAction, parseArtifactUpload, parseCommand, parseCreatedBox, parseMetadata, parseSnapshot, runTemplateBuild, validateCliArtifact, validateCliReports, type TemplateConfig, type TemplateDependencies } from "./build-box-system-template.ts"
 
 const json = (value: unknown, status = 200) => Response.json(value, { status })
-const artifact = () => new TextEncoder().encode("// @bun\nconst root = process.env.WORKSPACE_ROOT\nconsole.log(root)\n")
+const artifact = () => new TextEncoder().encode('// @bun\nconst root = process.env.WORKSPACE_ROOT\nconst mode = "__internal-bash-worker"\nconst executable = "/usr/local/bin/bun"\nconst entry = "/usr/local/lib/waterbox-cli.js"\nconsole.log(root, mode, executable, entry)\n')
 const box = (state: string) => ({ id: "bx_23456789", name: "Template source", state, desktopAvailable: false, snapshotAvailable: false })
-const snapshot = (status: string) => ({ name: "waterbox-system-v5", status, sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00.000Z", ...(status === "ready" ? { snapshotId: "snapshot-artifact" } : {}) })
+const snapshot = (status: string) => ({ name: "waterbox-system-v6", status, sourceBoxId: "bx_23456789", createdAt: "2026-08-27T00:00:00.000Z", ...(status === "ready" ? { snapshotId: "snapshot-artifact" } : {}) })
 const deletion = (status: string) => ({ id: "bdop_0123456789abcdef0123456789abcdef", kind: "box", targetId: "bx_23456789", reason: "explicit", status, attemptCount: 1, requestedAt: "2026-08-27T00:00:00.000Z", completedAt: status === "completed" ? "2026-08-27T00:01:00.000Z" : null })
 const config: TemplateConfig = {
   apiBaseUrl: "https://api.box.test",
   apiKey: "box-secret-key",
-  templateName: "waterbox-system-v5",
+  templateName: "waterbox-system-v6",
   artifactPath: "/tmp/cli",
   metadataPath: "/tmp/metadata.json",
   pollIntervalMs: 1,
@@ -31,10 +31,14 @@ describe("Box system template builder", () => {
     expect(command).toContain("bun-v1.3.2/bun-linux-x64-baseline.zip")
     expect(command).toContain("7ff09a4a519e8206d60d7b763072cbf3642f8370690165586d303faf21692172")
     expect(command).toContain("sudo -n env WORKSPACE_ROOT=/workspace")
+    expect(command).toContain("install -d -m 0700 /run/waterbox/bash-jobs")
+    expect(command).toContain("/usr/local/bin/bun /usr/local/lib/waterbox-cli.js")
     expect(command).toContain("cd /workspace")
     expect(command).toContain('install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace')
     expect(command.match(/install -d -m 0755 -o/g)).toHaveLength(2)
-    expect(command).toContain("waterbox health")
+    expect(command).toContain('"$(waterbox health)"')
+    expect(command).toContain('"$(waterbox version)"')
+    expect(command).toContain('"protocolVersion":2')
     expect(command).toContain("ripgrep unzip ca-certificates")
     expect(command).not.toContain("flock")
     expect(command).not.toContain("waterbox-cli.lock")
@@ -52,8 +56,8 @@ describe("Box system template builder", () => {
     expect(() => parseCommand({ ok: true, type: "command.finished", success: true, exitCode: 0, timedOut: false })).toThrow("invalid command response")
     expect(() => parseArtifactUpload({ ok: true, type: "file.written", success: true, path: "waterbox-cli.js", encoding: "base64", size: 64 }, 64)).toThrow("upload response")
     expect(() => parseArtifactUpload({ ok: true, type: "file.written", success: true, path: "/tmp/waterbox-cli.js", encoding: "utf8", size: 64 }, 64)).toThrow("upload response")
-    expect(() => parseSnapshot({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { ...snapshot("saving"), createdAt: undefined } }, "snapshot.named.saving", "waterbox-system-v5", "bx_23456789")).toThrow("snapshot response")
-    expect(() => parseSnapshot({ ok: true, type: "snapshot.named.info", snapshot: { ...snapshot("ready"), snapshotId: undefined } }, "snapshot.named.info", "waterbox-system-v5", "bx_23456789")).toThrow("snapshot response")
+    expect(() => parseSnapshot({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { ...snapshot("saving"), createdAt: undefined } }, "snapshot.named.saving", "waterbox-system-v6", "bx_23456789")).toThrow("snapshot response")
+    expect(() => parseSnapshot({ ok: true, type: "snapshot.named.info", snapshot: { ...snapshot("ready"), snapshotId: undefined } }, "snapshot.named.info", "waterbox-system-v6", "bx_23456789")).toThrow("snapshot response")
   })
 
   test("incrementally bounds and cancels oversized provider responses", async () => {
@@ -66,15 +70,18 @@ describe("Box system template builder", () => {
   test("validates configuration and metadata without credentials", () => {
     const loaded = loadTemplateConfig({}, ["--validate"])
     expect(loaded.apiKey).toBe("")
-    expect(loaded.templateName).toBe("waterbox-system-v5")
+    expect(loaded.templateName).toBe("waterbox-system-v6")
     expect(() => loadTemplateConfig({}, ["--run"])).toThrow("environment-authorized")
     expect(() => loadTemplateConfig({}, ["--validate", "--replace"])).toThrow("Unknown option")
     expect(() => loadTemplateConfig({ WATERBOX_BOX_TEMPLATE_NAME: "latest" }, ["--validate"])).toThrow("invalid or reserved")
-    expect(parseMetadata('{"schemaVersion":2,"provider":"box","templateRef":"waterbox-system-v5","artifactKind":"waterbox-cli","cliProtocolVersion":1,"builtAt":"2026-08-27T00:00:00.000Z"}').templateRef).toBe("waterbox-system-v5")
-    expect(() => parseMetadata('{"schemaVersion":2,"provider":"box","templateRef":"../secret","artifactKind":"waterbox-cli","cliProtocolVersion":1,"builtAt":"no"}')).toThrow("invalid")
+    expect(parseMetadata('{"schemaVersion":2,"provider":"box","templateRef":"waterbox-system-v6","artifactKind":"waterbox-cli","cliProtocolVersion":2,"builtAt":"2026-08-27T00:00:00.000Z"}').templateRef).toBe("waterbox-system-v6")
+    expect(() => parseMetadata('{"schemaVersion":2,"provider":"box","templateRef":"../secret","artifactKind":"waterbox-cli","cliProtocolVersion":2,"builtAt":"no"}')).toThrow("invalid")
+    expect(() => parseMetadata('{"schemaVersion":2,"provider":"box","templateRef":"waterbox-system-v6","artifactKind":"waterbox-cli","cliProtocolVersion":1,"builtAt":"2026-08-27T00:00:00.000Z"}')).toThrow("invalid")
     expect(() => validateCliArtifact(new Uint8Array(64))).toThrow("JavaScript bundle")
     expect(() => validateCliArtifact(new TextEncoder().encode("console.log('not bundled')"))).toThrow("JavaScript bundle")
     expect(() => validateCliArtifact(artifact())).not.toThrow()
+    expect(() => validateCliReports('{"ok":true,"protocolVersion":2,"tools":["read","write","edit","patch","glob","grep","bash"]}\n', '{"protocolVersion":2}\n')).not.toThrow()
+    expect(() => validateCliReports('{"ok":true,"protocolVersion":1,"tools":[]}', '{"protocolVersion":1}')).toThrow("health")
   })
 
   test("rejects an incompatible artifact before any provider request", async () => {
@@ -92,21 +99,21 @@ describe("Box system template builder", () => {
     const fetcher = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const url = new URL(String(input)); const method = init?.method ?? "GET"; const body = init?.body ? JSON.parse(String(init.body)) : undefined; const headers = new Headers(init?.headers)
       seen.push({ method, path: url.pathname, body, headers })
-      if (url.pathname.endsWith("/named-snapshots/waterbox-system-v5") && method === "GET" && snapshotGets++ === 0) return json({ ok: false }, 404)
+      if (url.pathname.endsWith("/named-snapshots/waterbox-system-v6") && method === "GET" && snapshotGets++ === 0) return json({ ok: false }, 404)
       if (url.pathname.endsWith("/boxes") && method === "POST") return json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 1800, box: box("provisioning") }, 202)
       if (url.pathname.endsWith("/boxes/bx_23456789") && method === "GET") return json({ ok: true, type: "box.info", box: box(boxGets++ === 0 ? "ready" : "archived") })
        if (url.pathname.endsWith("/files") && method === "PUT") return json({ ok: true, type: "file.written", success: true, size: artifact().byteLength, path: "../../tmp/waterbox-cli.js", encoding: "base64" })
       if (url.pathname.endsWith("/commands")) return json({ ok: true, type: "command.finished", success: true, exitCode: 0, stdout: "", stderr: "", timedOut: false })
       if (url.pathname.endsWith("/stop")) return json({ ok: true, type: "box.stopping", id: "bx_23456789", status: "archiving" }, 202)
       if (url.pathname.endsWith("/named-snapshots") && method === "POST") return json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: snapshot("saving") }, 202)
-      if (url.pathname.endsWith("/named-snapshots/waterbox-system-v5")) return json({ ok: true, type: "snapshot.named.info", snapshot: snapshot("ready") })
+      if (url.pathname.endsWith("/named-snapshots/waterbox-system-v6")) return json({ ok: true, type: "snapshot.named.info", snapshot: snapshot("ready") })
       if (url.pathname.endsWith("/boxes/bx_23456789") && method === "DELETE") return json({ ok: true, type: "box.deleting", operation: deletion("pending") }, 202)
       if (url.pathname.endsWith("/deletion-operations/bdop_0123456789abcdef0123456789abcdef")) return json({ ok: true, type: "deletion.operation", operation: deletion("completed") })
       throw new Error(`Unexpected ${method} ${url.pathname}`)
     }
     const dependencies: TemplateDependencies = { fetch: fetcher, sleep: async () => {}, randomId: () => "0123456789abcdef", log: () => {}, readArtifact: async () => artifact(), writeMetadata: async (_path, value) => { metadata = value } }
     const result = await runTemplateBuild(config, dependencies)
-    expect(result.templateRef).toBe("waterbox-system-v5")
+    expect(result.templateRef).toBe("waterbox-system-v6")
     expect(metadata).not.toContain("box-secret-key")
     const create = seen.find(value => value.path.endsWith("/boxes") && value.method === "POST")!
     expect(create.body).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "waterbox-template-0123456789abcdef" }, ttlSeconds: 1800 })
@@ -137,7 +144,7 @@ describe("Box system template builder", () => {
     const deps: TemplateDependencies = {
       fetch: async (input, init) => {
         const url = new URL(String(input)); const method = init?.method ?? "GET"
-        if (url.pathname.endsWith("/named-snapshots/waterbox-system-v5")) return json({ ok: false }, 404)
+        if (url.pathname.endsWith("/named-snapshots/waterbox-system-v6")) return json({ ok: false }, 404)
         if (url.pathname.endsWith("/boxes") && method === "POST") { creates.push({ body: String(init?.body), key: new Headers(init?.headers).get("idempotency-key") }); const attempt = createAttempt++; if (attempt === 0) throw new Error("lost response"); if (attempt === 1) return json({ ok: false, type: "box.error", status: 409, code: "idempotency_in_progress", message: "in progress", requestId: "req_fake", error: { code: "idempotency_in_progress", message: "in progress", status: 409 } }, 409); if (attempt === 2) return json({ ok: false, type: "box.error", status: 503, code: "http_503", message: "unavailable", requestId: "req_retry", error: { code: "http_503", message: "unavailable", status: 503 } }, 503); return json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 1800, box: box("provisioning") }, 202) }
         if (url.pathname.endsWith("/boxes/bx_23456789") && method === "GET") return json({ ok: true, type: "box.info", box: box("error") })
         if (url.pathname.endsWith("/boxes/bx_23456789") && method === "DELETE") { deletes++; return json({ ok: true, type: "box.deleting", operation: deletion("pending") }, 202) }
@@ -160,7 +167,7 @@ describe("Box system template builder", () => {
     const deps: TemplateDependencies = {
       fetch: async (input, init) => {
         const url = new URL(String(input)); const method = init?.method ?? "GET"
-        if (url.pathname.endsWith("/named-snapshots/waterbox-system-v5")) return json({ ok: false }, 404)
+        if (url.pathname.endsWith("/named-snapshots/waterbox-system-v6")) return json({ ok: false }, 404)
         if (url.pathname.endsWith("/boxes") && method === "POST") return json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 1800, box: box("provisioning") }, 202)
         if (url.pathname.endsWith("/boxes/bx_23456789") && method === "GET") return json({ ok: true, type: "box.info", box: box(boxGets++ === 0 ? "ready" : "archived") })
         if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, size: artifact().byteLength, path: "/tmp/waterbox-cli.js", encoding: "base64" })

@@ -29,7 +29,7 @@
         {
           "name": "BOX_SYSTEM_TEMPLATE_REF",
           "description": "Box system template",
-          "default": "waterbox-system-v5"
+          "default": "waterbox-system-v6"
         }
       ]
     }

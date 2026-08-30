@@ -11,7 +11,7 @@ const EnvironmentSchema = z.object({
   WATERBOX_SQLITE_PATH: NonEmptySchema.optional(),
   BOX_API_BASE_URL: z.url().default("https://ascii.dev/api/box/v1"),
   BOX_API_KEY: NonEmptySchema.optional(),
-  BOX_SYSTEM_TEMPLATE_REF: NonEmptySchema.default("waterbox-system-v5"),
+  BOX_SYSTEM_TEMPLATE_REF: NonEmptySchema.default("waterbox-system-v6"),
   BOX_POLL_INTERVAL_MS: PositiveIntegerSchema.default(1_000),
   BOX_POLL_TIMEOUT_MS: PositiveIntegerSchema.default(120_000),
 }).strict()

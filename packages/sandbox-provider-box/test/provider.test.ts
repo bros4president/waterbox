@@ -52,7 +52,7 @@ const commandResponse = (stdout: string, overrides: Record<string, unknown> = {}
 const commandInvocation = (body: unknown) => {
   expect(body).toMatchObject({ timeoutSeconds: 600 })
   const command = (body as { command: string }).command
-  expect(command).toMatch(/^\/usr\/local\/bin\/waterbox run j1\.[A-Za-z0-9_-]+$/)
+  expect(command).toMatch(/^\/usr\/local\/bin\/waterbox run j2\.[A-Za-z0-9_-]+$/)
   return decodeInvocation(command.slice("/usr/local/bin/waterbox run ".length))
 }
 
@@ -147,7 +147,7 @@ describe("Box provider HTTP contract", () => {
           return Response.json({ ok: true, type: "file.written", success: true, path: body.path, encoding: "base64", size: Buffer.from(body.content, "base64").byteLength })
         }
         commands++
-        return commandResponse(`${JSON.stringify({ protocolVersion: 1, type: "error", status: code === "transfer_expired" ? 410 : 409, code })}\n`, { success: false, exitCode: 2 })
+        return commandResponse(`${JSON.stringify({ protocolVersion: 2, type: "error", status: code === "transfer_expired" ? 410 : 409, code })}\n`, { success: false, exitCode: 2 })
       })
       await expect(provider.secureFileTransfer.consume({ accountId: "a", providerRef: sandboxRef, transferId: "123e4567-e89b-42d3-a456-426614174000", targetPath: "secret", ciphertext: Buffer.from("cipher").toString("base64"), signal: signal() })).rejects.toMatchObject({ kind })
       expect(commands).toBe(1)
@@ -310,7 +310,7 @@ describe("Box provider canonical daemon transport and conformance", () => {
   }
 
   test("all seven tools preserve canonical arguments in one serialized command and return one result", async () => {
-    const bashResult = { type: "result", title: "Bash", output: "x", metadata: { command: "echo x", workdir: ".", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
+    const bashResult = { type: "result", outcome: "completed", title: "Bash", output: "x", metadata: { command: "echo x", workdir: ".", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
     const { provider, seen } = harness((_request, requests) => {
       const invocation = commandInvocation(requests.at(-1)?.body)
       return commandResponse(`${JSON.stringify(invocation.tool === "bash" ? bashResult : resultByTool[invocation.tool])}\n`)
@@ -320,7 +320,7 @@ describe("Box provider canonical daemon transport and conformance", () => {
       for await (const event of provider.executeTool({ accountId: "a", providerRef: sandboxRef, toolName: tool, arguments: argsByTool[tool] as never, signal: signal() })) events.push(event)
       expect(events).toHaveLength(1)
       expect(events[0]?.type).toBe("result")
-      expect(commandInvocation(seen.at(-1)?.body) as unknown).toEqual({ protocolVersion: 1, tool, arguments: argsByTool[tool] })
+      expect(commandInvocation(seen.at(-1)?.body) as unknown).toEqual({ protocolVersion: 2, tool, arguments: argsByTool[tool] })
       expect(seen.at(-1)?.url).toBe("https://api.box.test/api/box/v1/boxes/bx_23456789/commands")
     }
   })
@@ -360,6 +360,27 @@ describe("Box provider canonical daemon transport and conformance", () => {
     expect(calls).toBe(1)
   })
 
+  test("forwards a dispatched bash receipt above the Box command timeout without polling or retry", async () => {
+    const receipt = {
+      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
+      metadata: {
+        command: "sleep 700", workdir: "/workspace", timeout: 700_000,
+        jobId: `job_${"a".repeat(32)}`,
+        outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+      },
+    } as const
+    const { provider, seen, clock } = harness(() => commandResponse(`${JSON.stringify(receipt)}\n`))
+
+    const events = []
+    for await (const event of provider.executeTool({ accountId: "a", providerRef: sandboxRef, toolName: "bash", arguments: { command: "sleep 700", timeout: 700_000 }, signal: signal() })) events.push(event)
+
+    expect(events).toEqual([receipt])
+    expect(seen.filter((request) => request.url.endsWith("/commands"))).toHaveLength(1)
+    expect(seen).toHaveLength(1)
+    expect(clock.sleeps).toBe(0)
+  })
+
   test("dispatches concurrent commands without a provider-side queue", async () => {
     let dispatched = 0
     let confirmDispatch!: () => void
@@ -397,7 +418,7 @@ describe("Box provider canonical daemon transport and conformance", () => {
 
 describe("Phase E guardian corrections", () => {
   const readResult = { type: "result", title: "Read", output: "ok", metadata: { filePath: "/workspace/conformance.txt", offset: 1 } } as const
-  const bashResult = { type: "result", title: "Bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } } as const
+  const bashResult = { type: "result", outcome: "completed", title: "Bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } } as const
 
   test("rejects malformed, truncated, and multi-result CLI command envelopes as ambiguous without retry", async () => {
     const validFinal = `${JSON.stringify(bashResult)}\n`
@@ -405,7 +426,7 @@ describe("Phase E guardian corrections", () => {
       { stdout: "" }, { stdout: JSON.stringify(bashResult) }, { stdout: validFinal + validFinal },
       { stdout: `{nope}\n` }, { stdout: validFinal, stdoutTruncated: true }, { stdout: validFinal, stderr: "unexpected" },
       { stdout: validFinal, success: false }, { stdout: validFinal, timedOut: true }, { stdout: validFinal, exitCode: 1 },
-      { stdout: '{"protocolVersion":1,"type":"error","status":400,"code":"invalid_arguments"}\n', success: false, exitCode: 1, timedOut: true },
+      { stdout: '{"protocolVersion":2,"type":"error","status":400,"code":"invalid_arguments"}\n', success: false, exitCode: 1, timedOut: true },
     ]
     for (const variant of variants) {
       let calls = 0
@@ -422,8 +443,9 @@ describe("Phase E guardian corrections", () => {
     const cases = [
       { response: Response.json({ code: "invalid_arguments" }, { status: 400 }), kind: "failure" },
       { response: Response.json({ code: "internal" }, { status: 500 }), kind: "ambiguous_execution" },
-      { response: commandResponse('{"protocolVersion":1,"type":"error","status":400,"code":"tool_rejected"}\n', { success: false, exitCode: 2 }), kind: "failure" },
-      { response: commandResponse('{"protocolVersion":1,"type":"error","status":500,"code":"internal_error"}\n', { success: false, exitCode: 1 }), kind: "ambiguous_execution" },
+      { response: commandResponse('{"protocolVersion":2,"type":"error","status":400,"code":"tool_rejected"}\n', { success: false, exitCode: 2 }), kind: "failure" },
+      { response: commandResponse('{"protocolVersion":2,"type":"error","status":500,"code":"internal_error"}\n', { success: false, exitCode: 1 }), kind: "ambiguous_execution" },
+      { response: commandResponse('{"protocolVersion":1,"type":"error","status":400,"code":"tool_rejected"}\n', { success: false, exitCode: 2 }), kind: "ambiguous_execution" },
     ] as const
     for (const item of cases) {
       let calls = 0

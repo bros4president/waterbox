@@ -13,3 +13,9 @@ ordering; concurrent filesystem mutations follow their operation preconditions a
 underlying filesystem. Patch operations preflight all hunks and report operations completed
 before a commit failure rather than attempting a concurrency-unsafe rollback. Waterbox does
 not claim a cross-command filesystem transaction.
+
+`createRuntime` always executes Bash synchronously. The one-shot CLI always starts one
+detached worker. Quick commands produce the usual bounded completed result; longer-running
+commands may yield a file-backed output/status receipt and remain detached. `timeout` is
+only an execution deadline and may be omitted. There are no readiness handshakes, pollers,
+retries, or job management.

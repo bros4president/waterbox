@@ -19,7 +19,7 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
   const boxApiKey = environment.BOX_API_KEY
   if (!boxApiKey) throw new Error("The Direct MCP smoke requires Box credentials")
   const boxApiBaseUrl = environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1"
-  const templateRef = environment.BOX_SYSTEM_TEMPLATE_REF ?? "waterbox-system-v5"
+  const templateRef = environment.BOX_SYSTEM_TEMPLATE_REF ?? "waterbox-system-v6"
   const baseline = await preflight(boxApiBaseUrl, boxApiKey, templateRef)
   const directory = await mkdtemp(join(tmpdir(), "waterbox-direct-mcp-"))
   const entry = resolve(import.meta.dir, "../packages/mcp/dist/waterbox-mcp.js")
@@ -40,7 +40,7 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
     const names = (await client.listTools()).tools.map((tool) => tool.name)
     if (names.join(",") !== "create_sandbox,probe_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash") throw new Error("Direct MCP returned an unexpected tool catalog")
     const created = SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "create_sandbox", arguments: { idempotencyKey: `direct-smoke-${crypto.randomUUID()}` } }, 180_000))))
-    console.log(JSON.stringify({ stage: "created", sandboxId: created.sandboxId }))
+    console.log(JSON.stringify({ stage: "created", sandboxes: 1 }))
     const target = { sandboxId: created.sandboxId }
     const probed = SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "probe_sandbox", arguments: target }))))
     if (probed.state !== "running") throw new Error(`Direct MCP live probe returned ${probed.state}`)
@@ -49,8 +49,9 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
     const transferred = JSON.parse(resultText(await callTool(client, { name: "send_file_securely", arguments: { ...target, sourcePath: localSecretPath, targetPath: "/root/direct-secret.bin" } }))) as { bytes?: unknown }
     if (transferred.bytes !== 5) throw new Error("Direct MCP secure file transfer assertion failed")
     await successfulOutput(client, "bash", { ...target, command: "test -f /root/direct-secret.bin && test \"$(stat -c %a /root/direct-secret.bin)\" = 600 && test \"$(wc -c </root/direct-secret.bin)\" -eq 5", workdir: "/root" })
+    await verifyAsyncBash(client, target)
     let foregroundSettled = false
-    const foreground = successfulOutput(client, "bash", { ...target, command: "touch /tmp/waterbox-concurrency-ready; sleep 12", description: "Hold one independent command", workdir: "/root", timeout: 20_000 }).finally(() => { foregroundSettled = true })
+    const foreground = successfulOutput(client, "bash", { ...target, command: "touch /tmp/waterbox-concurrency-ready; sleep 12", description: "Hold one independent command", workdir: "/root", timeout: 15_000 }).finally(() => { foregroundSettled = true })
     const concurrent = successfulOutput(client, "bash", { ...target, command: "for attempt in $(seq 1 50); do test -f /tmp/waterbox-concurrency-ready && exit 0; sleep 0.1; done; exit 1", description: "Verify concurrent command dispatch", workdir: "/root", timeout: 10_000 })
     if (await Promise.race([concurrent.then(() => false), Bun.sleep(7_000).then(() => true)])) throw new Error("Direct MCP provider serialized concurrent commands")
     if (foregroundSettled) throw new Error("Direct MCP foreground command completed before the concurrency assertion")
@@ -103,12 +104,96 @@ async function waitForReadySnapshot(client: Client, snapshotId: string) {
 }
 
 async function successfulOutput(client: Client, name: string, arguments_: Record<string, unknown>): Promise<string> {
-  const result = await callTool(client, { name, arguments: arguments_ })
-  if (result.isError) throw new Error(`Direct MCP ${name} failed: ${resultText(result)}`)
-  const payload = JSON.parse(resultText(result)) as { output?: unknown }
+  const payload = await successfulResult(client, name, arguments_)
   if (typeof payload.output !== "string") throw new Error(`Direct MCP ${name} returned an invalid result`)
   await Bun.sleep(500)
   return payload.output
+}
+
+async function successfulResult(client: Client, name: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const result = await callTool(client, { name, arguments: arguments_ })
+  if (result.isError) throw new Error(`Direct MCP ${name} failed: ${resultText(result)}`)
+  const payload = JSON.parse(resultText(result))
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error(`Direct MCP ${name} returned an invalid result`)
+  return payload as Record<string, unknown>
+}
+
+interface AsyncReceipt { jobId: string; outputPath: string; statusPath: string }
+
+async function verifyAsyncBash(client: Client, target: { sandboxId: string }): Promise<void> {
+  const explicit = await successfulResult(client, "bash", { ...target, command: "printf explicit-completed", workdir: "/root", timeout: 120_000 })
+  if (!completedBash(explicit)) throw new Error("Direct MCP quick Bash with an execution timeout did not complete")
+  const omitted = await successfulResult(client, "bash", { ...target, command: "printf omitted-completed", workdir: "/root" })
+  if (!completedBash(omitted)) throw new Error("Direct MCP quick Bash with an omitted timeout did not complete")
+  const jobsAfterFastCalls = await successfulOutput(client, "glob", { ...target, pattern: "job_*", path: "/run/waterbox/bash-jobs" })
+  if (/job_[a-f0-9]{32}/.test(jobsAfterFastCalls)) throw new Error("Direct MCP completed Bash leaked a job directory")
+
+  const omittedSlow = receipt(await successfulResult(client, "bash", {
+    ...target,
+    command: "printf phase-one; sleep 20; printf phase-two",
+    description: "Verify omitted-deadline yield and output growth",
+    workdir: "/root",
+  }))
+  const firstOutput = await waitForOutput(client, target, omittedSlow.outputPath, value => value.includes("phase-one") && !value.includes("phase-two"), 5_000)
+  const omittedStatus = await waitForTerminalStatus(client, target, omittedSlow.statusPath, 30_000)
+  const finalOutput = await remoteRead(client, target, omittedSlow.outputPath)
+  if (!firstOutput.includes("phase-one") || !finalOutput.includes("phase-two") || omittedStatus.state !== "completed" || omittedStatus.timedOut !== false) throw new Error("Direct MCP omitted-timeout yielded Bash assertion failed")
+
+  const conservative = receipt(await successfulResult(client, "bash", { ...target, command: "sleep 20; printf conservative-completed", description: "Verify conservative execution timeout yield", workdir: "/root", timeout: 120_000 }))
+  const conservativeStatus = await waitForTerminalStatus(client, target, conservative.statusPath, 30_000)
+  if (conservativeStatus.state !== "completed" || conservativeStatus.timedOut !== false || !(await remoteRead(client, target, conservative.outputPath)).includes("conservative-completed")) throw new Error("Direct MCP conservative-timeout yielded Bash assertion failed")
+
+  const timed = await resultPayload(client, "bash", { ...target, command: "sleep 30", description: "Verify hard execution timeout", workdir: "/root", timeout: 2_000 })
+  if (!completedBash(timed) || (timed.metadata as Record<string, unknown>).timedOut !== true) throw new Error("Direct MCP hard execution timeout did not settle as timed out")
+
+  console.log(JSON.stringify({ stage: "async-bash", completedCases: 2, completedFilesCleaned: true, yieldedCases: 2, omittedTimeoutYield: true, conservativeTimeoutYield: true, outputGrowth: true, terminalCompletion: true, hardTimeout: true, mcpReadPolling: true, receiptGuidance: true }))
+}
+
+function receipt(value: Record<string, unknown>): AsyncReceipt {
+  const guidance = value.output
+  if (typeof guidance !== "string" || !guidance.includes("statusPath reports execution state") || !guidance.includes("outputPath receives output continuously") || !guidance.includes("duplicate tokens and pollute context") || /15[,.]?000|threshold|poll (?:or read )?both files/i.test(guidance)) throw new Error("Direct MCP async Bash returned invalid receipt guidance")
+  const metadata = value.metadata
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) throw new Error("Direct MCP async Bash did not return a receipt")
+  const { jobId, outputPath, statusPath } = metadata as Record<string, unknown>
+  if (typeof jobId !== "string" || typeof outputPath !== "string" || typeof statusPath !== "string") throw new Error("Direct MCP async Bash returned an invalid receipt")
+  return { jobId, outputPath, statusPath }
+}
+
+function completedBash(value: Record<string, unknown>): boolean {
+  const metadata = value.metadata
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || "jobId" in metadata) return false
+  const exitCode = (metadata as Record<string, unknown>).exitCode
+  return typeof exitCode === "number" || exitCode === null
+}
+
+async function resultPayload(client: Client, name: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const payload = JSON.parse(resultText(await callTool(client, { name, arguments: arguments_ })))
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error(`Direct MCP ${name} returned an invalid result`)
+  return payload as Record<string, unknown>
+}
+
+async function remoteRead(client: Client, target: { sandboxId: string }, filePath: string): Promise<string> {
+  return successfulOutput(client, "read", { ...target, filePath })
+}
+
+async function waitForOutput(client: Client, target: { sandboxId: string }, filePath: string, accept: (value: string) => boolean, timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const output = await remoteRead(client, target, filePath)
+    if (accept(output)) return output
+    if (Date.now() >= deadline) throw new Error("Direct MCP async Bash output growth timed out")
+    await Bun.sleep(250)
+  }
+}
+
+async function waitForTerminalStatus(client: Client, target: { sandboxId: string }, statusPath: string, timeoutMs: number): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs
+  while (true) {
+    const status = JSON.parse(await remoteRead(client, target, statusPath)) as Record<string, unknown>
+    if (status.state === "completed" || status.state === "failed") return status
+    if (Date.now() >= deadline) throw new Error("Direct MCP async Bash status polling timed out")
+    await Bun.sleep(500)
+  }
 }
 
 async function callTool(client: Client, request: Parameters<Client["callTool"]>[0], timeoutMs = 60_000) {

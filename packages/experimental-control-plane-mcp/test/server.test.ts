@@ -55,6 +55,41 @@ describe("experimental control-plane MCP", () => {
     } finally { await Promise.all([client.close(), server.close()]) }
     expect(() => parseExperimentalMcpOptions({ WATERBOX_API_URL: "file:///tmp/x", WATERBOX_API_KEY: "key", WATERBOX_MCP_IDEMPOTENCY_KEY: "run" })).toThrow("invalid")
   })
+
+  test("returns a dispatched bash receipt as success without adding a job tool", async () => {
+    const jobId = `job_${"a".repeat(32)}`
+    const receipt = {
+      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.", metadata: {
+        command: "sleep 20", workdir: "/workspace", timeout: 20_000, jobId,
+        outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`,
+        statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json`, pollAfterMs: 2_000,
+      },
+    }
+    const requests: Request[] = []
+    const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init); requests.push(request)
+      if (request.url.endsWith("/v1/sandboxes")) return Response.json(sandbox, { status: 201 })
+      return new Response(`${JSON.stringify(receipt)}\n`, { headers: { "content-type": "application/x-ndjson" } })
+    }) as typeof fetch
+    const server = createExperimentalMcpServer({ apiUrl: "http://127.0.0.1:8787", apiKey: "local-secret", idempotencyKey: "smoke-run" }, fetcher)
+    const client = new Client({ name: "test", version: "1" })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+      const listed = await client.listTools()
+      expect(listed.tools.filter((tool) => tool.name === "bash")).toHaveLength(1)
+      expect(listed.tools.some((tool) => tool.name.includes("job"))).toBeFalse()
+      expect(listed.tools.find((tool) => tool.name === "bash")?.description).toBe("Runs unrestricted bash as root in the selected remote Waterbox sandbox, never on the local machine. The default working directory is /workspace.")
+      await client.callTool({ name: "create_sandbox", arguments: {} })
+
+      const result = await client.callTool({ name: "bash", arguments: { command: "sleep 20", timeout: 20_000 } })
+
+      expect(result.isError).not.toBe(true)
+      const receiptText = (result as { content: Array<{ text: string }> }).content[0]!.text
+      expect(receiptText).toBe(`${receipt.output}\n${JSON.stringify(receipt.metadata)}`)
+      expect(requests.filter((request) => request.url.includes("/tools/bash"))).toHaveLength(1)
+    } finally { await Promise.all([client.close(), server.close()]) }
+  })
 })
 
 function toolResponse(name: string): string {
@@ -66,6 +101,6 @@ function toolResponse(name: string): string {
     glob: { type: "result", title: "glob", output: "/workspace/a.txt\n", metadata: { pattern: "*.txt", path: "/workspace", count: 1, truncated: false } },
     grep: { type: "result", title: "grep", output: "/workspace/a.txt:1:B\n", metadata: { pattern: "B", path: "/workspace", matches: 1, truncated: false } },
   }
-  if (name === "bash") return `${JSON.stringify({ type: "stdout", data: "/workspace\n" })}\n${JSON.stringify({ type: "result", title: "bash", output: "/workspace\n", metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } })}\n`
+  if (name === "bash") return `${JSON.stringify({ type: "stdout", data: "/workspace\n" })}\n${JSON.stringify({ type: "result", outcome: "completed", title: "bash", output: "/workspace\n", metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } })}\n`
   return `${JSON.stringify(events[name])}\n`
 }

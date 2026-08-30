@@ -194,7 +194,7 @@ describe("Waterbox API", () => {
     const events = async function* () {
       yield { type: "stdout", data: "first" }
       await gate
-      yield { type: "result", title: "bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
+      yield { type: "result", outcome: "completed", title: "bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
     }
     const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events() } })
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
@@ -207,6 +207,27 @@ describe("Waterbox API", () => {
     expect(signal.aborted).toBeTrue()
     release()
     await cancelling
+  })
+
+  test("forwards a dispatched bash receipt unchanged", async () => {
+    const receipt = {
+      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
+      metadata: {
+        command: "sleep 20", workdir: "/workspace", timeout: 20_000,
+        jobId: `job_${"a".repeat(32)}`,
+        outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+      },
+    } as const
+    const events = async function* () { yield receipt }
+    const { app } = api({ executeTool: async () => events() })
+
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"sleep 20","timeout":20000}' })
+
+    expect(response.status).toBe(200)
+    const body = await response.text()
+    expect(body.endsWith("\n")).toBeTrue()
+    expect(JSON.parse(body)).toEqual(receipt)
   })
 
   test("returns a normal error envelope when the provider fails before its first event", async () => {

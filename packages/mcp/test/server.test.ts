@@ -54,7 +54,7 @@ const directConfig: BoxMcpConfig = {
     config: {
       apiBaseUrl: "https://ascii.dev/api/box/v1",
       apiKey: "not-used-by-fake",
-      systemTemplateRef: "waterbox-system-v5",
+      systemTemplateRef: "waterbox-system-v6",
       polling: { intervalMs: 1, timeoutMs: 2 },
     },
   },
@@ -70,6 +70,9 @@ describe("Waterbox MCP server", () => {
         "create_sandbox", "probe_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely",
         "read", "write", "edit", "patch", "glob", "grep", "bash",
       ])
+      const bashTool = (await client.listTools()).tools.find((tool) => tool.name === "bash")
+      expect(bashTool?.description).toBe("Runs unrestricted bash as root in the specified Waterbox sandbox, never on the local machine. The default working directory is /workspace.")
+      expect((await client.listTools()).tools.some((tool) => tool.name.includes("job"))).toBeFalse()
       await client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "create-1" } })
       await client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "create-2", sourceSnapshotId: snapshot.snapshotId } })
       await client.callTool({ name: "create_snapshot", arguments: { sandboxId: sandbox.sandboxId, name: "checkpoint" } })
@@ -159,6 +162,42 @@ describe("Waterbox MCP server", () => {
       await close()
     }
   })
+
+  test("returns dispatched bash receipt paths as success and retains completed failure classification", async () => {
+    const backend = new StubBackend()
+    const completed = {
+      type: "result", outcome: "completed", title: "bash", output: "failed", metadata: {
+        command: "false", workdir: "/workspace", exitCode: 1, signal: null,
+        timedOut: false, aborted: false, durationMs: 1, outputTruncated: false,
+      },
+    } as const
+    backend.bashEvent = {
+      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.", metadata: {
+        command: "sleep 20", workdir: "/workspace", timeout: 20_000,
+        jobId: `job_${"a".repeat(32)}`,
+        outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+      },
+    }
+    const { client, close } = await connected(backend)
+    try {
+      const dispatched = await client.callTool({ name: "bash", arguments: { sandboxId: sandbox.sandboxId, command: "sleep 20", timeout: 20_000 } })
+      expect(dispatched.isError).not.toBe(true)
+      const receiptText = (dispatched as { content: Array<{ text: string }> }).content[0]!.text
+      expect(JSON.parse(receiptText)).toEqual({ output: backend.bashEvent.output, metadata: backend.bashEvent.metadata })
+
+      for (const metadata of [
+        completed.metadata,
+        { ...completed.metadata, exitCode: 0, timedOut: true },
+        { ...completed.metadata, exitCode: 0, aborted: true },
+      ]) {
+        backend.bashEvent = { ...completed, metadata }
+        expect(await client.callTool({ name: "bash", arguments: { sandboxId: sandbox.sandboxId, command: "false" } })).toMatchObject({ isError: true })
+      }
+    } finally {
+      await close()
+    }
+  })
 })
 
 class StubBackend implements McpBackend {
@@ -169,6 +208,7 @@ class StubBackend implements McpBackend {
   securePlaintext = ""
   secureCiphertext = ""
   private secureIdentity?: string
+  bashEvent?: ToolEventByName["bash"]
 
   async createSandbox(request: CreateSandboxRequest, idempotencyKey: string): Promise<Sandbox> {
     this.createInputs.push({ request, idempotencyKey })
@@ -200,7 +240,8 @@ class StubBackend implements McpBackend {
   ): Promise<AsyncIterable<ToolEventByName[N]>> {
     this.executeCalls++
     this.executedSandboxIds.push(sandboxId)
-    return oneEvent(toolEvent(toolName) as ToolEventByName[N])
+    const event = toolName === "bash" && this.bashEvent ? this.bashEvent : toolEvent(toolName)
+    return oneEvent(event as ToolEventByName[N])
   }
 
   async close(): Promise<void> {}
@@ -223,7 +264,7 @@ function toolEvent(name: ToolName): ToolEventByName[ToolName] {
     patch: { type: "result", title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
     glob: { type: "result", title: "glob", output: "/workspace/a.txt\n", metadata: { pattern: "*.txt", path: "/workspace", count: 1, truncated: false } },
     grep: { type: "result", title: "grep", output: "/workspace/a.txt:1:B\n", metadata: { pattern: "B", path: "/workspace", matches: 1, truncated: false } },
-    bash: { type: "result", title: "bash", output: "/workspace\n", metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
+    bash: { type: "result", outcome: "completed", title: "bash", output: "/workspace\n", metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
   } as const
   return events[name] as unknown as ToolEventByName[ToolName]
 }

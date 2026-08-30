@@ -6,7 +6,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import {
   type BashToolArguments as BashArgs,
   type BashToolEvent as BashStreamEvent,
-  type BashToolResult,
+  type CompletedBashToolResult,
   type EditToolArguments as EditArgs,
   type EditToolResult,
   type GlobToolArguments as GlobArgs,
@@ -42,7 +42,7 @@ type EditMetadata = EditToolResult["metadata"]
 type PatchMetadata = PatchToolResult["metadata"]
 type GlobMetadata = GlobToolResult["metadata"]
 type GrepMetadata = GrepToolResult["metadata"]
-type BashMetadata = BashToolResult["metadata"]
+type BashMetadata = CompletedBashToolResult["metadata"]
 
 export class RuntimeError extends Error {
   constructor(readonly status: number, message: string) {
@@ -583,6 +583,7 @@ async function bashTool(root: string, body: Record<string, unknown>, signal: Abo
         }
         send({
           type: "result",
+          outcome: "completed",
           title: args.description ?? "Bash command",
           output: output || (timedOut ? "Command timed out" : aborted ? "Command aborted" : "Command completed without output"),
           metadata: { ...metadata, outputTruncated },

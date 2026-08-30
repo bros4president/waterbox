@@ -40,7 +40,7 @@ describe("control-plane Box smoke safety", () => {
   test("consumes NDJSON incrementally before delayed final events", async () => {
     const clock = { value: 0 }
     let pulls = 0
-    const body = new ReadableStream<Uint8Array>({ async pull(controller) { if (pulls++ === 0) { clock.value = 1; controller.enqueue(new TextEncoder().encode('{"type":"stdout","data":"first"}\n')) } else { await Bun.sleep(10); clock.value = 5; controller.enqueue(new TextEncoder().encode('{"type":"result","title":"bash","output":"","metadata":{"command":"x","workdir":"/workspace","exitCode":0,"signal":null,"timedOut":false,"aborted":false,"durationMs":4,"outputTruncated":false}}\n')); controller.close() } } })
+    const body = new ReadableStream<Uint8Array>({ async pull(controller) { if (pulls++ === 0) { clock.value = 1; controller.enqueue(new TextEncoder().encode('{"type":"stdout","data":"first"}\n')) } else { await Bun.sleep(10); clock.value = 5; controller.enqueue(new TextEncoder().encode('{"type":"result","outcome":"completed","title":"bash","output":"","metadata":{"command":"x","workdir":"/workspace","exitCode":0,"signal":null,"timedOut":false,"aborted":false,"durationMs":4,"outputTruncated":false}}\n')); controller.close() } } })
     const api = new SmokeApi(config, dependencies(async () => new Response(body, { status: 200 }), clock))
     const result = await api.tool(sandbox.sandboxId, "bash", { command: "x" }, true)
     expect(result.incremental).toBeTrue(); expect(result.events).toHaveLength(2)

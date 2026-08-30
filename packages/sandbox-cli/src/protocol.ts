@@ -6,7 +6,7 @@ import {
 } from "@waterbox/contracts"
 import { z } from "zod"
 
-export const CLI_PROTOCOL_VERSION = 1 as const
+export const CLI_PROTOCOL_VERSION = 2 as const
 export const MAX_ENCODED_INVOCATION_BYTES = 96 * 1024
 export const MAX_DECODED_INVOCATION_BYTES = 72 * 1024
 const MAX_TRANSFER_METADATA_BYTES = 16 * 1024
@@ -41,14 +41,14 @@ export function encodeInvocation<Name extends ToolName>(tool: Name, args: z.inpu
   const json = JSON.stringify({ protocolVersion: CLI_PROTOCOL_VERSION, tool: name, arguments: canonical })
   const bytes = new TextEncoder().encode(json)
   if (bytes.byteLength > MAX_DECODED_INVOCATION_BYTES) throw new CliProtocolError()
-  const encoded = `j1.${Buffer.from(bytes).toString("base64url")}`
+  const encoded = `j2.${Buffer.from(bytes).toString("base64url")}`
   if (Buffer.byteLength(encoded) > MAX_ENCODED_INVOCATION_BYTES) throw new CliProtocolError()
   return encoded
 }
 
 export function decodeInvocation(value: string): CliInvocation {
   try {
-    if (typeof value !== "string" || Buffer.byteLength(value) > MAX_ENCODED_INVOCATION_BYTES || !value.startsWith("j1.")) throw new Error()
+    if (typeof value !== "string" || Buffer.byteLength(value) > MAX_ENCODED_INVOCATION_BYTES || !value.startsWith("j2.")) throw new Error()
     const encoded = value.slice(3)
     if (!encoded || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw new Error()
     const bytes = Buffer.from(encoded, "base64url")

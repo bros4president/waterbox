@@ -692,6 +692,24 @@ describe("execution and reconciliation", () => {
     expect(provider.executeCalls).toBe(1)
   })
 
+  test("forwards a dispatched bash receipt unchanged", async () => {
+    const receipt = {
+      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
+      metadata: {
+        command: "sleep 20", workdir: "/workspace", timeout: 20_000,
+        jobId: `job_${"a".repeat(32)}`,
+        outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+      },
+    } as const
+    const provider = new FakeSandboxProvider()
+    provider.executeTool = (() => (async function* () { yield receipt })()) as FakeSandboxProvider["executeTool"]
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+
+    expect(await collect(await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "sleep 20", timeout: 20_000 }))).toEqual([receipt])
+  })
+
   test("preserves ambiguous tool execution when cancellation races with dispatch", async () => {
     const provider = new FakeSandboxProvider()
     const controller = new AbortController()

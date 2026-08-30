@@ -4,7 +4,7 @@ The supported Waterbox MCP server. It runs as a local stdio process and connects
 
 The first release requires [Bun](https://bun.sh/) 1.3.2 or newer and supports the Box provider. Waterbox Cloud is represented in configuration but is not implemented yet.
 
-The configured Box account must contain the immutable `waterbox-system-v5` named template. The repository template builder provisions it for development accounts; managed distribution of provider templates remains separate from npm installation.
+The configured Box account must contain the immutable `waterbox-system-v6` named template. The repository template builder provisions it for development accounts; managed distribution of provider templates remains separate from npm installation.
 
 ## Install
 
@@ -37,6 +37,8 @@ The MCP exposes explicit resource ownership rather than a process-local selected
 
 Tool invocations are dispatched independently. Waterbox does not impose command ordering, concurrency limits, deduplication, or automatic retries; provider and filesystem behavior remain authoritative. An uncertain command response is reported as `ambiguous_execution`.
 
+The one-shot `bash` path starts every command in a detached worker. Quick commands return completed normally; longer-running commands may yield a dispatched receipt. `timeout`, when supplied, is only the command's execution deadline. A receipt confirms only the worker process and assigned `statusPath` and `outputPath`, not command startup, completion, or success. `statusPath` reports execution state and `outputPath` receives output continuously. Models decide whether and when to use those capabilities; repeated output reads can duplicate tokens and pollute context. Waterbox, Box, and MCP do not poll, retry, or reconcile detached commands.
+
 The provider's system template is not a user-owned Waterbox snapshot, does not appear in `list_snapshots`, and cannot be addressed by `delete_snapshot`.
 
 Secure file transfer uses a fresh sandbox-side age/X25519 key with a fixed ten-minute expiry and single-use consumption. Files are limited to 1 MiB. The transport does not prevent the sandbox agent or provider from reading the decrypted destination, and persistent destination files may be included in later snapshots. Avoid reading sensitive destination contents back through model-facing tools.
@@ -53,7 +55,7 @@ The sandbox command deletes its uploaded ciphertext after every attempted consum
 | `BOX_API_KEY` | For `box` | none |
 | `WATERBOX_SQLITE_PATH` | No | `~/.waterbox/direct.sqlite` |
 | `BOX_API_BASE_URL` | No | `https://ascii.dev/api/box/v1` |
-| `BOX_SYSTEM_TEMPLATE_REF` | No | `waterbox-system-v5` |
+| `BOX_SYSTEM_TEMPLATE_REF` | No | `waterbox-system-v6` |
 | `BOX_POLL_INTERVAL_MS` | No | `1000` |
 | `BOX_POLL_TIMEOUT_MS` | No | `120000` |
 

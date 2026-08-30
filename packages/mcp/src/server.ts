@@ -146,7 +146,7 @@ async function terminalResult<N extends ToolName>(name: N, events: AsyncIterable
   if (name === "bash") {
     const bashTerminal = BashToolEventSchema.parse(terminal)
     if (bashTerminal.type !== "result") throw new Error("Waterbox bash returned an invalid terminal result")
-    failed = bashTerminal.metadata.exitCode !== 0 || bashTerminal.metadata.timedOut || bashTerminal.metadata.aborted
+    failed = bashTerminal.outcome === "completed" && (bashTerminal.metadata.exitCode !== 0 || bashTerminal.metadata.timedOut || bashTerminal.metadata.aborted)
   }
   return {
     content: [{ type: "text" as const, text: JSON.stringify({ output: terminal.output, metadata: terminal.metadata }) }],

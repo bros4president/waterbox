@@ -3,7 +3,7 @@ import { dirname, posix, resolve } from "node:path"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
 const DEFAULT_BASE_URL = "https://ascii.dev/api/box/v1"
-const DEFAULT_TEMPLATE = "waterbox-system-v5"
+const DEFAULT_TEMPLATE = "waterbox-system-v6"
 const BUN_VERSION = "1.3.2"
 const BUN_LINUX_X64_BASELINE_SHA256 = "7ff09a4a519e8206d60d7b763072cbf3642f8370690165586d303faf21692172"
 const MAX_RESPONSE_BYTES = 1_048_576
@@ -40,7 +40,7 @@ export interface TemplateMetadata {
   provider: "box"
   templateRef: string
   artifactKind: "waterbox-cli"
-  cliProtocolVersion: 1
+  cliProtocolVersion: 2
   builtAt: string
 }
 
@@ -79,7 +79,7 @@ export function createTemplateRequest(runId: string): { body: { noEnv: true; env
 
 export function installCommand(bunVersion = BUN_VERSION): string {
   if (bunVersion !== BUN_VERSION) throw new Error("Invalid Bun version")
-  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace\ncd /workspace\nexec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/bun /usr/local/lib/waterbox-cli.js "$@"\n`
+  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace\nsudo -n install -d -m 0700 /run/waterbox/bash-jobs\ncd /workspace\nexec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/bun /usr/local/lib/waterbox-cli.js "$@"\n`
   return [
     "set -eu",
     "sudo -n true",
@@ -93,21 +93,40 @@ export function installCommand(bunVersion = BUN_VERSION): string {
     "sudo install -m 0644 /tmp/waterbox-cli.js /usr/local/lib/waterbox-cli.js",
     `printf '%s' '${launcher.replaceAll("'", "'\\''")}' | sudo tee /usr/local/bin/waterbox >/dev/null`,
     "sudo chmod 0755 /usr/local/bin/waterbox",
-    "waterbox health",
+    `test "$(waterbox health)" = '${JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })}'`,
+    `test "$(waterbox version)" = '${JSON.stringify({ protocolVersion: 2 })}'`,
   ].join("\n")
 }
 
 export function parseMetadata(text: string): TemplateMetadata {
   let value: unknown
   try { value = JSON.parse(text) } catch { throw new Error("Template metadata is not valid JSON") }
-  if (!object(value) || value.schemaVersion !== 2 || value.provider !== "box" || !plain(value.templateRef) || !validSnapshotName(value.templateRef) || value.artifactKind !== "waterbox-cli" || value.cliProtocolVersion !== 1 || !plain(value.builtAt) || Number.isNaN(Date.parse(value.builtAt))) throw new Error("Template metadata is invalid")
+  if (!object(value) || value.schemaVersion !== 2 || value.provider !== "box" || !plain(value.templateRef) || !validSnapshotName(value.templateRef) || value.artifactKind !== "waterbox-cli" || value.cliProtocolVersion !== 2 || !plain(value.builtAt) || Number.isNaN(Date.parse(value.builtAt))) throw new Error("Template metadata is invalid")
   return value as unknown as TemplateMetadata
 }
 
 export function validateCliArtifact(artifact: Uint8Array): void {
   let text: string
   try { text = new TextDecoder("utf-8", { fatal: true }).decode(artifact) } catch { throw new Error("CLI artifact must be a Bun JavaScript bundle") }
-  if (!text.startsWith("// @bun\n") || !text.includes("WORKSPACE_ROOT")) throw new Error("CLI artifact must be a Bun JavaScript bundle")
+  if (!text.startsWith("// @bun\n") || !text.includes("WORKSPACE_ROOT") || !text.includes("__internal-bash-worker") || !text.includes("/usr/local/bin/bun") || !text.includes("/usr/local/lib/waterbox-cli.js")) throw new Error("CLI artifact must be a Bun JavaScript bundle with direct async worker re-exec")
+}
+
+export function validateCliReports(healthText: string, versionText: string): void {
+  let health: unknown, version: unknown
+  try { health = JSON.parse(healthText); version = JSON.parse(versionText) } catch { throw new Error("CLI health/version output is invalid") }
+  if (!object(health) || health.ok !== true || health.protocolVersion !== 2 || !Array.isArray(health.tools) || health.tools.join(",") !== "read,write,edit,patch,glob,grep,bash") throw new Error("CLI health output is incompatible")
+  if (!object(version) || Object.keys(version).length !== 1 || version.protocolVersion !== 2) throw new Error("CLI version output is incompatible")
+}
+
+async function validateBuiltCli(artifactPath: string): Promise<void> {
+  const output: string[] = []
+  for (const command of ["health", "version"]) {
+    const child = Bun.spawn([process.execPath, artifactPath, command], { stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
+    if (exitCode !== 0 || stderr !== "") throw new Error(`Built CLI ${command} failed`)
+    output.push(stdout)
+  }
+  validateCliReports(output[0]!, output[1]!)
 }
 
 export async function runTemplateBuild(config: TemplateConfig, dependencies: TemplateDependencies): Promise<TemplateMetadata> {
@@ -140,7 +159,7 @@ export async function runTemplateBuild(config: TemplateConfig, dependencies: Tem
       throw error
     }
     await client.waitForSnapshot(config.templateName, boxId)
-    const metadata: TemplateMetadata = { schemaVersion: 2, provider: "box", templateRef: config.templateName, artifactKind: "waterbox-cli", cliProtocolVersion: 1, builtAt: new Date().toISOString() }
+    const metadata: TemplateMetadata = { schemaVersion: 2, provider: "box", templateRef: config.templateName, artifactKind: "waterbox-cli", cliProtocolVersion: 2, builtAt: new Date().toISOString() }
     await dependencies.writeMetadata(config.metadataPath, `${JSON.stringify(metadata, null, 2)}\n`)
     dependencies.log({ stage: "metadata", status: "written" })
     const cleanupStatus = await client.deleteBox(boxId)
@@ -251,7 +270,8 @@ async function main(): Promise<void> {
   const config = loadTemplateConfig(process.env, process.argv.slice(2))
   const artifact = await readFile(config.artifactPath)
   validateCliArtifact(artifact)
-  if (process.argv.includes("--validate")) { console.log(JSON.stringify({ valid: true, artifactBytes: artifact.byteLength, templateRef: config.templateName, cliProtocolVersion: 1 })); return }
+  await validateBuiltCli(config.artifactPath)
+  if (process.argv.includes("--validate")) { console.log(JSON.stringify({ valid: true, artifactBytes: artifact.byteLength, templateRef: config.templateName, cliProtocolVersion: 2 })); return }
   const dependencies: TemplateDependencies = {
     fetch,
     sleep: (milliseconds, signal) => new Promise((resolveSleep, reject) => { const timer = setTimeout(resolveSleep, milliseconds); signal.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason) }, { once: true }) }),

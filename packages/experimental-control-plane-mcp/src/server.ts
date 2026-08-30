@@ -169,9 +169,10 @@ async function readBashResult(response: Response) {
   const final = events.at(-1)
   if (!final || final.type !== "result") throw new Error("Waterbox bash stream ended without a result")
   const output = events.filter(event => event.type === "stdout" || event.type === "stderr").map(event => event.data).join("")
+  const displayedOutput = final.outcome === "dispatched" ? final.output : output
   return {
-    content: [{ type: "text" as const, text: `${output}${output && !output.endsWith("\n") ? "\n" : ""}${JSON.stringify(final.metadata)}` }],
-    ...(final.metadata.exitCode === 0 && !final.metadata.timedOut && !final.metadata.aborted ? {} : { isError: true }),
+    content: [{ type: "text" as const, text: `${displayedOutput}${displayedOutput && !displayedOutput.endsWith("\n") ? "\n" : ""}${JSON.stringify(final.metadata)}` }],
+    ...(final.outcome === "completed" && (final.metadata.exitCode !== 0 || final.metadata.timedOut || final.metadata.aborted) ? { isError: true } : {}),
   }
 }
 

@@ -34,7 +34,15 @@ curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json'
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"pattern":"*.txt","path":"/workspace"}' "$URL/v1/sandboxes/$SANDBOX/tools/glob"
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"pattern":"world","path":"/workspace"}' "$URL/v1/sandboxes/$SANDBOX/tools/grep"
 curl -N -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 1; printf world"}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
+curl -N -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 20; printf world","timeout":30000}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
 ```
+
+Every one-shot Bash call starts a detached worker. Quick commands return a completed result;
+longer-running commands may yield a dispatched receipt. `timeout`, when present, is only an
+execution deadline. The receipt means the worker was spawned, not that Bash started or
+succeeded. `statusPath` reports execution state and `outputPath` receives output continuously.
+The caller decides whether and when to inspect either path; repeated reads can duplicate
+tokens and pollute model context. The API and provider do not poll on the caller's behalf.
 
 The initiation response contains `transferId`, an `age1...` recipient, algorithm `age-x25519`, and a fixed ten-minute `expiresAt`. Encrypt an existing local file with a standard age implementation, Base64-encode the binary age file, and consume the transfer once before expiry. Plaintext is limited to 1 MiB. The API and provider transport handle only ciphertext; the destination is decrypted and readable inside the sandbox. Creating another transfer is the recovery path after expiry or an uncertain consumption outcome.
 
@@ -54,7 +62,7 @@ For a manual OpenCode session over the temporary local API and experimental MCP,
 ```sh
 WATERBOX_MCP_EXPERIMENT_AUTHORIZATION=I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES \
 WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT=YES \
-BOX_SYSTEM_TEMPLATE_REF=waterbox-system-v5 \
+BOX_SYSTEM_TEMPLATE_REF=waterbox-system-v6 \
 bun run chat:control-plane-mcp
 ```
 

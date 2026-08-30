@@ -3,7 +3,7 @@ import {
   PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema,
   SecureTransferDeliveredSchema, SecureTransferInitiatedSchema,
 } from "@waterbox/contracts"
-import { consumeSecureFileTransfer, createRuntime, initiateSecureFileTransfer, runtimeErrorStatus, RuntimeError, type SecureTransferRuntimeOptions } from "@waterbox/runtime"
+import { consumeSecureFileTransfer, createRuntime, initiateSecureFileTransfer, runAsyncBashWorker, runOneShotBash, runtimeErrorStatus, RuntimeError, type OneShotBashOptions, type SecureTransferRuntimeOptions } from "@waterbox/runtime"
 import { CLI_PROTOCOL_VERSION, CliProtocolError, decodeInvocation, decodeSecureTransferInput } from "./protocol.ts"
 
 export * from "./protocol.ts"
@@ -20,7 +20,7 @@ const eventSchemas = {
 
 export interface CliIo { stdout(value: string): void; stderr(value: string): void }
 
-export async function runCli(argv: readonly string[], options: { workspaceRoot: string; signal?: AbortSignal; io?: CliIo; secureTransfer?: Omit<SecureTransferRuntimeOptions, "workspaceRoot"> }): Promise<number> {
+export async function runCli(argv: readonly string[], options: { workspaceRoot: string; signal?: AbortSignal; io?: CliIo; secureTransfer?: Omit<SecureTransferRuntimeOptions, "workspaceRoot">; asyncBash?: OneShotBashOptions }): Promise<number> {
   const io = options.io ?? { stdout: value => process.stdout.write(value), stderr: value => process.stderr.write(value) }
   if (argv.length === 1 && argv[0] === "health") {
     io.stdout(`${JSON.stringify({ ok: true, protocolVersion: CLI_PROTOCOL_VERSION, tools: Object.keys(eventSchemas) })}\n`)
@@ -29,6 +29,9 @@ export async function runCli(argv: readonly string[], options: { workspaceRoot: 
   if (argv.length === 1 && argv[0] === "version") {
     io.stdout(`${JSON.stringify({ protocolVersion: CLI_PROTOCOL_VERSION })}\n`)
     return 0
+  }
+  if (argv.length === 2 && argv[0] === "__internal-bash-worker") {
+    return await runAsyncBashWorker(argv[1]!, options.asyncBash)
   }
   if (argv.length === 1 && argv[0] === "transfer-initiate") {
     try {
@@ -55,6 +58,16 @@ export async function runCli(argv: readonly string[], options: { workspaceRoot: 
   let invocation
   try { invocation = decodeInvocation(argv[1]!) }
   catch { return writeError(io, 400, "invalid_invocation") }
+  if (invocation.tool === "bash") {
+    try {
+      const result = await runOneShotBash(options.workspaceRoot, invocation.arguments, options.signal, options.asyncBash)
+      io.stdout(`${JSON.stringify(BashToolEventSchema.parse(result))}\n`)
+      return 0
+    } catch (error) {
+      const status = runtimeErrorStatus(error)
+      return writeError(io, status, status < 500 ? "tool_rejected" : "internal_error")
+    }
+  }
   const runtime = createRuntime({ workspaceRoot: options.workspaceRoot })
   try {
     const result = await runtime.execute(invocation.tool, invocation.arguments, options.signal)

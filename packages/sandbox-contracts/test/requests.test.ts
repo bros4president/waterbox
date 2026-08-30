@@ -139,7 +139,7 @@ const cases: RequestCase[] = [
     name: "bash tool",
     schema: BashToolArgumentsSchema,
     valid: [{ command: "pwd" }, { command: "bun test", description: "tests", timeout: 30_000, workdir: "/workspace" }],
-    invalid: [{ command: "" }, { command: "pwd", timeout: 0 }, { command: "pwd", timeout: 2_147_483_648 }, { command: "pwd", env: {} }],
+    invalid: [{ command: "" }, { command: "pwd", timeout: 0 }, { command: "pwd", timeout: 1.5 }, { command: "pwd", timeout: 2_147_483_648 }, { command: "pwd", env: {} }],
   },
 ]
 
