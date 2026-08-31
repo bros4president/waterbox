@@ -85,6 +85,29 @@ export interface ProviderExecuteInput<N extends ToolName = ToolName> extends Pro
   arguments: ToolArgumentsByName[N]
 }
 
+export interface BashJobObservation {
+  jobId: string
+  state: "starting" | "running" | "completed" | "failed"
+  chunkBase64: string
+  nextOffset: number
+  outputSize: number
+  exitCode?: number | null
+  signal?: string | null
+  timedOut?: boolean
+  durationMs?: number
+  error?: "spawn_failed" | "worker_failed"
+}
+
+export interface ProviderObserveBashJobInput extends ProviderOperationInput {
+  jobId: string
+  offset: number
+  maxBytes: number
+}
+
+export interface ProviderCleanupBashJobInput extends ProviderOperationInput {
+  jobId: string
+}
+
 export interface ProviderConsumeSecureTransferInput extends ProviderOperationInput, SecureTransferConsumeRequest {
   transferId: SecureTransferId
 }
@@ -119,5 +142,9 @@ export interface SandboxProvider {
   readonly secureFileTransfer?: {
     initiate(input: ProviderOperationInput): Promise<SecureTransferInitiated>
     consume(input: ProviderConsumeSecureTransferInput): Promise<SecureTransferDelivered>
+  }
+  readonly bashJobs?: {
+    observe(input: ProviderObserveBashJobInput): Promise<BashJobObservation>
+    cleanup(input: ProviderCleanupBashJobInput): Promise<void>
   }
 }

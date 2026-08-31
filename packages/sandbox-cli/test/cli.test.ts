@@ -65,22 +65,46 @@ describe("Waterbox one-shot CLI", () => {
     expect(Date.now() - started).toBeLessThan(500)
     const receipt = BashToolEventSchema.parse(JSON.parse(await new Response(child.stdout).text()))
     if (receipt.type !== "result" || receipt.outcome !== "dispatched") throw new Error("Expected receipt")
+    const localOutputPath = join(jobRoot, receipt.metadata.jobId, "output.log")
+    const localStatusPath = join(jobRoot, receipt.metadata.jobId, "status.json")
     expect("timeout" in receipt.metadata).toBe(false)
-    expect(await Bun.file(receipt.metadata.outputPath).exists()).toBe(true)
+    expect(receipt.metadata.outputPath).toBe(`/run/waterbox/bash-jobs/${receipt.metadata.jobId}/output.log`)
+    expect(receipt.metadata.statusPath).toBe(`/run/waterbox/bash-jobs/${receipt.metadata.jobId}/status.json`)
+    expect(await Bun.file(localOutputPath).exists()).toBe(true)
     const states = new Set<string>()
     let sawFirstWithoutSecond = false
     for (let attempt = 0; attempt < 500; attempt++) {
-      const status = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+      const status = JSON.parse(await readFile(localStatusPath, "utf8"))
       states.add(status.state)
-      const output = await readFile(receipt.metadata.outputPath, "utf8")
+      const output = await readFile(localOutputPath, "utf8")
       if (output.includes("first") && !output.includes("second")) sawFirstWithoutSecond = true
       if (status.state === "completed" || status.state === "failed") break
       await Bun.sleep(5)
     }
     expect(sawFirstWithoutSecond).toBe(true)
     expect(states.has("running")).toBe(true)
-    expect(JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))).toMatchObject({ state: "completed" })
-    expect(await readFile(receipt.metadata.outputPath, "utf8")).toBe("firstseconderr")
+    expect(JSON.parse(await readFile(localStatusPath, "utf8"))).toMatchObject({ state: "completed" })
+    expect(await readFile(localOutputPath, "utf8")).toBe("firstseconderr")
+    let offset = 0, collected = ""
+    while (true) {
+      let stdout = ""
+      expect(await runCli(["__internal-bash-observe", receipt.metadata.jobId, String(offset), "4"], {
+        workspaceRoot: root, asyncBash: { jobRoot }, io: { stdout: value => { stdout += value }, stderr: () => {} },
+      })).toBe(0)
+      const sample = JSON.parse(stdout)
+      const bytes = Buffer.from(sample.chunkBase64, "base64")
+      expect(sample.nextOffset - offset).toBe(bytes.byteLength)
+      collected += bytes.toString("utf8")
+      offset = sample.nextOffset
+      if ((sample.state === "completed" || sample.state === "failed") && offset === sample.outputSize) break
+    }
+    expect(collected).toBe("firstseconderr")
+    let cleanup = ""
+    expect(await runCli(["__internal-bash-cleanup", receipt.metadata.jobId], {
+      workspaceRoot: root, asyncBash: { jobRoot }, io: { stdout: value => { cleanup += value }, stderr: () => {} },
+    })).toBe(0)
+    expect(JSON.parse(cleanup)).toEqual({ jobId: receipt.metadata.jobId, cleaned: true })
+    expect(await readdir(jobRoot)).toEqual([])
   })
 
   test.skipIf(process.platform === "win32")("returns nonzero and timed-out workers as completed results", async () => {
@@ -151,6 +175,16 @@ describe("Waterbox one-shot CLI", () => {
       expect(JSON.parse(stdout)).toMatchObject({ type: "error", code: "invalid_invocation" })
     }
     expect(() => encodeInvocation("write", { filePath: "x", content: "x".repeat(MAX_DECODED_INVOCATION_BYTES) })).toThrow()
+    for (const argv of [
+      ["__internal-bash-observe", "../job_bad", "0", "1"],
+      ["__internal-bash-observe", `job_${"a".repeat(32)}`, "-1", "1"],
+      ["__internal-bash-observe", `job_${"a".repeat(32)}`, "0", "65537"],
+      ["__internal-bash-observe", `job_${"a".repeat(32)}`, "9007199254740992", "1"],
+    ]) {
+      let stdout = ""
+      expect(await runCli(argv, { workspaceRoot: root, io: { stdout: value => { stdout += value }, stderr: () => {} } })).toBe(2)
+      expect(JSON.parse(stdout)).toMatchObject({ code: "invalid_invocation" })
+    }
   })
 
   test("provides machine-readable health and version commands", async () => {

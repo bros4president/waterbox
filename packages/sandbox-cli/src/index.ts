@@ -3,7 +3,7 @@ import {
   PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema,
   SecureTransferDeliveredSchema, SecureTransferInitiatedSchema,
 } from "@waterbox/contracts"
-import { consumeSecureFileTransfer, createRuntime, initiateSecureFileTransfer, runAsyncBashWorker, runOneShotBash, runtimeErrorStatus, RuntimeError, type OneShotBashOptions, type SecureTransferRuntimeOptions } from "@waterbox/runtime"
+import { cleanupAsyncBashJob, consumeSecureFileTransfer, createRuntime, initiateSecureFileTransfer, observeAsyncBashJob, runAsyncBashWorker, runOneShotBash, runtimeErrorStatus, RuntimeError, type OneShotBashOptions, type SecureTransferRuntimeOptions } from "@waterbox/runtime"
 import { CLI_PROTOCOL_VERSION, CliProtocolError, decodeInvocation, decodeSecureTransferInput } from "./protocol.ts"
 
 export * from "./protocol.ts"
@@ -32,6 +32,23 @@ export async function runCli(argv: readonly string[], options: { workspaceRoot: 
   }
   if (argv.length === 2 && argv[0] === "__internal-bash-worker") {
     return await runAsyncBashWorker(argv[1]!, options.asyncBash)
+  }
+  if (argv.length === 4 && argv[0] === "__internal-bash-observe") {
+    if (!/^job_[0-9a-f]{32}$/.test(argv[1]!) || !/^(0|[1-9]\d*)$/.test(argv[2]!) || !/^[1-9]\d*$/.test(argv[3]!)) return writeError(io, 400, "invalid_invocation")
+    const offset = Number(argv[2]), maxBytes = Number(argv[3])
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(maxBytes) || maxBytes > 65_536) return writeError(io, 400, "invalid_invocation")
+    try {
+      const result = await observeAsyncBashJob(argv[1]!, offset, maxBytes, options.asyncBash)
+      io.stdout(`${JSON.stringify(result)}\n`)
+      return 0
+    } catch { return writeError(io, 500, "internal_error") }
+  }
+  if (argv.length === 2 && argv[0] === "__internal-bash-cleanup") {
+    if (!/^job_[0-9a-f]{32}$/.test(argv[1]!)) return writeError(io, 400, "invalid_invocation")
+    try {
+      io.stdout(`${JSON.stringify({ jobId: argv[1], cleaned: await cleanupAsyncBashJob(argv[1]!, options.asyncBash) })}\n`)
+      return 0
+    } catch { return writeError(io, 500, "internal_error") }
   }
   if (argv.length === 1 && argv[0] === "transfer-initiate") {
     try {

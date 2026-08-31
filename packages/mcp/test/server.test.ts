@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
+import { BashToolResultSchema } from "@waterbox/contracts"
 import type {
   CreateSandboxRequest,
   CreateSnapshotRequest,
@@ -24,6 +25,7 @@ import type {
 } from "@waterbox/core/provider"
 import { FakeSandboxProvider, FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"
 import type { McpBackend } from "../src/backend.ts"
+import { absorbBashReceipt } from "../src/bash-observation.ts"
 import type { BoxMcpConfig } from "../src/config.ts"
 import { createDirectBackend, createMcpBackend, UnsupportedMcpProviderError } from "../src/direct.ts"
 import { createStartupBackend } from "../src/main.ts"
@@ -163,7 +165,7 @@ describe("Waterbox MCP server", () => {
     }
   })
 
-  test("returns dispatched bash receipt paths as success and retains completed failure classification", async () => {
+  test("absorbs dispatched bash receipts and retains completed failure classification", async () => {
     const backend = new StubBackend()
     const completed = {
       type: "result", outcome: "completed", title: "bash", output: "failed", metadata: {
@@ -176,15 +178,22 @@ describe("Waterbox MCP server", () => {
         command: "sleep 20", workdir: "/workspace", timeout: 20_000,
         jobId: `job_${"a".repeat(32)}`,
         outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
-        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`,
       },
+    }
+    backend.bashObservation = {
+      jobId: `job_${"a".repeat(32)}`, state: "completed", chunkBase64: Buffer.from("absorbed output").toString("base64"),
+      nextOffset: 15, outputSize: 15, exitCode: 0, signal: null, timedOut: false, durationMs: 20,
     }
     const { client, close } = await connected(backend)
     try {
       const dispatched = await client.callTool({ name: "bash", arguments: { sandboxId: sandbox.sandboxId, command: "sleep 20", timeout: 20_000 } })
       expect(dispatched.isError).not.toBe(true)
-      const receiptText = (dispatched as { content: Array<{ text: string }> }).content[0]!.text
-      expect(JSON.parse(receiptText)).toEqual({ output: backend.bashEvent.output, metadata: backend.bashEvent.metadata })
+      expect(dispatched).toMatchObject({ content: [{ text: "absorbed output" }], structuredContent: { title: "Bash command", outcome: "completed", metadata: { exitCode: 0, outputTruncated: false } } })
+      expect(BashToolResultSchema.safeParse(dispatched.structuredContent).success).toBeTrue()
+      const bashTool = (await client.listTools()).tools.find(tool => tool.name === "bash")
+      expect(bashTool?.outputSchema).toMatchObject({ type: "object" })
+      expect(backend.cleanupCalls).toBe(1)
 
       for (const metadata of [
         completed.metadata,
@@ -198,6 +207,137 @@ describe("Waterbox MCP server", () => {
       await close()
     }
   })
+
+  test("returns safe fallback paths without command or observer details", async () => {
+    const backend = new StubBackend()
+    const jobId = `job_${"b".repeat(32)}`
+    backend.bashEvent = { type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "dispatched", metadata: {
+      command: "printf top-secret", workdir: "/workspace", jobId,
+      outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json`,
+    } }
+    backend.observationError = new Error("sensitive observer failure")
+    const { client, close } = await connected(backend)
+    try {
+      const fallback = await client.callTool({ name: "bash", arguments: { sandboxId: sandbox.sandboxId, command: "printf top-secret" } })
+      expect(fallback.isError).not.toBe(true)
+      const text = ((fallback as { content: Array<{ text: string }> }).content[0]!).text
+      expect(text).toContain(jobId)
+      expect(text).toContain(`/run/waterbox/bash-jobs/${jobId}/status.json`)
+      expect(text).toContain(`/run/waterbox/bash-jobs/${jobId}/output.log`)
+      expect(text).not.toContain("top-secret")
+      expect(JSON.stringify(fallback)).not.toContain("sensitive observer failure")
+      expect(fallback).toMatchObject({ structuredContent: { title: "Bash command dispatched", outcome: "dispatched" } })
+      expect(BashToolResultSchema.safeParse(fallback.structuredContent).success).toBeTrue()
+    } finally { await close() }
+  })
+
+  test("heartbeats periodically while an observation request is stalled without overlap", async () => {
+    const backend = new StubBackend()
+    backend.stallObservation = true
+    const controller = new AbortController()
+    const receipt = dispatchedReceipt(`job_${"d".repeat(32)}`, "secret command")
+    const progress: number[] = []
+    let attempts = 0, sends = 0, maximumSends = 0
+    const result = absorbBashReceipt(backend, sandbox.sandboxId, receipt, {
+      signal: controller.signal,
+      progressToken: "request-token",
+      sendNotification(notification) {
+        attempts += 1
+        if (attempts === 1) throw new Error("progress transport failed")
+        return (async () => {
+          sends += 1; maximumSends = Math.max(maximumSends, sends)
+          progress.push(notification.params.progress)
+          await Bun.sleep(5)
+          sends -= 1
+          if (progress.length === 3) controller.abort()
+        })()
+      },
+    }, 1)
+
+    expect(await result).toMatchObject({ structuredContent: { outcome: "dispatched" } })
+    expect(progress).toEqual([2, 3, 4])
+    expect(attempts).toBe(4)
+    expect(maximumSends).toBe(1)
+    expect(JSON.stringify(progress)).not.toContain("secret command")
+    expect(backend.cleanupCalls).toBe(0)
+  })
+
+  test("commits terminal drain before caller cancellation during cleanup", async () => {
+    const backend = new StubBackend()
+    const controller = new AbortController()
+    const receipt = dispatchedReceipt(`job_${"e".repeat(32)}`, "secret command")
+    backend.bashObservation = { jobId: receipt.metadata.jobId, state: "completed", chunkBase64: Buffer.from("complete").toString("base64"), nextOffset: 8, outputSize: 8, exitCode: 0, signal: null, timedOut: false, durationMs: 1 }
+    backend.cleanupHook = signal => { expect(signal).not.toBe(controller.signal); expect(signal.aborted).toBeFalse(); controller.abort(); throw new Error("cleanup failed") }
+
+    const result = await absorbBashReceipt(backend, sandbox.sandboxId, receipt, { signal: controller.signal, sendNotification: async () => {} }, 1)
+
+    expect(result).toMatchObject({ content: [{ text: "complete" }], structuredContent: { title: "Bash command", outcome: "completed" } })
+    expect(backend.cleanupCalls).toBe(1)
+  })
+
+  test("returns completed without waiting for cleanup and stops heartbeats", async () => {
+    const backend = new StubBackend()
+    const receipt = dispatchedReceipt(`job_${"1".repeat(32)}`, "secret command")
+    backend.bashObservation = { jobId: receipt.metadata.jobId, state: "completed", chunkBase64: Buffer.from("complete").toString("base64"), nextOffset: 8, outputSize: 8, exitCode: 0, signal: null, timedOut: false, durationMs: 1 }
+    backend.neverResolveCleanup = true
+    let cleanupSignal: AbortSignal | undefined
+    let resolveCleanupAbort!: () => void
+    const cleanupAborted = new Promise<void>(resolve => { resolveCleanupAbort = resolve })
+    backend.cleanupHook = signal => {
+      cleanupSignal = signal
+      signal.addEventListener("abort", resolveCleanupAbort, { once: true })
+    }
+    const progress: number[] = []
+    const caller = new AbortController()
+
+    const operation = absorbBashReceipt(backend, sandbox.sandboxId, receipt, {
+      signal: caller.signal,
+      progressToken: "cleanup-test",
+      async sendNotification(notification) { progress.push(notification.params.progress) },
+    }, 2, 10)
+    const result = await Promise.race([operation, Bun.sleep(100).then(() => { throw new Error("Completed result waited for cleanup") })])
+    const progressAtCompletion = progress.length
+    expect(cleanupSignal).toBeDefined()
+    expect(cleanupSignal).not.toBe(caller.signal)
+    expect(cleanupSignal?.aborted).toBeFalse()
+    await Promise.race([cleanupAborted, Bun.sleep(100).then(() => { throw new Error("Cleanup deadline did not abort") })])
+    await Bun.sleep(5)
+
+    expect(result).toMatchObject({ content: [{ text: "complete" }], structuredContent: { outcome: "completed" } })
+    expect(backend.cleanupCalls).toBe(1)
+    expect(cleanupSignal?.aborted).toBeTrue()
+    expect((cleanupSignal?.reason as DOMException).name).toBe("TimeoutError")
+    expect(progress.length).toBe(progressAtCompletion)
+  })
+
+  test("stream-decodes split and invalid UTF-8 while draining beyond retained output", async () => {
+    const backend = new StubBackend()
+    const jobId = `job_${"c".repeat(32)}`
+    backend.bashEvent = { type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "dispatched", metadata: {
+      command: "large-output", workdir: "/workspace", jobId,
+      outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json`,
+    } }
+    const raw = Buffer.concat([Buffer.from([0xe2]), Buffer.from([0x82, 0xac, 0x80]), Buffer.alloc(1_100_000, 0x78)])
+    const chunks = [raw.subarray(0, 1), raw.subarray(1, 4), ...Array.from({ length: Math.ceil((raw.length - 4) / 65_536) }, (_, index) => raw.subarray(4 + index * 65_536, 4 + (index + 1) * 65_536))]
+    const expectedOffsets: number[] = []
+    let offset = 0
+    for (const chunk of chunks) {
+      expectedOffsets.push(offset)
+      offset += chunk.byteLength
+      backend.bashObservations.push({ jobId, state: offset === raw.length ? "completed" : "running", chunkBase64: chunk.toString("base64"), nextOffset: offset, outputSize: raw.length, ...(offset === raw.length ? { exitCode: 0, signal: null, timedOut: false, durationMs: 10 } : {}) })
+    }
+    const { client, close } = await connected(backend)
+    try {
+      const result = await client.callTool({ name: "bash", arguments: { sandboxId: sandbox.sandboxId, command: "large-output" } })
+      const text = ((result as { content: Array<{ text: string }> }).content[0]!).text
+      expect(text.startsWith("€�xxx")).toBeTrue()
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(1_048_576)
+      expect(result).toMatchObject({ structuredContent: { metadata: { outputTruncated: true } } })
+      expect(backend.observedOffsets).toEqual(expectedOffsets)
+      expect(backend.observedOffsets.at(-1)).toBeLessThan(raw.length)
+      expect(backend.cleanupCalls).toBe(1)
+    } finally { await close() }
+  })
 })
 
 class StubBackend implements McpBackend {
@@ -209,6 +349,14 @@ class StubBackend implements McpBackend {
   secureCiphertext = ""
   private secureIdentity?: string
   bashEvent?: ToolEventByName["bash"]
+  bashObservation?: { jobId: string; state: "completed"; chunkBase64: string; nextOffset: number; outputSize: number; exitCode: number; signal: null; timedOut: boolean; durationMs: number }
+  bashObservations: Array<any> = []
+  observationError?: unknown
+  stallObservation = false
+  observedOffsets: number[] = []
+  cleanupCalls = 0
+  cleanupHook?: (signal: AbortSignal) => void
+  neverResolveCleanup = false
 
   async createSandbox(request: CreateSandboxRequest, idempotencyKey: string): Promise<Sandbox> {
     this.createInputs.push({ request, idempotencyKey })
@@ -244,7 +392,36 @@ class StubBackend implements McpBackend {
     return oneEvent(event as ToolEventByName[N])
   }
 
+  async observeBashJob(_sandboxId: SandboxId, _jobId: string, offset: number, _maxBytes: number, signal: AbortSignal) {
+    this.observedOffsets.push(offset)
+    if (this.stallObservation) await new Promise<never>((_resolve, reject) => {
+      const abort = () => reject(signal.reason ?? new DOMException("Aborted", "AbortError"))
+      signal.addEventListener("abort", abort, { once: true })
+      if (signal.aborted) abort()
+    })
+    if (this.observationError) throw this.observationError
+    const queued = this.bashObservations.shift()
+    if (queued) return queued
+    if (!this.bashObservation) throw new Error("No Bash observation")
+    return this.bashObservation
+  }
+
+  async cleanupBashJob(_sandboxId: SandboxId, _jobId: string, signal: AbortSignal) {
+    this.cleanupCalls++
+    this.cleanupHook?.(signal)
+    if (this.neverResolveCleanup) await new Promise<void>(() => {})
+  }
+
   async close(): Promise<void> {}
+}
+
+function dispatchedReceipt(jobId: string, command: string) {
+  const result = BashToolResultSchema.parse({ title: "Bash command dispatched", output: "dispatched", outcome: "dispatched", metadata: {
+    command, workdir: "/workspace", jobId,
+    outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json`,
+  } })
+  if (result.outcome !== "dispatched") throw new Error("Expected dispatched receipt")
+  return result
 }
 
 class ValidFakeProvider extends FakeSandboxProvider {

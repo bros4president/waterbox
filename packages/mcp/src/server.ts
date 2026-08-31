@@ -3,6 +3,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@model
 import {
   BashToolArgumentsSchema,
   BashToolEventSchema,
+  BashToolResultSchema,
   CreateSandboxRequestSchema,
   CreateSnapshotRequestSchema,
   CursorPaginationRequestSchema,
@@ -34,6 +35,7 @@ import { z } from "zod"
 import type { McpBackend } from "./backend.ts"
 import { MissingMcpCredentialError } from "./config.ts"
 import { sendFileSecurely } from "./secure-transfer.ts"
+import { absorbBashReceipt } from "./bash-observation.ts"
 
 const ARGUMENT_SCHEMAS = {
   read: ReadToolArgumentsSchema.extend({ sandboxId: SandboxIdSchema }),
@@ -78,10 +80,10 @@ const tools: Tool[] = [
   tool("patch", "Applies a Begin Patch formatted patch anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.patch),
   tool("glob", "Finds paths by glob pattern anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.glob),
   tool("grep", "Searches file contents anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.grep),
-  tool("bash", "Runs unrestricted bash as root in the specified Waterbox sandbox, never on the local machine. The default working directory is /workspace.", ARGUMENT_SCHEMAS.bash),
+  tool("bash", "Runs unrestricted bash as root in the specified Waterbox sandbox, never on the local machine. The default working directory is /workspace.", ARGUMENT_SCHEMAS.bash, BashToolResultSchema),
 ]
 
-export function createWaterboxMcpServer(backend: McpBackend, options: { onError?: (error: unknown) => void } = {}): Server {
+export function createWaterboxMcpServer(backend: McpBackend, options: { onError?: (error: unknown) => void; bashObservationIntervalMs?: number } = {}): Server {
   const server = new Server({ name: "waterbox", version: "0.1.0" }, { capabilities: { tools: {} } })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
@@ -118,7 +120,7 @@ export function createWaterboxMcpServer(backend: McpBackend, options: { onError?
       if (!parsedName.success) throw new PublicMcpError("Unknown Waterbox tool")
       const { sandboxId, arguments_ } = parseArguments(parsedName.data, request.params.arguments)
       const events = await backend.executeTool(sandboxId, parsedName.data, arguments_, extra.signal)
-      return await terminalResult(parsedName.data, events)
+      return await terminalResult(parsedName.data, events, parsedName.data === "bash" ? { backend, sandboxId, extra, intervalMs: options.bashObservationIntervalMs } : undefined)
     } catch (error) {
       options.onError?.(error)
       return { content: [{ type: "text" as const, text: safeMessage(error) }], isError: true }
@@ -134,7 +136,7 @@ function parseArguments<N extends ToolName>(name: N, value: unknown): { sandboxI
   return { sandboxId, arguments_: arguments_ as ToolArgumentsByName[N] }
 }
 
-async function terminalResult<N extends ToolName>(name: N, events: AsyncIterable<ToolEventByName[N]>) {
+async function terminalResult<N extends ToolName>(name: N, events: AsyncIterable<ToolEventByName[N]>, bash?: { backend: McpBackend; sandboxId: SandboxId; extra: { signal: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }; intervalMs?: number }) {
   let terminal: Extract<ToolEventByName[N], { type: "result" }> | undefined
   for await (const value of events) {
     if (terminal) throw new Error("Events followed the terminal Waterbox tool result")
@@ -146,7 +148,20 @@ async function terminalResult<N extends ToolName>(name: N, events: AsyncIterable
   if (name === "bash") {
     const bashTerminal = BashToolEventSchema.parse(terminal)
     if (bashTerminal.type !== "result") throw new Error("Waterbox bash returned an invalid terminal result")
+    if (bashTerminal.outcome === "dispatched" && bash !== undefined) {
+      return absorbBashReceipt(bash.backend, bash.sandboxId, bashTerminal, {
+        signal: bash.extra.signal,
+        ...(bash.extra._meta?.progressToken === undefined ? {} : { progressToken: bash.extra._meta.progressToken }),
+        sendNotification: bash.extra.sendNotification,
+      }, bash.intervalMs)
+    }
     failed = bashTerminal.outcome === "completed" && (bashTerminal.metadata.exitCode !== 0 || bashTerminal.metadata.timedOut || bashTerminal.metadata.aborted)
+    const structuredContent = BashToolResultSchema.parse({ title: bashTerminal.title, outcome: "completed", output: bashTerminal.output, metadata: bashTerminal.metadata })
+    return {
+      content: [{ type: "text" as const, text: bashTerminal.output }],
+      structuredContent,
+      ...(failed ? { isError: true } : {}),
+    }
   }
   return {
     content: [{ type: "text" as const, text: JSON.stringify({ output: terminal.output, metadata: terminal.metadata }) }],
@@ -154,9 +169,11 @@ async function terminalResult<N extends ToolName>(name: N, events: AsyncIterable
   }
 }
 
-function tool(name: string, description: string, schema: z.ZodType): Tool {
+function tool(name: string, description: string, schema: z.ZodType, output?: z.ZodType): Tool {
   const { $schema: _, ...inputSchema } = z.toJSONSchema(schema)
-  return { name, description, inputSchema: inputSchema as Tool["inputSchema"] }
+  if (output === undefined) return { name, description, inputSchema: inputSchema as Tool["inputSchema"] }
+  const { $schema: _outputSchema, ...generatedOutputSchema } = z.toJSONSchema(output)
+  return { name, description, inputSchema: inputSchema as Tool["inputSchema"], outputSchema: { type: "object", ...generatedOutputSchema } as Tool["outputSchema"] }
 }
 
 class PublicMcpError extends Error {}

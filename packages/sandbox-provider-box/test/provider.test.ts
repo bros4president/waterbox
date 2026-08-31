@@ -367,7 +367,7 @@ describe("Box provider canonical daemon transport and conformance", () => {
         command: "sleep 700", workdir: "/workspace", timeout: 700_000,
         jobId: `job_${"a".repeat(32)}`,
         outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
-        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`,
       },
     } as const
     const { provider, seen, clock } = harness(() => commandResponse(`${JSON.stringify(receipt)}\n`))
@@ -379,6 +379,23 @@ describe("Box provider canonical daemon transport and conformance", () => {
     expect(seen.filter((request) => request.url.endsWith("/commands"))).toHaveLength(1)
     expect(seen).toHaveLength(1)
     expect(clock.sleeps).toBe(0)
+  })
+
+  test("samples and cleans Bash jobs with one hidden Box command per operation", async () => {
+    const jobId = `job_${"a".repeat(32)}`
+    const chunkBase64 = Buffer.from([0x66, 0x6f, 0x80]).toString("base64")
+    const { provider, seen } = harness((_request, requests) => {
+      const command = (requests.at(-1)?.body as { command: string }).command
+      if (command.includes("__internal-bash-observe")) return commandResponse(`${JSON.stringify({ jobId, state: "running", chunkBase64, nextOffset: 3, outputSize: 8 })}\n`)
+      return commandResponse(`${JSON.stringify({ jobId, cleaned: true })}\n`)
+    })
+
+    expect(await provider.bashJobs.observe({ accountId: "a", providerRef: sandboxRef, jobId, offset: 0, maxBytes: 4, signal: signal() })).toEqual({ jobId, state: "running", chunkBase64, nextOffset: 3, outputSize: 8 })
+    await provider.bashJobs.cleanup({ accountId: "a", providerRef: sandboxRef, jobId, signal: signal() })
+
+    expect(seen).toHaveLength(2)
+    expect((seen[0]!.body as { command: string }).command).toBe(`/usr/local/bin/waterbox __internal-bash-observe ${jobId} 0 4`)
+    expect((seen[1]!.body as { command: string }).command).toBe(`/usr/local/bin/waterbox __internal-bash-cleanup ${jobId}`)
   })
 
   test("dispatches concurrent commands without a provider-side queue", async () => {

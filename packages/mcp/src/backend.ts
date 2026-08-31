@@ -14,6 +14,7 @@ import type {
   ToolName,
 } from "@waterbox/contracts"
 import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
+import type { BashJobObservation } from "@waterbox/core/provider"
 
 export interface McpBackend {
   createSandbox(request: CreateSandboxRequest, idempotencyKey: string, signal: AbortSignal): Promise<Sandbox>
@@ -30,5 +31,7 @@ export interface McpBackend {
     arguments_: ToolArgumentsByName[N],
     signal: AbortSignal,
   ): Promise<AsyncIterable<ToolEventByName[N]>>
+  observeBashJob?(sandboxId: SandboxId, jobId: string, offset: number, maxBytes: number, signal: AbortSignal): Promise<BashJobObservation>
+  cleanupBashJob?(sandboxId: SandboxId, jobId: string, signal: AbortSignal): Promise<void>
   close(): Promise<void>
 }

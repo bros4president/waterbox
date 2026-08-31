@@ -67,10 +67,14 @@ For every one-shot Bash call, the CLI creates private receipt files and spawns
 Quick commands return a bounded completed result; longer-running commands may yield a
 dispatched receipt. `timeout` is only an optional execution deadline. A receipt confirms
 worker-process spawn, not Bash startup, completion, or success. Output is appended to
-`outputPath`; startup and terminal state are written to `statusPath`. The LLM can inspect
-either path with the existing `read` tool at its discretion; repeated output reads can
-duplicate tokens and pollute context. Waterbox has no provider poller, job API, retry,
-queue, or resident worker service.
+`outputPath`; startup and terminal state are written to `statusPath`. Hidden CLI modes sample
+bounded byte ranges by validated `jobId`, derive all paths from `/run/waterbox/bash-jobs`, and
+remove terminal jobs best-effort. MCP starts cleanup asynchronously after terminal drain with a
+finite private deadline, so it cannot delay the completed result or retain transport handles
+indefinitely. The hidden modes are not public tools and exist so MCP can
+absorb a receipt
+without line-based reads. Box and core perform one command per sample and never poll or retry;
+MCP alone owns observation. There is no public job API, queue, or resident worker service.
 
 ## Secure file transfer
 

@@ -50,6 +50,8 @@ const SandboxPathSchema = z.object({ sandboxId: SandboxIdSchema }).strict()
 const SnapshotPathSchema = z.object({ snapshotId: SnapshotIdSchema }).strict()
 const ToolPathSchema = z.object({ sandboxId: SandboxIdSchema, toolName: ToolNameSchema }).strict()
 const SecureTransferPathSchema = z.object({ sandboxId: SandboxIdSchema, transferId: SecureTransferIdSchema }).strict()
+const BashJobPathSchema = z.object({ sandboxId: SandboxIdSchema, jobId: z.string().regex(/^job_[0-9a-f]{32}$/) }).strict()
+const BashJobObservationRequestSchema = z.object({ offset: z.number().int().nonnegative(), maxBytes: z.number().int().min(1).max(65_536) }).strict()
 const EmptySchema = z.object({}).strict()
 const HealthSchema = z.object({ status: z.literal("ok") }).strict()
 const OpenApiDocumentSchema = z.object({ openapi: z.literal("3.1.0") }).passthrough()
@@ -234,6 +236,17 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
   // OpenAPIHono's response inference resolves non-JSON streaming handlers to `never`;
   // the declared route still owns the NDJSON media contract and this remains a Web Response.
   app.openapi(routes.executeTool, executeToolHandler as never)
+
+  app.post("/v1/internal/sandboxes/:sandboxId/bash-jobs/:jobId/observe", async (c) => {
+    const { sandboxId, jobId } = BashJobPathSchema.parse(c.req.param())
+    const { offset, maxBytes } = BashJobObservationRequestSchema.parse(await c.req.json())
+    return c.json(await dependencies.core.observeBashJob(c.get("identity"), sandboxId, jobId, offset, maxBytes, c.req.raw.signal), 200)
+  })
+  app.delete("/v1/internal/sandboxes/:sandboxId/bash-jobs/:jobId", async (c) => {
+    const { sandboxId, jobId } = BashJobPathSchema.parse(c.req.param())
+    await dependencies.core.cleanupBashJob(c.get("identity"), sandboxId, jobId, c.req.raw.signal)
+    return c.body(null, 204)
+  })
 
   return app
 }

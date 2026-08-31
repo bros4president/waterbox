@@ -12,6 +12,7 @@ import { createRuntime, runAsyncBashWorker, runOneShotBash } from "../src/index.
 const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))))
 async function fixture() { const root = await mkdtemp(join(tmpdir(), "waterbox-runtime-")); roots.push(root); return createRuntime({ workspaceRoot: root }) }
+function jobFile(jobRoot: string, jobId: string, name: "output.log" | "status.json"): string { return join(jobRoot, jobId, name) }
 
 function controlledChild(onKill: (signal: NodeJS.Signals) => void): ChildProcess {
   const child = new EventEmitter() as ChildProcess
@@ -59,21 +60,21 @@ describe("provider-neutral canonical runtime", () => {
     expect(receipt).toMatchObject({
       outcome: "dispatched",
       output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
-      metadata: { pollAfterMs: 2_000 },
+      metadata: {},
     })
     expect((await stat(jobRoot)).mode & 0o777).toBe(0o700)
     expect((await stat(join(jobRoot, receipt.metadata.jobId))).mode & 0o777).toBe(0o700)
-    expect((await stat(receipt.metadata.outputPath)).mode & 0o777).toBe(0o600)
-    const starting = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+    expect((await stat(jobFile(jobRoot, receipt.metadata.jobId, "output.log"))).mode & 0o777).toBe(0o600)
+    const starting = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
     expect(starting).toMatchObject({ state: "starting" })
     expect("timeout" in starting).toBe(false)
     expect(JSON.stringify(starting)).not.toContain("printf out")
     expect(JSON.parse(await readFile(join(jobRoot, receipt.metadata.jobId, "request.json"), "utf8"))).not.toHaveProperty("timeout")
 
     expect(await runAsyncBashWorker(receipt.metadata.jobId, { jobRoot })).toBe(0)
-    expect(await readFile(receipt.metadata.outputPath, "utf8")).toContain("out")
-    expect(await readFile(receipt.metadata.outputPath, "utf8")).toContain("err")
-    const completed = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+    expect(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "output.log"), "utf8")).toContain("out")
+    expect(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "output.log"), "utf8")).toContain("err")
+    const completed = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
     expect(completed).toMatchObject({ state: "completed", exitCode: 0, timedOut: false })
     expect(JSON.stringify(completed)).not.toContain("printf out")
     expect(await Bun.file(join(jobRoot, receipt.metadata.jobId, "request.json")).exists()).toBe(false)
@@ -111,7 +112,7 @@ describe("provider-neutral canonical runtime", () => {
     expect(code).toBe(1)
     expect(settled).toBe(true)
     expect(signals).toEqual(["SIGTERM"])
-    const failed = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+    const failed = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
     expect(failed).toMatchObject({ state: "failed", error: "worker_failed" })
     expect(JSON.stringify(failed)).not.toContain(command)
   })
@@ -170,7 +171,7 @@ describe("provider-neutral canonical runtime", () => {
       expect(termDuringMetadataSync).toBe(true)
       let running: Record<string, unknown> | undefined
       for (let attempt = 0; attempt < 200; attempt++) {
-        const status = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+        const status = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
         if (status.state === "running") { running = status; break }
         await Bun.sleep(2)
       }
@@ -181,7 +182,7 @@ describe("provider-neutral canonical runtime", () => {
       fileHandlePrototype.sync = originalSync
     }
     expect(signals).toEqual(["SIGTERM", "SIGKILL"])
-    const failed = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+    const failed = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
     expect(failed).toMatchObject({ state: "failed", timedOut: true, signal: "SIGKILL" })
     expect(JSON.stringify(failed)).not.toContain(command)
   })
@@ -199,7 +200,7 @@ describe("provider-neutral canonical runtime", () => {
     })
     if (receipt.outcome !== "dispatched") throw new Error("Expected dispatched test setup")
     expect(await runAsyncBashWorker(receipt.metadata.jobId, { jobRoot })).toBe(1)
-    const failed = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+    const failed = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
     expect(failed).toMatchObject({ state: "failed", exitCode: 7, signal: null, timedOut: false })
     expect(JSON.stringify(failed)).not.toContain(command)
   })
@@ -216,7 +217,7 @@ describe("provider-neutral canonical runtime", () => {
     })
     if (receipt.outcome !== "dispatched") throw new Error("Expected dispatched test setup")
     expect(await runAsyncBashWorker(receipt.metadata.jobId, { jobRoot, bashExecutable: "/missing/waterbox-bash" })).toBe(1)
-    const failed = JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))
+    const failed = JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))
     expect(failed).toMatchObject({ state: "failed", error: "spawn_failed" })
     expect(JSON.stringify(failed)).not.toContain("true")
   })
@@ -237,12 +238,12 @@ describe("provider-neutral canonical runtime", () => {
     request.timeout = 50
     await writeFile(requestPath, JSON.stringify(request), { mode: 0o600 })
     const worker = runAsyncBashWorker(receipt.metadata.jobId, { jobRoot })
-    while ((await Bun.file(receipt.metadata.statusPath).text()).includes('"starting"')) {
-      JSON.parse(await Bun.file(receipt.metadata.statusPath).text())
+    while ((await Bun.file(jobFile(jobRoot, receipt.metadata.jobId, "status.json")).text()).includes('"starting"')) {
+      JSON.parse(await Bun.file(jobFile(jobRoot, receipt.metadata.jobId, "status.json")).text())
       await Bun.sleep(2)
     }
     expect(await worker).toBe(1)
-    expect(JSON.parse(await readFile(receipt.metadata.statusPath, "utf8"))).toMatchObject({ state: "failed", timedOut: true, signal: "SIGKILL" })
+    expect(JSON.parse(await readFile(jobFile(jobRoot, receipt.metadata.jobId, "status.json"), "utf8"))).toMatchObject({ state: "failed", timedOut: true, signal: "SIGKILL" })
   })
 
   test.skipIf(process.platform === "win32")("treats the provider sandbox as the boundary, not the workspace", async () => {

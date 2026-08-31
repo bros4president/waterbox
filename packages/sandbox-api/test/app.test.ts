@@ -42,6 +42,8 @@ function api(overrides: Partial<Record<keyof WaterboxCore, Function>> = {}, cred
     deleteSnapshot: method("deleteSnapshot", { ...snapshot, state: "deleted" }),
     initiateSecureFileTransfer: method("initiateSecureFileTransfer", transfer),
     consumeSecureFileTransfer: method("consumeSecureFileTransfer", delivery),
+    observeBashJob: method("observeBashJob", { jobId: `job_${"a".repeat(32)}`, state: "running", chunkBase64: "", nextOffset: 0, outputSize: 0 }),
+    cleanupBashJob: method("cleanupBashJob", undefined),
     executeTool: method("executeTool", (async function* () {
       yield { type: "result", title: "read", output: "ok", metadata: { filePath: "/workspace/a", offset: 1 } }
     })()),
@@ -216,7 +218,7 @@ describe("Waterbox API", () => {
         command: "sleep 20", workdir: "/workspace", timeout: 20_000,
         jobId: `job_${"a".repeat(32)}`,
         outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
-        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`,
       },
     } as const
     const events = async function* () { yield receipt }
@@ -228,6 +230,20 @@ describe("Waterbox API", () => {
     const body = await response.text()
     expect(body.endsWith("\n")).toBeTrue()
     expect(JSON.parse(body)).toEqual(receipt)
+  })
+
+  test("authenticates and forwards hidden Bash job observation endpoints", async () => {
+    const jobId = `job_${"a".repeat(32)}`
+    const { app, calls } = api()
+    const path = `/v1/internal/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}`
+
+    expect((await app.request(`${path}/observe`, { method: "POST", headers: jsonHeaders, body: '{"offset":3,"maxBytes":64}' })).status).toBe(200)
+    expect((await app.request(path, { method: "DELETE", headers: auth })).status).toBe(204)
+    expect(calls.filter(([name]) => name === "observeBashJob" || name === "cleanupBashJob").map(([name, identity, sandboxId, observedJobId, ...rest]) => [name, identity, sandboxId, observedJobId, ...rest.slice(0, name === "observeBashJob" ? 2 : 0)])).toEqual([
+      ["observeBashJob", { accountId: "acct_test" }, sandbox.sandboxId, jobId, 3, 64],
+      ["cleanupBashJob", { accountId: "acct_test" }, sandbox.sandboxId, jobId],
+    ])
+    expect((await app.request(`${path}/observe`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"offset":0,"maxBytes":1}' })).status).toBe(401)
   })
 
   test("returns a normal error envelope when the provider fails before its first event", async () => {

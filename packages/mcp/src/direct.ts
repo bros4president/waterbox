@@ -83,6 +83,8 @@ export async function createDirectBackend(
       initiateSecureFileTransfer: (sandboxId, signal) => core.initiateSecureFileTransfer(LOCAL_IDENTITY, sandboxId, signal),
       consumeSecureFileTransfer: (sandboxId, transferId, request, signal) => core.consumeSecureFileTransfer(LOCAL_IDENTITY, sandboxId, transferId, request, signal),
       executeTool: (sandboxId, toolName, arguments_, signal) => core.executeTool(LOCAL_IDENTITY, sandboxId, toolName, arguments_, signal),
+      observeBashJob: (sandboxId, jobId, offset, maxBytes, signal) => core.observeBashJob(LOCAL_IDENTITY, sandboxId, jobId, offset, maxBytes, signal),
+      cleanupBashJob: (sandboxId, jobId, signal) => core.cleanupBashJob(LOCAL_IDENTITY, sandboxId, jobId, signal),
       async close() {
         if (closed) return
         closed = true

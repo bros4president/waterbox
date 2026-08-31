@@ -29,6 +29,7 @@ import type {
   SnapshotRepository,
 } from "./ports.ts"
 import type {
+  BashJobObservation,
   SandboxProvider,
   ToolArgumentsByName,
   ToolEventByName,
@@ -435,6 +436,34 @@ export class SandboxService {
       throw mapProviderError(error)
     }
     return mapToolErrors(events, providerSignal)
+  }
+
+  async observeBashJob(identity: Identity, sandboxId: SandboxId, jobId: string, offset: number, maxBytes: number, signal: AbortSignal = NEVER_ABORTED): Promise<BashJobObservation> {
+    signal.throwIfAborted()
+    if (!/^job_[0-9a-f]{32}$/.test(jobId) || !Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65_536) throw new DomainError("invalid_request", "The Bash job observation is invalid")
+    const sandbox = await this.#getSandboxRecord(identity, sandboxId)
+    const capability = this.#provider(sandbox.provider).bashJobs
+    if (capability === undefined) throw new DomainError("unsupported_capability", "The provider does not support Bash job observation")
+    try {
+      return await capability.observe({ accountId: sandbox.accountId, providerRef: sandbox.providerRef, jobId, offset, maxBytes, signal })
+    } catch (error) {
+      if (signal.aborted) throw signal.reason
+      throw mapProviderError(error)
+    }
+  }
+
+  async cleanupBashJob(identity: Identity, sandboxId: SandboxId, jobId: string, signal: AbortSignal = NEVER_ABORTED): Promise<void> {
+    signal.throwIfAborted()
+    if (!/^job_[0-9a-f]{32}$/.test(jobId)) throw new DomainError("invalid_request", "The Bash job cleanup is invalid")
+    const sandbox = await this.#getSandboxRecord(identity, sandboxId)
+    const capability = this.#provider(sandbox.provider).bashJobs
+    if (capability === undefined) throw new DomainError("unsupported_capability", "The provider does not support Bash job observation")
+    try {
+      await capability.cleanup({ accountId: sandbox.accountId, providerRef: sandbox.providerRef, jobId, signal })
+    } catch (error) {
+      if (signal.aborted) throw signal.reason
+      throw mapProviderError(error)
+    }
   }
 
   async initiateSecureFileTransfer(identity: Identity, sandboxId: SandboxId, signal: AbortSignal = NEVER_ABORTED): Promise<SecureTransferInitiated> {

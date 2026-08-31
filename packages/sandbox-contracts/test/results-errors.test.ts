@@ -69,7 +69,6 @@ describe("tool results and events", () => {
         jobId: "job_0123456789abcdef0123456789abcdef",
         outputPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/output.log",
         statusPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
-        pollAfterMs: 2_000,
       },
     }).success).toBe(true)
     expect(BashToolResultSchema.safeParse({
@@ -82,7 +81,6 @@ describe("tool results and events", () => {
         jobId: "job_0123456789abcdef0123456789abcdef",
         outputPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/output.log",
         statusPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
-        pollAfterMs: 2_000,
       },
     }).success).toBe(true)
   })
@@ -107,6 +105,14 @@ describe("tool results and events", () => {
       metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 12, outputTruncated: "no" },
     }).success).toBe(false)
     expect(BashToolEventSchema.safeParse({ type: "result", result: { title: "complete", output: "ok", metadata: {} } }).success).toBe(false)
+    const jobId = "job_0123456789abcdef0123456789abcdef"
+    const base = { title: "dispatched", output: "recovery", outcome: "dispatched", metadata: { command: "x", workdir: ".", jobId, outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json` } }
+    for (const metadata of [
+      { ...base.metadata, outputPath: `/tmp/${jobId}/output.log`, statusPath: `/tmp/${jobId}/status.json` },
+      { ...base.metadata, outputPath: `/run/waterbox/bash-jobs/../bash-jobs/${jobId}/output.log` },
+      { ...base.metadata, statusPath: `/run/waterbox/bash-jobs/${jobId}/../${jobId}/status.json` },
+      { ...base.metadata, outputPath: `/run/waterbox/bash-jobs//${jobId}/output.log` },
+    ]) expect(BashToolResultSchema.safeParse({ ...base, metadata }).success).toBe(false)
   })
 
   test("rejects non-canonical tool names and malformed types", () => {

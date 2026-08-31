@@ -32,6 +32,8 @@ export type WaterboxCore = Pick<SandboxService,
   | "initiateSecureFileTransfer"
   | "consumeSecureFileTransfer"
   | "executeTool"
+  | "observeBashJob"
+  | "cleanupBashJob"
 >
 
 export interface WaterboxApiDependencies {

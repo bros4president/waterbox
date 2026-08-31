@@ -6,7 +6,6 @@ import { relative, resolve, sep } from "node:path"
 import { BashToolArgumentsSchema, type BashToolArguments, type BashToolResult } from "@waterbox/contracts"
 import { RuntimeError } from "./runtime.ts"
 
-export const ASYNC_BASH_POLL_AFTER_MS = 2_000
 export const DEFAULT_BASH_JOBS_ROOT = "/run/waterbox/bash-jobs"
 const DEFAULT_BASH_YIELD_AFTER_MS = 15_000
 const MAX_BASH_OUTPUT_BYTES = 1_048_576
@@ -29,6 +28,19 @@ interface JobPaths {
   requestPath: string
   outputPath: string
   statusPath: string
+}
+
+export interface AsyncBashObservation {
+  jobId: string
+  state: "starting" | "running" | "completed" | "failed"
+  chunkBase64: string
+  nextOffset: number
+  outputSize: number
+  exitCode?: number | null
+  signal?: string | null
+  timedOut?: boolean
+  durationMs?: number
+  error?: "spawn_failed" | "worker_failed"
 }
 
 function pathsFor(jobRoot: string, jobId: string): JobPaths {
@@ -135,6 +147,71 @@ async function readTerminalStatus(path: string): Promise<TerminalWorkerStatus> {
     throw new Error("Invalid Bash worker terminal status")
   }
   return status as unknown as TerminalWorkerStatus
+}
+
+async function readCorrelatedStatus(paths: JobPaths, jobId: string): Promise<Record<string, unknown>> {
+  const statusFile = await readBounded(paths.statusPath, MAX_STATUS_BYTES)
+  if (statusFile.truncated) throw new Error("Oversized Bash worker status")
+  const status: unknown = JSON.parse(statusFile.value)
+  if (typeof status !== "object" || status === null || Array.isArray(status)) throw new Error("Invalid Bash worker status")
+  const value = status as Record<string, unknown>
+  if (value.jobId !== jobId || value.outputPath !== paths.outputPath || !["starting", "running", "completed", "failed"].includes(String(value.state))) {
+    throw new Error("Mismatched Bash worker status")
+  }
+  const common = ["state", "jobId", "outputPath"]
+  if (value.state === "starting") {
+    if (!exactKeys(value, [...common, "createdAt"], ["timeout"]) || typeof value.createdAt !== "string" || (value.timeout !== undefined && !Number.isInteger(value.timeout))) throw new Error("Invalid Bash worker status")
+  } else if (value.state === "running") {
+    if (!exactKeys(value, [...common, "startedAt"], ["timeout"]) || typeof value.startedAt !== "string" || (value.timeout !== undefined && !Number.isInteger(value.timeout))) throw new Error("Invalid Bash worker status")
+  } else if (value.error !== undefined) {
+    if (value.state !== "failed" || !exactKeys(value, [...common, "error", "finishedAt"]) || (value.error !== "spawn_failed" && value.error !== "worker_failed") || typeof value.finishedAt !== "string") throw new Error("Invalid Bash worker status")
+  } else if (!exactKeys(value, [...common, "exitCode", "signal", "timedOut", "durationMs", "finishedAt"])
+    || (typeof value.exitCode !== "number" && value.exitCode !== null) || (typeof value.signal !== "string" && value.signal !== null)
+    || typeof value.timedOut !== "boolean" || typeof value.durationMs !== "number" || value.durationMs < 0 || typeof value.finishedAt !== "string") {
+    throw new Error("Invalid Bash worker status")
+  }
+  return value
+}
+
+function exactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+  const allowed = new Set([...required, ...optional])
+  return required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => allowed.has(key))
+}
+
+export async function observeAsyncBashJob(jobId: string, offset: number, maxBytes: number, options: OneShotBashOptions = {}): Promise<AsyncBashObservation> {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 65_536) throw new Error("Invalid async Bash observation")
+  const paths = pathsFor(resolve(options.jobRoot ?? DEFAULT_BASH_JOBS_ROOT), jobId)
+  const status = await readCorrelatedStatus(paths, jobId)
+  const handle = await open(paths.outputPath, "r")
+  try {
+    const before = await handle.stat()
+    if (offset > before.size) throw new Error("Invalid async Bash output offset")
+    const buffer = Buffer.alloc(Math.min(maxBytes, before.size - offset))
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
+    const outputSize = (await handle.stat()).size
+    return {
+      jobId,
+      state: status.state as AsyncBashObservation["state"],
+      chunkBase64: buffer.subarray(0, bytesRead).toString("base64"),
+      nextOffset: offset + bytesRead,
+      outputSize,
+      ...(typeof status.exitCode === "number" || status.exitCode === null ? { exitCode: status.exitCode as number | null } : {}),
+      ...(typeof status.signal === "string" || status.signal === null ? { signal: status.signal as string | null } : {}),
+      ...(typeof status.timedOut === "boolean" ? { timedOut: status.timedOut } : {}),
+      ...(typeof status.durationMs === "number" ? { durationMs: status.durationMs } : {}),
+      ...(status.error === "spawn_failed" || status.error === "worker_failed" ? { error: status.error } : {}),
+    }
+  } finally {
+    await handle.close()
+  }
+}
+
+export async function cleanupAsyncBashJob(jobId: string, options: OneShotBashOptions = {}): Promise<boolean> {
+  const paths = pathsFor(resolve(options.jobRoot ?? DEFAULT_BASH_JOBS_ROOT), jobId)
+  const status = await readCorrelatedStatus(paths, jobId)
+  if (status.state !== "completed" && status.state !== "failed") return false
+  await rm(paths.directory, { recursive: true, force: true })
+  return true
 }
 
 async function waitForWorker(child: ChildProcess, signal: AbortSignal | undefined, yieldAfterMs: number): Promise<"completed" | "yielded"> {
@@ -269,9 +346,8 @@ export async function runOneShotBash(
       workdir: displayPath(root, cwd),
       ...(args.timeout === undefined ? {} : { timeout: args.timeout }),
       jobId,
-      outputPath: paths.outputPath,
-      statusPath: paths.statusPath,
-      pollAfterMs: ASYNC_BASH_POLL_AFTER_MS,
+      outputPath: pathsFor(DEFAULT_BASH_JOBS_ROOT, jobId).outputPath,
+      statusPath: pathsFor(DEFAULT_BASH_JOBS_ROOT, jobId).statusPath,
     },
   }
 }

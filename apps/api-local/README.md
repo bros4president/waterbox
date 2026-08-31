@@ -41,8 +41,10 @@ Every one-shot Bash call starts a detached worker. Quick commands return a compl
 longer-running commands may yield a dispatched receipt. `timeout`, when present, is only an
 execution deadline. The receipt means the worker was spawned, not that Bash started or
 succeeded. `statusPath` reports execution state and `outputPath` receives output continuously.
-The caller decides whether and when to inspect either path; repeated reads can duplicate
-tokens and pollute model context. The API and provider do not poll on the caller's behalf.
+The public CLI/API result remains transport-level recovery information. Supported MCP absorbs
+receipts through authenticated internal byte-observation endpoints, drains the same job once,
+and returns one completed MCP result. Provider and core operations only sample; MCP owns the
+polling loop. The internal endpoints are not public tools or part of the OpenAPI surface.
 
 The initiation response contains `transferId`, an `age1...` recipient, algorithm `age-x25519`, and a fixed ten-minute `expiresAt`. Encrypt an existing local file with a standard age implementation, Base64-encode the binary age file, and consume the transfer once before expiry. Plaintext is limited to 1 MiB. The API and provider transport handle only ciphertext; the destination is decrypted and readable inside the sandbox. Creating another transfer is the recovery path after expiry or an uncertain consumption outcome.
 

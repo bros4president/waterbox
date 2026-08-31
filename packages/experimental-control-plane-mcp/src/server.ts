@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import {
   BashToolEventSchema,
+  BashToolResultSchema,
   EditToolEventSchema,
   GlobToolEventSchema,
   GrepToolEventSchema,
@@ -22,6 +23,8 @@ export interface ExperimentalMcpOptions {
   idempotencyKey: string
   statePath?: string
 }
+
+const BASH_CLEANUP_DEADLINE_MS = 5_000
 
 const tools = [
   {
@@ -73,8 +76,50 @@ const tools = [
       required: ["command"],
       additionalProperties: false,
     },
+    outputSchema: bashOutputSchema(),
   },
 ]
+
+function bashOutputSchema() {
+  const result = {
+    type: "object" as const,
+    properties: { title: { type: "string" as const }, output: { type: "string" as const } },
+    required: ["title", "output"],
+    additionalProperties: false,
+  }
+  const commonMetadata = {
+    command: { type: "string" as const }, description: { type: "string" as const }, workdir: { type: "string" as const },
+  }
+  return {
+    type: "object" as const,
+    oneOf: [
+      {
+        ...result,
+        properties: {
+          ...result.properties, outcome: { const: "completed" },
+          metadata: {
+            type: "object" as const,
+            properties: { ...commonMetadata, exitCode: { type: ["integer", "null"] }, signal: { type: ["string", "null"] }, timedOut: { type: "boolean" as const }, aborted: { type: "boolean" as const }, durationMs: { type: "number" as const, minimum: 0 }, outputTruncated: { type: "boolean" as const } },
+            required: ["command", "workdir", "exitCode", "signal", "timedOut", "aborted", "durationMs", "outputTruncated"], additionalProperties: false,
+          },
+        },
+        required: [...result.required, "outcome", "metadata"],
+      },
+      {
+        ...result,
+        properties: {
+          ...result.properties, outcome: { const: "dispatched" },
+          metadata: {
+            type: "object" as const,
+            properties: { ...commonMetadata, timeout: { type: "integer" as const, minimum: 1, maximum: 2_147_483_647 }, jobId: { type: "string" as const, pattern: "^job_[0-9a-f]{32}$" }, outputPath: { type: "string" as const }, statusPath: { type: "string" as const } },
+            required: ["command", "workdir", "jobId", "outputPath", "statusPath"], additionalProperties: false,
+          },
+        },
+        required: [...result.required, "outcome", "metadata"],
+      },
+    ],
+  }
+}
 
 export function parseExperimentalMcpOptions(environment: Record<string, string | undefined> = process.env): ExperimentalMcpOptions {
   const rawUrl = environment.WATERBOX_API_URL
@@ -92,7 +137,7 @@ export function parseExperimentalMcpOptions(environment: Record<string, string |
   return { apiUrl, apiKey, idempotencyKey, ...(environment.WATERBOX_MCP_STATE_PATH ? { statePath: environment.WATERBOX_MCP_STATE_PATH } : {}) }
 }
 
-export function createExperimentalMcpServer(options: ExperimentalMcpOptions, fetcher: typeof fetch = fetch): Server {
+export function createExperimentalMcpServer(options: ExperimentalMcpOptions, fetcher: typeof fetch = fetch, runtime: { bashObservationIntervalMs?: number; bashCleanupDeadlineMs?: number } = {}): Server {
   let active: Sandbox | undefined
   const calls: Partial<Record<ToolName, { attempted: number; completed: number }>> = {}
   const persist = async () => {
@@ -126,7 +171,7 @@ export function createExperimentalMcpServer(options: ExperimentalMcpOptions, fet
           body: JSON.stringify(request.params.arguments ?? {}),
           signal: extra.signal,
         })
-        const result = request.params.name === "bash" ? await readBashResult(response) : await readToolResult(request.params.name, response)
+        const result = request.params.name === "bash" ? await readBashResult(response, options, fetcher, active.sandboxId, extra, runtime.bashObservationIntervalMs, runtime.bashCleanupDeadlineMs) : await readToolResult(request.params.name, response)
         counts.completed += 1
         await persist()
         return result
@@ -148,7 +193,7 @@ async function apiFetch(options: ExperimentalMcpOptions, fetcher: typeof fetch, 
   return response
 }
 
-async function readBashResult(response: Response) {
+async function readBashResult(response: Response, options: ExperimentalMcpOptions, fetcher: typeof fetch, sandboxId: string, extra: { signal: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }, intervalMs?: number, cleanupDeadlineMs?: number) {
   if (!response.body || response.headers.get("content-type")?.split(";", 1)[0] !== "application/x-ndjson") throw new Error("Waterbox bash returned an invalid stream")
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
   const events: Array<ReturnType<typeof BashToolEventSchema.parse>> = []
@@ -169,11 +214,112 @@ async function readBashResult(response: Response) {
   const final = events.at(-1)
   if (!final || final.type !== "result") throw new Error("Waterbox bash stream ended without a result")
   const output = events.filter(event => event.type === "stdout" || event.type === "stderr").map(event => event.data).join("")
-  const displayedOutput = final.outcome === "dispatched" ? final.output : output
+  if (final.outcome === "dispatched") return absorbReceipt(options, fetcher, sandboxId, final, extra, intervalMs, cleanupDeadlineMs)
+  const displayedOutput = output || final.output
+  const structuredContent = BashToolResultSchema.parse({ title: final.title, outcome: "completed", output: displayedOutput, metadata: final.metadata })
   return {
-    content: [{ type: "text" as const, text: `${displayedOutput}${displayedOutput && !displayedOutput.endsWith("\n") ? "\n" : ""}${JSON.stringify(final.metadata)}` }],
-    ...(final.outcome === "completed" && (final.metadata.exitCode !== 0 || final.metadata.timedOut || final.metadata.aborted) ? { isError: true } : {}),
+    content: [{ type: "text" as const, text: displayedOutput }],
+    structuredContent,
+    ...(final.metadata.exitCode !== 0 || final.metadata.timedOut || final.metadata.aborted ? { isError: true } : {}),
   }
+}
+
+async function absorbReceipt(options: ExperimentalMcpOptions, fetcher: typeof fetch, sandboxId: string, receipt: Extract<ReturnType<typeof BashToolEventSchema.parse>, { type: "result"; outcome: "dispatched" }>, extra: { signal: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }, intervalMs = 1_000, cleanupDeadlineMs = BASH_CLEANUP_DEADLINE_MS) {
+  let offset = 0, retained = "", retainedBytes = 0
+  let outputTruncated = false
+  const decoder = new TextDecoder("utf-8")
+  const stopHeartbeat = startProgressHeartbeat(extra, intervalMs)
+  try {
+    while (true) {
+      extra.signal.throwIfAborted()
+      const response = await apiFetch(options, fetcher, `/v1/internal/sandboxes/${encodeURIComponent(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}/observe`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ offset, maxBytes: 65_536 }), signal: extra.signal,
+      })
+      const sample = validateObservation(await response.json(), receipt.metadata.jobId, offset)
+      const chunk = Buffer.from(sample.chunkBase64, "base64")
+      offset = sample.nextOffset
+      const drained = (sample.state === "completed" || sample.state === "failed") && offset === sample.outputSize
+      const kept = retainDecoded(retained, retainedBytes, outputTruncated, decoder.decode(chunk, { stream: !drained }))
+      retained = kept.value; retainedBytes = kept.bytes; outputTruncated = kept.truncated
+      if (drained) {
+        if (sample.error !== undefined || sample.exitCode === undefined || sample.timedOut === undefined || sample.durationMs === undefined) throw new Error("Invalid terminal observation")
+        const finalOutput = retained || (sample.timedOut ? "Command timed out" : "Command completed without output")
+        const metadata = { command: receipt.metadata.command, ...(receipt.metadata.description === undefined ? {} : { description: receipt.metadata.description }), workdir: receipt.metadata.workdir, exitCode: sample.exitCode, signal: sample.signal ?? null, timedOut: sample.timedOut, aborted: false, durationMs: sample.durationMs, outputTruncated }
+        const structuredContent = BashToolResultSchema.parse({ title: receipt.metadata.description ?? "Bash command", outcome: "completed", output: finalOutput, metadata })
+        cleanupDetached(signal => apiFetch(options, fetcher, `/v1/internal/sandboxes/${encodeURIComponent(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}`, { method: "DELETE", signal }).then(() => undefined), cleanupDeadlineMs)
+        return { content: [{ type: "text" as const, text: finalOutput }], structuredContent, ...(metadata.exitCode !== 0 || metadata.timedOut ? { isError: true } : {}) }
+      }
+      if (chunk.byteLength === 0) await abortableSleep(1_000, extra.signal)
+    }
+  } catch {
+    const output = `Observation stopped before completion. Job ${receipt.metadata.jobId} may still be running. Recovery statusPath: ${receipt.metadata.statusPath}\nRecovery outputPath: ${receipt.metadata.outputPath}`
+    const structuredContent = BashToolResultSchema.parse({ title: receipt.title, outcome: "dispatched", output, metadata: receipt.metadata })
+    return { content: [{ type: "text" as const, text: output }], structuredContent }
+  } finally {
+    stopHeartbeat()
+  }
+}
+
+function cleanupDetached(operation: (signal: AbortSignal) => Promise<void>, deadlineMs: number): void {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(new DOMException("Bash cleanup timed out", "TimeoutError")), deadlineMs)
+  timer.unref()
+  try {
+    void operation(controller.signal).catch(() => undefined).finally(() => clearTimeout(timer))
+  } catch {
+    clearTimeout(timer)
+  }
+}
+
+function startProgressHeartbeat(extra: { _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }, intervalMs: number): () => void {
+  const progressToken = extra._meta?.progressToken
+  if (progressToken === undefined) return () => {}
+  let stopped = false, progress = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const tick = async () => {
+    progress += 1
+    try {
+      await extra.sendNotification({ method: "notifications/progress", params: { progressToken, progress, message: "Remote operation in progress" } })
+    } catch {}
+    if (!stopped) timer = setTimeout(() => { void tick() }, intervalMs)
+  }
+  void tick()
+  return () => { stopped = true; if (timer !== undefined) clearTimeout(timer) }
+}
+
+function validateObservation(value: unknown, jobId: string, offset: number): { jobId: string; state: "starting" | "running" | "completed" | "failed"; chunkBase64: string; nextOffset: number; outputSize: number; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; error?: string } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Invalid observation")
+  const sample = value as Record<string, unknown>
+  const allowed = new Set(["jobId", "state", "chunkBase64", "nextOffset", "outputSize", "exitCode", "signal", "timedOut", "durationMs", "error"])
+  if (Object.keys(sample).some(key => !allowed.has(key)) || sample.jobId !== jobId || !["starting", "running", "completed", "failed"].includes(String(sample.state)) || typeof sample.chunkBase64 !== "string"
+    || !Number.isSafeInteger(sample.nextOffset) || !Number.isSafeInteger(sample.outputSize) || Number(sample.nextOffset) < offset || Number(sample.nextOffset) > offset + 65_536 || Number(sample.outputSize) < Number(sample.nextOffset)
+    || (sample.exitCode !== undefined && sample.exitCode !== null && !Number.isInteger(sample.exitCode)) || (sample.signal !== undefined && sample.signal !== null && typeof sample.signal !== "string")
+    || (sample.timedOut !== undefined && typeof sample.timedOut !== "boolean") || (sample.durationMs !== undefined && (typeof sample.durationMs !== "number" || !Number.isFinite(sample.durationMs) || sample.durationMs < 0))
+    || (sample.error !== undefined && sample.error !== "spawn_failed" && sample.error !== "worker_failed")) throw new Error("Invalid observation")
+  const chunk = Buffer.from(sample.chunkBase64, "base64")
+  if (chunk.toString("base64") !== sample.chunkBase64 || chunk.byteLength !== Number(sample.nextOffset) - offset) throw new Error("Invalid observation")
+  return sample as ReturnType<typeof validateObservation>
+}
+
+function retainDecoded(value: string, bytes: number, truncated: boolean, decoded: string): { value: string; bytes: number; truncated: boolean } {
+  if (truncated) return { value, bytes, truncated }
+  let append = ""
+  for (const character of decoded) {
+    const size = Buffer.byteLength(character, "utf8")
+    if (bytes + size > 1_048_576) return { value: value + append, bytes, truncated: true }
+    append += character; bytes += size
+  }
+  return { value: value + append, bytes, truncated: false }
+}
+
+function abortableSleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted()
+    const timer = setTimeout(done, milliseconds)
+    function done() { signal.removeEventListener("abort", abort); resolve() }
+    function abort() { clearTimeout(timer); reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError")) }
+    signal.addEventListener("abort", abort, { once: true })
+  })
 }
 
 async function readToolResult(name: Exclude<ToolName, "bash">, response: Response) {

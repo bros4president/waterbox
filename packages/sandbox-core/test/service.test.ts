@@ -699,7 +699,7 @@ describe("execution and reconciliation", () => {
         command: "sleep 20", workdir: "/workspace", timeout: 20_000,
         jobId: `job_${"a".repeat(32)}`,
         outputPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/output.log`,
-        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`, pollAfterMs: 2_000,
+        statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`,
       },
     } as const
     const provider = new FakeSandboxProvider()
@@ -708,6 +708,31 @@ describe("execution and reconciliation", () => {
     const sandbox = await service.createSandbox(alice, {})
 
     expect(await collect(await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "sleep 20", timeout: 20_000 }))).toEqual([receipt])
+  })
+
+  test("ownership-checks Bash job samples and cleanup before using the optional provider capability", async () => {
+    const calls: Array<{ operation: string; accountId: string; jobId: string; offset?: number; maxBytes?: number }> = []
+    class BashJobProvider extends FakeSandboxProvider {
+      readonly bashJobs = {
+        observe: async (input: any) => {
+          calls.push({ operation: "observe", accountId: input.accountId, jobId: input.jobId, offset: input.offset, maxBytes: input.maxBytes })
+          return { jobId: input.jobId, state: "running" as const, chunkBase64: "", nextOffset: input.offset, outputSize: input.offset }
+        },
+        cleanup: async (input: any) => { calls.push({ operation: "cleanup", accountId: input.accountId, jobId: input.jobId }) },
+      }
+    }
+    const provider = new BashJobProvider()
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    const jobId = `job_${"a".repeat(32)}`
+
+    await expectDomainError(service.observeBashJob(bob, sandbox.sandboxId, jobId, 0, 64), "not_found")
+    expect(await service.observeBashJob(alice, sandbox.sandboxId, jobId, 3, 64)).toMatchObject({ jobId, nextOffset: 3 })
+    await service.cleanupBashJob(alice, sandbox.sandboxId, jobId)
+    expect(calls).toEqual([
+      { operation: "observe", accountId: alice.accountId, jobId, offset: 3, maxBytes: 64 },
+      { operation: "cleanup", accountId: alice.accountId, jobId },
+    ])
   })
 
   test("preserves ambiguous tool execution when cancellation races with dispatch", async () => {

@@ -126,7 +126,7 @@ export const CompletedBashToolResultSchema = z.object({
   }).strict(),
 }).strict()
 
-export const DispatchedBashToolResultSchema = z.object({
+const DispatchedBashToolResultObjectSchema = z.object({
   ...ToolResultBaseShape,
   outcome: z.literal("dispatched"),
   metadata: z.object({
@@ -137,9 +137,17 @@ export const DispatchedBashToolResultSchema = z.object({
     jobId: z.string().regex(/^job_[0-9a-f]{32}$/),
     outputPath: FilePathSchema,
     statusPath: FilePathSchema,
-    pollAfterMs: PositiveIntegerSchema,
   }).strict(),
 }).strict()
+
+function validateReceiptPaths(value: z.infer<typeof DispatchedBashToolResultObjectSchema>, context: z.RefinementCtx): void {
+  const root = `/run/waterbox/bash-jobs/${value.metadata.jobId}`
+  if (value.metadata.outputPath !== `${root}/output.log` || value.metadata.statusPath !== `${root}/status.json`) {
+    context.addIssue({ code: "custom", path: ["metadata"], message: "Recovery paths must match jobId" })
+  }
+}
+
+export const DispatchedBashToolResultSchema = DispatchedBashToolResultObjectSchema.superRefine(validateReceiptPaths)
 
 export const BashToolResultSchema = z.discriminatedUnion("outcome", [
   CompletedBashToolResultSchema,
@@ -156,7 +164,7 @@ export const BashToolEventSchema = z.union([
   z.object({ type: z.literal("stdout"), data: z.string() }).strict(),
   z.object({ type: z.literal("stderr"), data: z.string() }).strict(),
   CompletedBashToolResultSchema.extend({ type: z.literal("result") }),
-  DispatchedBashToolResultSchema.extend({ type: z.literal("result") }),
+  DispatchedBashToolResultObjectSchema.extend({ type: z.literal("result") }).superRefine(validateReceiptPaths),
 ])
 
 export type ToolName = z.infer<typeof ToolNameSchema>

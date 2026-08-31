@@ -8,7 +8,7 @@ import {
   ProviderError, type ProviderCreateSandboxInput, type ProviderCreateSnapshotInput,
   type ProviderConsumeSecureTransferInput, type ProviderExecuteInput, type ProviderOperationInput, type ProviderSandboxObservation,
   type ProviderSnapshotObservation, type ProviderSnapshotOperationInput,
-  type SandboxProvider, type ToolEventByName,
+  type SandboxProvider, type ToolEventByName, type BashJobObservation, type ProviderObserveBashJobInput, type ProviderCleanupBashJobInput,
 } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
 import { CliProtocolError, encodeInvocation, encodeSecureTransferInput } from "@waterbox/cli/protocol"
@@ -67,6 +67,10 @@ export class BoxSandboxProvider implements SandboxProvider {
   readonly secureFileTransfer = {
     initiate: (input: ProviderOperationInput) => this.#initiateSecureFileTransfer(input),
     consume: (input: ProviderConsumeSecureTransferInput) => this.#consumeSecureFileTransfer(input),
+  }
+  readonly bashJobs = {
+    observe: (input: ProviderObserveBashJobInput) => this.#observeBashJob(input),
+    cleanup: (input: ProviderCleanupBashJobInput) => this.#cleanupBashJob(input),
   }
   readonly #config: Readonly<BoxProviderConfig>
   readonly #fetch: BoxProviderFetch
@@ -225,6 +229,29 @@ export class BoxSandboxProvider implements SandboxProvider {
     }
   }
 
+  async #observeBashJob(input: ProviderObserveBashJobInput): Promise<BashJobObservation> {
+    validateBashJobInput(input, true)
+    const ref = sandboxRef(input.providerRef)
+    const command = commandResponse(await this.#toolCommand(ref.boxId, `/usr/local/bin/waterbox __internal-bash-observe ${input.jobId} ${input.offset} ${input.maxBytes}`, input.signal))
+    return bashJobObservation(this.#internalBashJobResult(command), input.jobId, input.offset, input.maxBytes)
+  }
+
+  async #cleanupBashJob(input: ProviderCleanupBashJobInput): Promise<void> {
+    validateBashJobInput(input, false)
+    const ref = sandboxRef(input.providerRef)
+    const command = commandResponse(await this.#toolCommand(ref.boxId, `/usr/local/bin/waterbox __internal-bash-cleanup ${input.jobId}`, input.signal))
+    const value = this.#internalBashJobResult(command)
+    if (!isExactObject(value, ["jobId", "cleaned"]) || value.jobId !== input.jobId || value.cleaned !== true) throw new ProviderError("failure", "Bash job cleanup failed")
+  }
+
+  #internalBashJobResult(command: ReturnType<typeof commandResponse>): unknown {
+    if (command.timedOut || command.stdoutTruncated || command.stderrTruncated || meaningfulCommandStderr(command.stderr) !== "" || !command.success || command.exitCode !== 0) throw new ProviderError("failure", "Bash job observation failed")
+    try {
+      if (!command.stdout.endsWith("\n") || command.stdout.slice(0, -1).includes("\n")) throw new Error()
+      return JSON.parse(command.stdout.slice(0, -1))
+    } catch { throw new ProviderError("failure", "Bash job observation failed") }
+  }
+
   async #toolCommand(boxId: string, command: string, signal: AbortSignal): Promise<unknown> {
     signal.throwIfAborted()
     let response: Response
@@ -313,6 +340,20 @@ function actionBox(value: unknown, id: string, type: "box.stopping" | "box.resum
 function namedSnapshot(value: unknown, type: "snapshot.named.saving" | "snapshot.named.info", name: string, sourceBoxId?: string): { name: string; status: typeof SNAPSHOT_STATES[number] } { if (!isObject(value) || value.ok !== true || value.type !== type || (type === "snapshot.named.saving" && value.status !== "saving") || !isObject(value.snapshot) || value.snapshot.name !== name || !BOX_ID.test(String(value.snapshot.sourceBoxId)) || (sourceBoxId !== undefined && value.snapshot.sourceBoxId !== sourceBoxId) || !SNAPSHOT_STATES.includes(value.snapshot.status as any) || (value.snapshot.status === "ready" && !strictNonempty(value.snapshot.snapshotId)) || (value.snapshot.snapshotId !== undefined && !strictNonempty(value.snapshot.snapshotId))) throw new ProviderError("failure", "Box returned an invalid response"); return { name, status: value.snapshot.status as any } }
 function namedSnapshotDeleted(value: unknown, name: string): void { const envelope = success(value, "snapshot.named.deleted"); if (envelope.name !== name || envelope.status !== "deleted") throw new ProviderError("failure", "Box returned a mismatched response") }
 function commandResponse(value: unknown): { success: boolean; exitCode: number | null; stdout: string; stderr: string; timedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean } { if (!isObject(value) || value.ok !== true || value.type !== "command.finished" || typeof value.success !== "boolean" || !(typeof value.exitCode === "number" || value.exitCode === null) || typeof value.stdout !== "string" || typeof value.stderr !== "string" || typeof value.timedOut !== "boolean" || (value.stdoutTruncated !== undefined && typeof value.stdoutTruncated !== "boolean") || (value.stderrTruncated !== undefined && typeof value.stderrTruncated !== "boolean")) throw ambiguous(); return { success: value.success, exitCode: value.exitCode, stdout: value.stdout, stderr: value.stderr, timedOut: value.timedOut, stdoutTruncated: value.stdoutTruncated === true, stderrTruncated: value.stderrTruncated === true } }
+function bashJobObservation(value: unknown, jobId: string, offset: number, maxBytes: number): BashJobObservation {
+  if (!isExactObject(value, ["jobId", "state", "chunkBase64", "nextOffset", "outputSize"], ["exitCode", "signal", "timedOut", "durationMs", "error"])
+    || value.jobId !== jobId || !["starting", "running", "completed", "failed"].includes(String(value.state))
+    || typeof value.chunkBase64 !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value.chunkBase64)
+    || !Number.isSafeInteger(value.nextOffset) || !Number.isSafeInteger(value.outputSize)
+    || Number(value.nextOffset) < offset || Number(value.nextOffset) > offset + maxBytes || Number(value.outputSize) < Number(value.nextOffset)
+    || (value.exitCode !== undefined && value.exitCode !== null && !Number.isInteger(value.exitCode))
+    || (value.signal !== undefined && value.signal !== null && typeof value.signal !== "string")
+    || (value.timedOut !== undefined && typeof value.timedOut !== "boolean") || (value.durationMs !== undefined && (typeof value.durationMs !== "number" || value.durationMs < 0))
+    || (value.error !== undefined && value.error !== "spawn_failed" && value.error !== "worker_failed")) throw new ProviderError("failure", "Bash job observation failed")
+  const chunk = Buffer.from(value.chunkBase64, "base64")
+  if (chunk.toString("base64") !== value.chunkBase64 || chunk.byteLength !== Number(value.nextOffset) - offset) throw new ProviderError("failure", "Bash job observation failed")
+  return value as unknown as BashJobObservation
+}
 function cliError(stdout: string): { status: number; code: string } | undefined { try { const value = JSON.parse(stdout.trim()); return isExactObject(value, ["protocolVersion", "type", "status", "code"]) && value.protocolVersion === 2 && value.type === "error" && Number.isInteger(value.status) && typeof value.code === "string" ? { status: Number(value.status), code: value.code } : undefined } catch { return undefined } }
 function deletionOperation(value: unknown, type: "box.deleting" | "deletion.operation", targetId: string, operationId?: string): { id: string; status: "pending" | "processing" | "blocked" | "completed" } { if (!isObject(value) || value.ok !== true || value.type !== type || !isObject(value.operation)) throw new ProviderError("failure", "Box returned an invalid deletion response"); const op = value.operation; if (!DELETION_ID.test(String(op.id)) || (operationId !== undefined && op.id !== operationId) || op.kind !== "box" || op.targetId !== targetId || !["pending", "processing", "blocked", "completed"].includes(String(op.status))) throw new ProviderError("failure", "Box returned a mismatched deletion response"); return { id: op.id as string, status: op.status as any } }
 function writtenFile(value: unknown, expectedPath: string, expectedSize: number): void { const envelope = success(value, "file.written"); if (envelope.success !== true || typeof envelope.path !== "string" || resolveBoxPath(envelope.path) !== expectedPath || envelope.encoding !== "base64" || envelope.size !== expectedSize) throw new ProviderError("failure", "Box returned an invalid file upload response") }
@@ -381,6 +422,12 @@ function validateExecuteInput(value: unknown): asserts value is ProviderExecuteI
 }
 function validateConsumeSecureTransferInput(value: unknown): asserts value is ProviderConsumeSecureTransferInput {
   if (!isObject(value) || !isAbortSignal(value.signal) || typeof value.transferId !== "string" || typeof value.targetPath !== "string" || typeof value.ciphertext !== "string") invalidInput()
+  value.signal.throwIfAborted()
+  sandboxRef(value.providerRef as JsonValue)
+}
+function validateBashJobInput(value: unknown, observation: boolean): asserts value is ProviderObserveBashJobInput | ProviderCleanupBashJobInput {
+  if (!isObject(value) || !isAbortSignal(value.signal) || typeof value.jobId !== "string" || !/^job_[0-9a-f]{32}$/.test(value.jobId)) invalidInput()
+  if (observation && (!Number.isSafeInteger(value.offset) || Number(value.offset) < 0 || !Number.isSafeInteger(value.maxBytes) || Number(value.maxBytes) < 1 || Number(value.maxBytes) > 65_536)) invalidInput()
   value.signal.throwIfAborted()
   sandboxRef(value.providerRef as JsonValue)
 }

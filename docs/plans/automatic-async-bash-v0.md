@@ -107,8 +107,7 @@ Dispatched:
     "timeout": 120000,
     "jobId": "job_0123456789abcdef0123456789abcdef",
     "outputPath": "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/output.log",
-    "statusPath": "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
-    "pollAfterMs": 2000
+    "statusPath": "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json"
   }
 }
 ```
@@ -598,3 +597,22 @@ lost receipt and preserving files.
   snapshots, no V5, and exactly one ready named snapshot, rebuilt `waterbox-system-v6`.
   Ignored metadata was regenerated as schema V2/CLI protocol V2. No provider identifiers,
   credentials, protected URLs, commands, headers, or serialized invocations were retained.
+
+## Current-Presentation Receipt Absorption
+
+- 2026-08-29: Phase 1 current-presentation absorption supersedes the earlier MCP presentation
+  notes without changing CLI protocol V2 or detached execution. Dispatched content remains a
+  recovery receipt in CLI/API/core transport, but supported Direct MCP and the experimental
+  control-plane MCP privately observe the same `jobId` until terminal and byte-drained, then
+  synthesize one completed result. Hidden CLI observation accepts only a validated job ID,
+  nonnegative byte offset, and bounded byte count; paths are derived from the fixed job root,
+  chunks are Base64, status and receipt paths are correlated, and terminal cleanup is a separate
+  best-effort operation. Provider/core only sample and never poll or retry; MCP owns cadence,
+  streaming UTF-8 decode, 1 MiB retention, truncation, progress heartbeats, and cancellation
+  fallback. Completed Bash text is plain MCP text with canonical metadata in
+  `structuredContent`; Phase 2 native-like streaming presentation remains out of scope.
+- Normal MCP operation has no elapsed-time fallback and exposes no job tool. Command failure or
+  timeout is completed content with `isError`; observation failure/cancellation preserves files
+  and returns a non-error receipt when possible. The Direct live smoke now expects a single Bash
+  call to absorb slow jobs rather than manually reading receipt paths. No V6 rebuild or live Box
+  operation is part of this implementation.
