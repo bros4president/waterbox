@@ -25,7 +25,7 @@ describe("Waterbox MCP configuration", () => {
     for (const BOX_API_KEY of [undefined, ""]) {
       expect(() => parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY })).toThrow(MissingMcpCredentialError)
       expect(() => parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY })).toThrow(
-        "BOX_API_KEY is required for the Box provider. Configure it using your MCP client's recommended secret or environment mechanism, then restart the client. Do not provide the key in chat or as a tool argument.",
+        "BOX_API_KEY is required for the Box provider. Set WATERBOX_PROVIDER=box and configure BOX_API_KEY using your MCP client's recommended secret or environment mechanism, then restart the client. Do not provide the key in chat or as a tool argument.",
       )
     }
   })

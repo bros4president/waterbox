@@ -1,12 +1,13 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises"
+import { execFile } from "node:child_process"
 import { dirname, posix, resolve } from "node:path"
+import { promisify } from "node:util"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
 const DEFAULT_BASE_URL = "https://ascii.dev/api/box/v1"
 const DEFAULT_TEMPLATE = "waterbox-system-v6"
-const BUN_VERSION = "1.3.2"
-const BUN_LINUX_X64_BASELINE_SHA256 = "7ff09a4a519e8206d60d7b763072cbf3642f8370690165586d303faf21692172"
 const MAX_RESPONSE_BYTES = 1_048_576
+const execFileAsync = promisify(execFile)
 const BOX_STATES = new Set(["init", "provisioning", "provisioned", "cloning", "ready", "idle", "running", "archiving", "archived", "error"])
 const SNAPSHOT_STATES = new Set(["saving", "ready", "failed"])
 const DELETION_STATES = new Set(["pending", "processing", "blocked", "completed"])
@@ -77,18 +78,14 @@ export function createTemplateRequest(runId: string): { body: { noEnv: true; env
   return { body: { noEnv: true, env: { WATERBOX_SANDBOX_ID: tag }, ttlSeconds: 1800 }, idempotencyKey: tag }
 }
 
-export function installCommand(bunVersion = BUN_VERSION): string {
-  if (bunVersion !== BUN_VERSION) throw new Error("Invalid Bun version")
-  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace\nsudo -n install -d -m 0700 /run/waterbox/bash-jobs\ncd /workspace\nexec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/bun /usr/local/lib/waterbox-cli.js "$@"\n`
+export function installCommand(): string {
+  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace\nsudo -n install -d -m 0700 /run/waterbox/bash-jobs\ncd /workspace\nexec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/node /usr/local/lib/waterbox-cli.js "$@"\n`
   return [
     "set -eu",
     "sudo -n true",
     "sudo install -d -m 0755 -o \"$(id -u)\" -g \"$(id -g)\" /workspace",
-    "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep unzip ca-certificates curl && sudo rm -rf /var/lib/apt/lists/*",
-    `curl -fsSL https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-baseline.zip -o /tmp/bun.zip`,
-    `printf '%s  %s\n' '${BUN_LINUX_X64_BASELINE_SHA256}' /tmp/bun.zip | sha256sum -c -`,
-    "rm -rf /tmp/bun-runtime && unzip -q /tmp/bun.zip -d /tmp/bun-runtime",
-    "sudo install -m 0755 /tmp/bun-runtime/bun-linux-x64-baseline/bun /usr/local/bin/bun",
+    "test -x /usr/local/bin/node",
+    "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep ca-certificates && sudo rm -rf /var/lib/apt/lists/*",
     "sudo install -d -m 0755 /usr/local/lib",
     "sudo install -m 0644 /tmp/waterbox-cli.js /usr/local/lib/waterbox-cli.js",
     `printf '%s' '${launcher.replaceAll("'", "'\\''")}' | sudo tee /usr/local/bin/waterbox >/dev/null`,
@@ -107,8 +104,8 @@ export function parseMetadata(text: string): TemplateMetadata {
 
 export function validateCliArtifact(artifact: Uint8Array): void {
   let text: string
-  try { text = new TextDecoder("utf-8", { fatal: true }).decode(artifact) } catch { throw new Error("CLI artifact must be a Bun JavaScript bundle") }
-  if (!text.startsWith("// @bun\n") || !text.includes("WORKSPACE_ROOT") || !text.includes("__internal-bash-worker") || !text.includes("/usr/local/bin/bun") || !text.includes("/usr/local/lib/waterbox-cli.js")) throw new Error("CLI artifact must be a Bun JavaScript bundle with direct async worker re-exec")
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(artifact) } catch { throw new Error("CLI artifact must be a Node JavaScript bundle") }
+  if (!text.startsWith("#!/usr/bin/env node\n") || !text.includes("WORKSPACE_ROOT") || !text.includes("__internal-bash-worker") || !text.includes("/usr/local/bin/node") || !text.includes("/usr/local/lib/waterbox-cli.js") || /bun:|\bBun\.|\/\/ @bun|#!\/usr\/bin\/env bun/.test(text)) throw new Error("CLI artifact must be a Node JavaScript bundle with direct async worker re-exec")
 }
 
 export function validateCliReports(healthText: string, versionText: string): void {
@@ -121,9 +118,8 @@ export function validateCliReports(healthText: string, versionText: string): voi
 async function validateBuiltCli(artifactPath: string): Promise<void> {
   const output: string[] = []
   for (const command of ["health", "version"]) {
-    const child = Bun.spawn([process.execPath, artifactPath, command], { stdout: "pipe", stderr: "pipe" })
-    const [stdout, stderr, exitCode] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited])
-    if (exitCode !== 0 || stderr !== "") throw new Error(`Built CLI ${command} failed`)
+    const { stdout, stderr } = await execFileAsync("node", [artifactPath, command], { encoding: "utf8", maxBuffer: 64 * 1024 })
+    if (stderr !== "") throw new Error(`Built CLI ${command} failed`)
     output.push(stdout)
   }
   validateCliReports(output[0]!, output[1]!)

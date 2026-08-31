@@ -22,7 +22,7 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
   const templateRef = environment.BOX_SYSTEM_TEMPLATE_REF ?? "waterbox-system-v6"
   const baseline = await preflight(boxApiBaseUrl, boxApiKey, templateRef)
   const directory = await mkdtemp(join(tmpdir(), "waterbox-direct-mcp-"))
-  const entry = resolve(import.meta.dir, "../packages/mcp/dist/waterbox-mcp.js")
+  const entry = resolve(import.meta.dir, "../packages/mcp/dist/waterbox.js")
   const childEnvironment = stringEnvironment({
     ...environment,
     WATERBOX_PROVIDER: "box",
@@ -32,7 +32,7 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
     BOX_SYSTEM_TEMPLATE_REF: templateRef,
     WATERBOX_MCP_DIAGNOSTICS: "1",
   })
-  const transport = new StdioClientTransport({ command: process.execPath, args: [entry], env: childEnvironment, stderr: "inherit" })
+  const transport = new StdioClientTransport({ command: "node", args: [entry], env: childEnvironment, stderr: "inherit" })
   const client = new Client({ name: "waterbox-direct-smoke", version: "1" })
   let failure: unknown
   try {

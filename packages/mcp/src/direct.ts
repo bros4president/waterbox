@@ -37,7 +37,7 @@ class RandomReadableIds implements ReadableIdGenerator {
 
 export class UnsupportedMcpProviderError extends Error {
   constructor() {
-    super('Waterbox MCP provider "waterbox" is not supported yet')
+    super('Waterbox MCP provider "waterbox" is not supported yet. Set WATERBOX_PROVIDER=box and configure BOX_API_KEY using your MCP client\'s recommended secret or environment mechanism, then restart the client. Do not provide credentials in chat or as tool arguments.')
     this.name = "UnsupportedMcpProviderError"
   }
 }

@@ -36,7 +36,7 @@ export interface WaterboxCloudMcpConfig {
 export type WaterboxMcpConfig = BoxMcpConfig | WaterboxCloudMcpConfig
 
 export class McpConfigurationError extends Error {
-  constructor(message = "Waterbox MCP configuration is invalid") {
+  constructor(message = "Waterbox MCP configuration is invalid. Set WATERBOX_PROVIDER=box and configure BOX_API_KEY using your MCP client's recommended secret or environment mechanism, then restart the client. Do not provide credentials in chat or as tool arguments.") {
     super(message)
     this.name = "McpConfigurationError"
   }
@@ -44,7 +44,7 @@ export class McpConfigurationError extends Error {
 
 export class MissingMcpCredentialError extends McpConfigurationError {
   constructor() {
-    super("BOX_API_KEY is required for the Box provider. Configure it using your MCP client's recommended secret or environment mechanism, then restart the client. Do not provide the key in chat or as a tool argument.")
+    super("BOX_API_KEY is required for the Box provider. Set WATERBOX_PROVIDER=box and configure BOX_API_KEY using your MCP client's recommended secret or environment mechanism, then restart the client. Do not provide the key in chat or as a tool argument.")
     this.name = "MissingMcpCredentialError"
   }
 }

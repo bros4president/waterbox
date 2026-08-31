@@ -4,19 +4,20 @@
   "private": false,
   "type": "module",
   "bin": {
-    "waterbox-mcp": "./dist/waterbox-mcp.js"
+    "waterbox-mcp": "./dist/waterbox.js"
   },
   "exports": {
     ".": "./dist/index.js"
   },
   "files": [
     "dist/index.js",
-    "dist/waterbox-mcp.js",
+    "dist/waterbox.js",
+    "dist/waterbox-cli.js",
     "README.md",
     "server.json"
   ],
   "scripts": {
-    "build": "bun build ./src/main.ts --target=bun --outfile ./dist/waterbox-mcp.js && bun build ./src/index.ts --target=bun --outfile ./dist/index.js",
+    "build": "bun build ./src/bin.ts --target=node --format=esm --outfile ./dist/waterbox.js && bun build ../sandbox-cli/src/main.ts --target=node --format=esm --outfile ./dist/waterbox-cli.js && bun build ./src/index.ts --target=node --format=esm --outfile ./dist/index.js",
     "prepack": "bun run build"
   },
   "devDependencies": {
@@ -29,7 +30,7 @@
     "zod": "4.1.8"
   },
   "engines": {
-    "bun": ">=1.3.2"
+    "node": ">=24.15.0"
   },
   "publishConfig": {
     "access": "public"

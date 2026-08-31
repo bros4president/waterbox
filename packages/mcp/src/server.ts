@@ -33,7 +33,7 @@ import {
 import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
 import { z } from "zod"
 import type { McpBackend } from "./backend.ts"
-import { MissingMcpCredentialError } from "./config.ts"
+import { McpConfigurationError } from "./config.ts"
 import { sendFileSecurely } from "./secure-transfer.ts"
 import { absorbBashReceipt } from "./bash-observation.ts"
 
@@ -88,6 +88,7 @@ export function createWaterboxMcpServer(backend: McpBackend, options: { onError?
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
+      backend.preflight?.()
       if (request.params.name === "create_sandbox") {
         const { idempotencyKey, ...createRequest } = CreateSandboxInputSchema.parse(request.params.arguments ?? {})
         return text(SandboxSchema.parse(await backend.createSandbox(createRequest, idempotencyKey, extra.signal)))
@@ -183,7 +184,7 @@ function text(value: unknown) {
 }
 
 function safeMessage(error: unknown): string {
-  return error instanceof PublicMcpError || error instanceof MissingMcpCredentialError
+  return error instanceof PublicMcpError || error instanceof McpConfigurationError || (error instanceof Error && error.name === "UnsupportedMcpProviderError")
     ? error.message
     : "Waterbox MCP request failed"
 }

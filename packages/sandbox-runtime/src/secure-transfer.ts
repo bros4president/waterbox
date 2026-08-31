@@ -9,6 +9,7 @@ import {
   type SecureTransferInitiated,
 } from "@waterbox/contracts"
 import { Decrypter, generateX25519Identity, identityToRecipient } from "age-encryption"
+import { spawn } from "node:child_process"
 import { constants } from "node:fs"
 import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises"
 import { dirname, isAbsolute, resolve } from "node:path"
@@ -17,6 +18,8 @@ import { RuntimeError } from "./runtime.ts"
 export const SECURE_TRANSFER_TTL_MS = 10 * 60 * 1_000
 const DEFAULT_STATE_ROOT = "/run/waterbox/transfers"
 const CIPHERTEXT_PATH = /^\/tmp\/waterbox-transfer-[0-9a-f-]{36}\.age$/
+const SYSTEM_COMMAND_TIMEOUT_MS = 30_000
+const SYSTEM_COMMAND_KILL_GRACE_MS = 1_000
 
 interface TransferState {
   transferId: string
@@ -106,16 +109,39 @@ async function scheduleExpiry(statePath: string, transferId: string, ttlMs: numb
   const unit = `waterbox-transfer-expire-${transferId}`
   const claimedPath = resolve(dirname(statePath), `${transferId}.claimed`)
   const expiredPath = resolve(dirname(statePath), `${transferId}.expired`)
-  const child = Bun.spawn(["systemd-run", "--quiet", "--unit", unit, `--on-active=${Math.ceil(ttlMs / 1_000)}s`, "/bin/sh", "-c", "rm -f -- \"$1\" \"$2\"; : >\"$3\"", "waterbox-expire", statePath, claimedPath, expiredPath], {
-    stdin: "ignore", stdout: "ignore", stderr: "ignore",
-  })
-  if (await child.exited !== 0) throw new RuntimeError(500, "Secure transfer expiry could not be scheduled")
+  const exitCode = await runSystemCommand("systemd-run", ["--quiet", "--unit", unit, `--on-active=${Math.ceil(ttlMs / 1_000)}s`, "/bin/sh", "-c", "rm -f -- \"$1\" \"$2\"; : >\"$3\"", "waterbox-expire", statePath, claimedPath, expiredPath])
+    .catch(() => -1)
+  if (exitCode !== 0) throw new RuntimeError(500, "Secure transfer expiry could not be scheduled")
 }
 
 async function cancelExpiry(transferId: string): Promise<void> {
   const unit = `waterbox-transfer-expire-${transferId}`
-  const child = Bun.spawn(["systemctl", "stop", `${unit}.timer`, `${unit}.service`], { stdin: "ignore", stdout: "ignore", stderr: "ignore" })
-  await child.exited
+  await runSystemCommand("systemctl", ["stop", `${unit}.timer`, `${unit}.service`])
+}
+
+async function runSystemCommand(command: string, arguments_: string[]): Promise<number> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, arguments_, { stdio: "ignore" })
+    let settled = false
+    let timedOut = false
+    let killTimer: NodeJS.Timeout | undefined
+    const timeout = setTimeout(() => {
+      timedOut = true
+      child.kill("SIGTERM")
+      killTimer = setTimeout(() => child.kill("SIGKILL"), SYSTEM_COMMAND_KILL_GRACE_MS)
+      killTimer.unref()
+    }, SYSTEM_COMMAND_TIMEOUT_MS)
+    timeout.unref()
+    const settle = (operation: () => void) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (killTimer) clearTimeout(killTimer)
+      operation()
+    }
+    child.once("error", (error) => settle(() => reject(error)))
+    child.once("close", (code) => settle(() => timedOut ? reject(new Error("System command timed out")) : resolvePromise(code ?? 1)))
+  })
 }
 
 async function readRegularFileBounded(path: string, maximum: number): Promise<Uint8Array> {

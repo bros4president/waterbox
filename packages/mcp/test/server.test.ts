@@ -15,6 +15,7 @@ import type {
   ToolName,
 } from "@waterbox/contracts"
 import { Decrypter, generateX25519Identity, identityToRecipient } from "age-encryption"
+import { existsSync } from "node:fs"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -151,17 +152,34 @@ describe("Waterbox MCP server", () => {
     await expect(createMcpBackend({ provider: { type: "waterbox" } })).rejects.toThrow('provider "waterbox" is not supported yet')
   })
 
-  test("stays connected and explains how to provide a missing Box credential", async () => {
-    const backend = await createStartupBackend({ WATERBOX_PROVIDER: "box" })
-    const { client, close } = await connected(backend)
+  test("keeps every tool side-effect free while provider setup is incomplete or unsupported", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-mcp-setup-"))
+    const sqlitePath = join(directory, "must-not-exist.sqlite")
+    const environments = [
+      {},
+      { WATERBOX_PROVIDER: "unknown" },
+      { WATERBOX_PROVIDER: "waterbox" },
+      { WATERBOX_PROVIDER: "box" },
+      { WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", BOX_POLL_INTERVAL_MS: "invalid" },
+    ]
+    const names = ["create_sandbox", "probe_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"]
     try {
-      expect((await client.listTools()).tools).toHaveLength(14)
-      expect(await client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "missing-credential" } })).toMatchObject({
-        isError: true,
-        content: [{ text: "BOX_API_KEY is required for the Box provider. Configure it using your MCP client's recommended secret or environment mechanism, then restart the client. Do not provide the key in chat or as a tool argument." }],
-      })
+      for (const environment of environments) {
+        const backend = await createStartupBackend({ ...environment, WATERBOX_SQLITE_PATH: sqlitePath })
+        const connection = await connected(backend)
+        try {
+          expect((await connection.client.listTools()).tools).toHaveLength(14)
+          for (const name of names) {
+            const result = await connection.client.callTool({ name, arguments: name === "send_file_securely" ? { sandboxId: sandbox.sandboxId, sourcePath: join(directory, "missing-secret"), targetPath: "/root/secret" } : {} })
+            expect(result).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("WATERBOX_PROVIDER=box") }] })
+          }
+          expect(existsSync(sqlitePath)).toBe(false)
+        } finally {
+          await connection.close()
+        }
+      }
     } finally {
-      await close()
+      await rm(directory, { recursive: true, force: true })
     }
   })
 

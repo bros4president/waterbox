@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { Database } from "bun:sqlite"
+import { existsSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -105,6 +105,15 @@ describe("SQLite repository conformance", () => {
 })
 
 describe("SQLite durability and isolation", () => {
+  test("create false rejects a missing file without creating it", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-create-"))
+    directories.push(directory)
+    const filename = join(directory, "missing.sqlite")
+
+    expect(() => new SqliteRepositoryStore(filename, { create: false })).toThrow("does not exist")
+    expect(existsSync(filename)).toBe(false)
+  })
+
   test("documents survive close and reopen and schema initialization is idempotent", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-"))
     directories.push(directory)
@@ -119,6 +128,32 @@ describe("SQLite durability and isolation", () => {
     expect(await second.sandboxes.get(record.accountId, record.sandboxId)).toEqual(record)
     const thirdInitialization = new SqliteRepositoryStore(filename)
     thirdInitialization.close()
+  })
+
+  test("an existing database can be reopened read-only", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-readonly-"))
+    directories.push(directory)
+    const filename = join(directory, "repository.sqlite")
+    const record = sandbox()
+    const writable = store(filename)
+    await writable.sandboxes.createIfAbsent(record)
+    writable.close()
+    stores.splice(stores.indexOf(writable), 1)
+
+    const readOnly = new SqliteRepositoryStore(filename, { readonly: true, create: false })
+    stores.push(readOnly)
+    expect(await readOnly.sandboxes.get(record.accountId, record.sandboxId)).toEqual(record)
+    await expect(readOnly.sandboxes.createIfAbsent(sandbox("acct-a", "2"))).rejects.toThrow()
+  })
+
+  test("foreign-key enforcement remains disabled", () => {
+    const repositories = store()
+    repositories.database.exec(`
+      CREATE TABLE parent (id INTEGER PRIMARY KEY);
+      CREATE TABLE child (parent_id INTEGER REFERENCES parent(id));
+      INSERT INTO child (parent_id) VALUES (1);
+    `)
+    expect(repositories.database.prepare("SELECT parent_id FROM child").get()).toEqual({ parent_id: 1 })
   })
 
   test("same resource keys coexist in isolated account partitions", async () => {
@@ -238,11 +273,11 @@ describe("SQLite pagination", () => {
 describe("SQLite storage safety", () => {
   test("malformed stored JSON and structurally invalid documents fail explicitly", async () => {
     const repositories = store()
-    repositories.database.query("INSERT INTO sandbox_documents VALUES (?, ?, ?, ?)")
+    repositories.database.prepare("INSERT INTO sandbox_documents VALUES (?, ?, ?, ?)")
       .run("acct-a", "sbx_calm-cactus-bad", 1, "{not-json")
     await expect(repositories.sandboxes.get("acct-a", "sbx_calm-cactus-bad")).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
 
-    repositories.database.query("INSERT INTO snapshot_documents VALUES (?, ?, ?, ?)")
+    repositories.database.prepare("INSERT INTO snapshot_documents VALUES (?, ?, ?, ?)")
       .run("acct-a", "snap_silver-forest-bad", 1, JSON.stringify({ accountId: "acct-a" }))
     await expect(repositories.snapshots.list({ accountId: "acct-a", limit: 10 })).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
   })
@@ -258,7 +293,7 @@ describe("SQLite storage safety", () => {
       { ...original, lastError: { code: "provider_failure" as const, message: "" } },
       { ...original, lastError: { code: "provider_failure" as const, message: "x".repeat(2_001) } },
     ]) {
-      repositories.database.query("UPDATE sandbox_documents SET version = ?, document = ? WHERE account_id = ? AND resource_id = ?")
+      repositories.database.prepare("UPDATE sandbox_documents SET version = ?, document = ? WHERE account_id = ? AND resource_id = ?")
         .run(corrupted.version, JSON.stringify(corrupted), original.accountId, original.sandboxId)
       await expect(repositories.sandboxes.get(original.accountId, original.sandboxId)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
     }
@@ -274,7 +309,7 @@ describe("SQLite storage safety", () => {
       { ...original, name: "x".repeat(129) },
       { ...original, description: "x".repeat(2_001) },
     ]) {
-      repositories.database.query("UPDATE snapshot_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
+      repositories.database.prepare("UPDATE snapshot_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
         .run(JSON.stringify(corrupted), original.accountId, original.snapshotId)
       await expect(repositories.snapshots.get(original.accountId, original.snapshotId)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
     }
@@ -285,7 +320,7 @@ describe("SQLite storage safety", () => {
     const original = idempotency()
     const corrupted = { ...original, version: 0 }
     await repositories.idempotency.createIfAbsent(original)
-    repositories.database.query(`UPDATE idempotency_documents SET version = ?, document = ?
+    repositories.database.prepare(`UPDATE idempotency_documents SET version = ?, document = ?
       WHERE account_id = ? AND scope = ? AND idempotency_key = ?`)
       .run(0, JSON.stringify(corrupted), original.accountId, original.scope, original.key)
 
@@ -305,7 +340,7 @@ describe("SQLite storage safety", () => {
       { ...original, sandboxId: "sbx_wrong-resource-id" },
       { ...original, version: 2 },
     ]) {
-      repositories.database.query("UPDATE sandbox_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
+      repositories.database.prepare("UPDATE sandbox_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
         .run(JSON.stringify(corrupted), original.accountId, original.sandboxId)
       await expect(repositories.sandboxes.get(original.accountId, original.sandboxId)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
       await expect(repositories.sandboxes.list({ accountId: original.accountId, limit: 10 })).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
@@ -321,7 +356,7 @@ describe("SQLite storage safety", () => {
       { ...original, snapshotId: "snap_wrong-resource-id" },
       { ...original, version: 2 },
     ]) {
-      repositories.database.query("UPDATE snapshot_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
+      repositories.database.prepare("UPDATE snapshot_documents SET document = ? WHERE account_id = ? AND resource_id = ?")
         .run(JSON.stringify(corrupted), original.accountId, original.snapshotId)
       await expect(repositories.snapshots.get(original.accountId, original.snapshotId)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
       await expect(repositories.snapshots.list({ accountId: original.accountId, limit: 10 })).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
@@ -340,7 +375,7 @@ describe("SQLite storage safety", () => {
       { ...original, version: 2 },
       { ...original, expiresAt: "2030-01-01T00:00:00.000Z" },
     ]) {
-      repositories.database.query(`UPDATE idempotency_documents SET document = ?
+      repositories.database.prepare(`UPDATE idempotency_documents SET document = ?
         WHERE account_id = ? AND scope = ? AND idempotency_key = ?`)
         .run(JSON.stringify(corrupted), original.accountId, original.scope, original.key)
       await expect(repositories.idempotency.get(key)).rejects.toBeInstanceOf(MalformedRepositoryDocumentError)
@@ -353,9 +388,9 @@ describe("SQLite storage safety", () => {
       ["sandbox_documents", "resource_id"],
       ["snapshot_documents", "resource_id"],
     ] as const) {
-      const plan = repositories.database.query<{ detail: string }, [string, number]>(
+      const plan = repositories.database.prepare(
         `EXPLAIN QUERY PLAN SELECT document FROM ${table} WHERE account_id = ? ORDER BY ${ordering} LIMIT ?`,
-      ).all("acct-a", 10)
+      ).all("acct-a", 10) as Array<{ detail: string }>
       expect(plan.map((row) => row.detail).join(" ")).toContain("PRIMARY KEY (account_id=?)")
       expect(plan.map((row) => row.detail).join(" ")).not.toContain("SCAN")
     }
@@ -365,6 +400,6 @@ describe("SQLite storage safety", () => {
     const repositories = store()
     repositories.close()
     repositories.close()
-    expect(() => repositories.database.query("SELECT 1").get()).toThrow()
+    expect(() => repositories.database.prepare("SELECT 1").get()).toThrow()
   })
 })

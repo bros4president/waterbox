@@ -1,10 +1,8 @@
-#!/usr/bin/env bun
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import type { SandboxId, ToolName } from "@waterbox/contracts"
 import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
-import { fileURLToPath } from "node:url"
 import type { McpBackend } from "./backend.ts"
-import { MissingMcpCredentialError, parseMcpConfig } from "./config.ts"
+import { McpConfigurationError, parseMcpConfig } from "./config.ts"
 import { createMcpBackend } from "./direct.ts"
 import { createWaterboxMcpServer } from "./server.ts"
 
@@ -47,8 +45,9 @@ export async function createStartupBackend(environment: Record<string, string | 
   try {
     return await createMcpBackend(parseMcpConfig(environment))
   } catch (error) {
-    if (!(error instanceof MissingMcpCredentialError)) throw error
+    if (!(error instanceof McpConfigurationError) && !(error instanceof Error && error.name === "UnsupportedMcpProviderError")) throw error
     return {
+      preflight() { throw error },
       async createSandbox() { throw error },
       async probeSandbox() { throw error },
       async deleteSandbox() { throw error },
@@ -68,11 +67,7 @@ export async function createStartupBackend(environment: Record<string, string | 
   }
 }
 
-function startupMessage(error: unknown): string {
+export function startupMessage(error: unknown): string {
   if (error instanceof Error && ["McpConfigurationError", "UnsupportedMcpProviderError"].includes(error.name)) return error.message
   return "Waterbox MCP failed to start"
-}
-
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((error) => { console.error(startupMessage(error)); process.exitCode = 1 })
 }

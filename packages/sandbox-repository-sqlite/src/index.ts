@@ -1,4 +1,6 @@
-import { Database } from "bun:sqlite"
+import { existsSync } from "node:fs"
+import { openRepositoryDatabase } from "@waterbox/repository-sqlite/database"
+import type { RepositoryDatabase } from "./database.ts"
 import {
   ErrorCodeSchema,
   ProviderNameSchema,
@@ -168,19 +170,19 @@ function serialize(value: unknown): string {
 }
 
 export class SqliteSandboxRepository implements SandboxRepository {
-  constructor(private readonly database: Database, private readonly cursors: CursorCodec) {}
+  constructor(private readonly database: RepositoryDatabase, private readonly cursors: CursorCodec) {}
 
   async createIfAbsent(record: SandboxRecord): Promise<boolean> {
-    const result = this.database.query(`INSERT OR IGNORE INTO sandbox_documents
+    const result = this.database.prepare(`INSERT OR IGNORE INTO sandbox_documents
       (account_id, resource_id, version, document) VALUES (?, ?, ?, ?)`)
       .run(record.accountId, record.sandboxId, record.version, serialize(record))
     return result.changes === 1
   }
 
   async get(accountId: string, sandboxId: SandboxRecord["sandboxId"]): Promise<SandboxRecord | undefined> {
-    const row = this.database.query<ResourceDocumentRow, [string, string]>(
+    const row = this.database.prepare(
       "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? AND resource_id = ?",
-    ).get(accountId, sandboxId)
+    ).get(accountId, sandboxId) as ResourceDocumentRow | undefined
     return parseSandbox(row ?? undefined, accountId, sandboxId)
   }
 
@@ -188,12 +190,12 @@ export class SqliteSandboxRepository implements SandboxRepository {
     const limit = boundedLimit(input.limit)
     const after = this.cursors.decode(input.cursor, SandboxIdSchema)
     const rows = after === undefined
-      ? this.database.query<ResourceDocumentRow, [string, number]>(
+      ? this.database.prepare(
           "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, limit + 1)
-      : this.database.query<ResourceDocumentRow, [string, string, number]>(
+        ).all(input.accountId, limit + 1) as ResourceDocumentRow[]
+      : this.database.prepare(
           "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? AND resource_id > ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, after, limit + 1)
+        ).all(input.accountId, after, limit + 1) as ResourceDocumentRow[]
     const pageRows = rows.slice(0, limit)
     const items = pageRows.map((row) => parseSandbox(row, input.accountId, row.resource_id)!)
     const last = pageRows.at(-1)
@@ -202,7 +204,7 @@ export class SqliteSandboxRepository implements SandboxRepository {
 
   async compareAndSwap(record: SandboxRecord, expectedVersion: number): Promise<boolean> {
     if (record.version !== expectedVersion + 1) return false
-    const result = this.database.query(`UPDATE sandbox_documents SET version = ?, document = ?
+    const result = this.database.prepare(`UPDATE sandbox_documents SET version = ?, document = ?
       WHERE account_id = ? AND resource_id = ? AND version = ?`)
       .run(record.version, serialize(record), record.accountId, record.sandboxId, expectedVersion)
     return result.changes === 1
@@ -211,18 +213,18 @@ export class SqliteSandboxRepository implements SandboxRepository {
 }
 
 export class SqliteSnapshotRepository implements SnapshotRepository {
-  constructor(private readonly database: Database, private readonly cursors: CursorCodec) {}
+  constructor(private readonly database: RepositoryDatabase, private readonly cursors: CursorCodec) {}
 
   async createIfAbsent(record: SnapshotRecord): Promise<boolean> {
-    return this.database.query(`INSERT OR IGNORE INTO snapshot_documents
+    return this.database.prepare(`INSERT OR IGNORE INTO snapshot_documents
       (account_id, resource_id, version, document) VALUES (?, ?, ?, ?)`)
       .run(record.accountId, record.snapshotId, record.version, serialize(record)).changes === 1
   }
 
   async get(accountId: string, snapshotId: SnapshotRecord["snapshotId"]): Promise<SnapshotRecord | undefined> {
-    const row = this.database.query<ResourceDocumentRow, [string, string]>(
+    const row = this.database.prepare(
       "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? AND resource_id = ?",
-    ).get(accountId, snapshotId)
+    ).get(accountId, snapshotId) as ResourceDocumentRow | undefined
     return parseSnapshot(row ?? undefined, accountId, snapshotId)
   }
 
@@ -230,12 +232,12 @@ export class SqliteSnapshotRepository implements SnapshotRepository {
     const limit = boundedLimit(input.limit)
     const after = this.cursors.decode(input.cursor, SnapshotIdSchema)
     const rows = after === undefined
-      ? this.database.query<ResourceDocumentRow, [string, number]>(
+      ? this.database.prepare(
           "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, limit + 1)
-      : this.database.query<ResourceDocumentRow, [string, string, number]>(
+        ).all(input.accountId, limit + 1) as ResourceDocumentRow[]
+      : this.database.prepare(
           "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? AND resource_id > ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, after, limit + 1)
+        ).all(input.accountId, after, limit + 1) as ResourceDocumentRow[]
     const pageRows = rows.slice(0, limit)
     const items = pageRows.map((row) => parseSnapshot(row, input.accountId, row.resource_id)!)
     const last = pageRows.at(-1)
@@ -244,7 +246,7 @@ export class SqliteSnapshotRepository implements SnapshotRepository {
 
   async compareAndSwap(record: SnapshotRecord, expectedVersion: number): Promise<boolean> {
     if (record.version !== expectedVersion + 1) return false
-    return this.database.query(`UPDATE snapshot_documents SET version = ?, document = ?
+    return this.database.prepare(`UPDATE snapshot_documents SET version = ?, document = ?
       WHERE account_id = ? AND resource_id = ? AND version = ?`)
       .run(record.version, serialize(record), record.accountId, record.snapshotId, expectedVersion).changes === 1
   }
@@ -252,25 +254,25 @@ export class SqliteSnapshotRepository implements SnapshotRepository {
 }
 
 export class SqliteIdempotencyRepository implements IdempotencyRepository {
-  constructor(private readonly database: Database) {}
+  constructor(private readonly database: RepositoryDatabase) {}
 
   async createIfAbsent(record: IdempotencyRecord): Promise<boolean> {
-    return this.database.query(`INSERT OR IGNORE INTO idempotency_documents
+    return this.database.prepare(`INSERT OR IGNORE INTO idempotency_documents
       (account_id, scope, idempotency_key, version, expires_at, document) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(record.accountId, record.scope, record.key, record.version, record.expiresAt, serialize(record)).changes === 1
   }
 
   async get(input: IdempotencyKey): Promise<IdempotencyRecord | undefined> {
-    const row = this.database.query<IdempotencyDocumentRow, [string, string, string]>(
+    const row = this.database.prepare(
       `SELECT account_id, scope, idempotency_key, version, expires_at, document
        FROM idempotency_documents WHERE account_id = ? AND scope = ? AND idempotency_key = ?`,
-    ).get(input.accountId, input.scope, input.key)
+    ).get(input.accountId, input.scope, input.key) as IdempotencyDocumentRow | undefined
     return parseIdempotency(row ?? undefined, input.accountId, input.scope, input.key)
   }
 
   async compareAndSwap(record: IdempotencyRecord, expectedVersion: number): Promise<boolean> {
     if (record.version !== expectedVersion + 1) return false
-    return this.database.query(`UPDATE idempotency_documents SET version = ?, expires_at = ?, document = ?
+    return this.database.prepare(`UPDATE idempotency_documents SET version = ?, expires_at = ?, document = ?
       WHERE account_id = ? AND scope = ? AND idempotency_key = ? AND version = ?`)
       .run(record.version, record.expiresAt, serialize(record), record.accountId, record.scope, record.key, expectedVersion).changes === 1
   }
@@ -283,16 +285,21 @@ export interface SqliteRepositoryStoreOptions {
 }
 
 export class SqliteRepositoryStore {
-  readonly database: Database
+  readonly database: RepositoryDatabase
   readonly sandboxes: SqliteSandboxRepository
   readonly snapshots: SqliteSnapshotRepository
   readonly idempotency: SqliteIdempotencyRepository
   #closed = false
 
   constructor(filename: string, options: SqliteRepositoryStoreOptions = {}) {
+    if (filename !== ":memory:" && options.create === false && !existsSync(filename)) {
+      throw new Error(`SQLite database does not exist: ${filename}`)
+    }
+
     const cursors = new CursorCodec()
-    const databaseOptions = { ...(options.readonly === undefined ? {} : { readonly: options.readonly }), ...(options.create === undefined ? {} : { create: options.create }) }
-    this.database = Object.keys(databaseOptions).length === 0 ? new Database(filename) : new Database(filename, databaseOptions)
+    this.database = openRepositoryDatabase(filename, {
+      readOnly: options.readonly,
+    })
     this.database.exec("PRAGMA foreign_keys = OFF")
     this.database.exec(`
       CREATE TABLE IF NOT EXISTS sandbox_documents (

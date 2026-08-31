@@ -282,7 +282,7 @@ export async function runOneShotBash(
     signal?.throwIfAborted()
     const spawnProcess = options.spawnProcess ?? spawn
     const child = spawnProcess(
-      options.workerExecutable ?? "/usr/local/bin/bun",
+      options.workerExecutable ?? "/usr/local/bin/node",
       [...(options.workerArguments ?? ["/usr/local/lib/waterbox-cli.js"]), "__internal-bash-worker", jobId],
       { detached: true, stdio: "ignore", env: process.env },
     )

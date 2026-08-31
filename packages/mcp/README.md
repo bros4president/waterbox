@@ -2,7 +2,7 @@
 
 The supported Waterbox MCP server. It runs as a local stdio process and connects directly to the configured sandbox provider.
 
-The first release requires [Bun](https://bun.sh/) 1.3.2 or newer and supports the Box provider. Waterbox Cloud is represented in configuration but is not implemented yet.
+The first release requires Node.js 24.15.0 or newer and supports the Box provider. Waterbox Cloud is represented in configuration but is not implemented yet.
 
 The configured Box account must contain the immutable `waterbox-system-v6` named template. The repository template builder provisions it for development accounts; managed distribution of provider templates remains separate from npm installation.
 
@@ -59,4 +59,4 @@ The sandbox command deletes its uploaded ciphertext after every attempted consum
 | `BOX_POLL_INTERVAL_MS` | No | `1000` |
 | `BOX_POLL_TIMEOUT_MS` | No | `120000` |
 
-Setting `WATERBOX_PROVIDER=waterbox` currently exits with a clear unsupported-provider error.
+Setting `WATERBOX_PROVIDER=waterbox` keeps the server connected and returns clear unsupported-provider setup guidance from tool calls.

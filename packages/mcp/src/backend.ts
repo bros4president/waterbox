@@ -17,6 +17,7 @@ import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provid
 import type { BashJobObservation } from "@waterbox/core/provider"
 
 export interface McpBackend {
+  preflight?(): void
   createSandbox(request: CreateSandboxRequest, idempotencyKey: string, signal: AbortSignal): Promise<Sandbox>
   probeSandbox(sandboxId: SandboxId, signal: AbortSignal): Promise<Sandbox>
   deleteSandbox(sandboxId: SandboxId, signal: AbortSignal): Promise<Sandbox>
