@@ -17,8 +17,8 @@
     "server.json"
   ],
   "scripts": {
-    "build": "bun build ./src/bin.ts --target=node --format=esm --outfile ./dist/waterbox.js && bun build ../sandbox-cli/src/main.ts --target=node --format=esm --outfile ./dist/waterbox-cli.js && bun build ./src/index.ts --target=node --format=esm --outfile ./dist/index.js",
-    "prepack": "bun run build"
+    "build": "node ../../scripts/build-waterbox.mjs mcp",
+    "prepack": "node ../../scripts/build-waterbox.mjs mcp"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.25.3",

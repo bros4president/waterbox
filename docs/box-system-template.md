@@ -27,9 +27,9 @@ stopped source Box for reconciliation.
 
 ## Installation
 
-The builder creates a temporary `noEnv` Box, uploads the Bun bundle, and installs:
+The builder creates a temporary `noEnv` Box, uploads the Node bundle, and installs:
 
-- pinned Bun under `/usr/local/bin`
+- the existing Node runtime at `/usr/local/bin/node`
 - the CLI bundle at `/usr/local/lib/waterbox-cli.js`
 - the `waterbox` launcher at `/usr/local/bin/waterbox`
 - `ripgrep`
@@ -63,7 +63,7 @@ prints exactly one canonical result line. Bash output is buffered by Box and rep
 by its terminal result rather than incremental chunks.
 
 For every one-shot Bash call, the CLI creates private receipt files and spawns
-`/usr/local/bin/bun /usr/local/lib/waterbox-cli.js __internal-bash-worker <jobId>` directly.
+`/usr/local/bin/node /usr/local/lib/waterbox-cli.js __internal-bash-worker <jobId>` directly.
 Quick commands return a bounded completed result; longer-running commands may yield a
 dispatched receipt. `timeout` is only an optional execution deadline. A receipt confirms
 worker-process spawn, not Bash startup, completion, or success. Output is appended to
