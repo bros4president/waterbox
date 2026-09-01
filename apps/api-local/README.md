@@ -43,10 +43,10 @@ Every one-shot Bash call starts a detached worker. Quick commands return a compl
 longer-running commands may yield a dispatched receipt. `timeout`, when present, is only an
 execution deadline. The receipt means the worker was spawned, not that Bash started or
 succeeded. `statusPath` reports execution state and `outputPath` receives output continuously.
-The public CLI/API result remains transport-level recovery information. Supported MCP absorbs
-receipts through authenticated internal byte-observation endpoints, drains the same job once,
-and returns one completed MCP result. Provider and core operations only sample; MCP owns the
-polling loop. The internal endpoints are not public tools or part of the OpenAPI surface.
+The public CLI/API result remains transport-level recovery information. `@waterbox/client`
+absorbs receipts through authenticated bounded byte-observation API endpoints, drains the same
+job once, and returns one completed result. Provider and core operations only sample; the
+reusable client owns polling, progress, truncation, fallback receipts, and cleanup.
 
 The initiation response contains `transferId`, an `age1...` recipient, algorithm `age-x25519`, and a fixed ten-minute `expiresAt`. Encrypt an existing local file with a standard age implementation, Base64-encode the binary age file, and consume the transfer once before expiry. Plaintext is limited to 1 MiB. The API and provider transport handle only ciphertext; the destination is decrypted and readable inside the sandbox. Creating another transfer is the recovery path after expiry or an uncertain consumption outcome.
 

@@ -1,5 +1,7 @@
 # oc-remote
 
+> The Waterbox control-plane packages in this repository use one canonical product boundary: MCP renders `@waterbox/client` commands through authenticated `@waterbox/api`. Local MCP uses the in-process `@waterbox/control-plane-local` Fetch backend and opens no TCP listener; `apps/api-local` is the explicit thin development listener. The client and local composition remain bundled private workspace packages.
+
 OpenCode 2 tools backed by an isolated, stateful AWS Lambda MicroVM.
 
 The project-local OpenCode 2 plugin provides remote shell, read, write, glob, grep, edit, and patch tools. Project-local permissions deny the corresponding built-in workspace tools so execution cannot silently fall back to the local machine. The plugin lazily launches one MicroVM when a tool is first called, sends tool requests directly to its authenticated HTTPS receiver, and reuses its `/workspace` until AWS terminates the MicroVM.
