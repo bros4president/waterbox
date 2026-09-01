@@ -36,6 +36,25 @@
         "@waterbox/daemon": "workspace:*",
       },
     },
+    "packages/client": {
+      "name": "@waterbox/client",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+        "age-encryption": "0.3.1",
+        "zod": "4.1.8",
+      },
+    },
+    "packages/control-plane-local": {
+      "name": "@waterbox/control-plane-local",
+      "dependencies": {
+        "@waterbox/api": "workspace:*",
+        "@waterbox/client": "workspace:*",
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+        "@waterbox/provider-box": "workspace:*",
+        "@waterbox/repository-sqlite": "workspace:*",
+      },
+    },
     "packages/experimental-control-plane-mcp": {
       "name": "@waterbox/experimental-control-plane-mcp",
       "dependencies": {
@@ -448,7 +467,11 @@
 
     "@waterbox/cli": ["@waterbox/cli@workspace:packages/sandbox-cli"],
 
+    "@waterbox/client": ["@waterbox/client@workspace:packages/client"],
+
     "@waterbox/contracts": ["@waterbox/contracts@workspace:packages/sandbox-contracts"],
+
+    "@waterbox/control-plane-local": ["@waterbox/control-plane-local@workspace:packages/control-plane-local"],
 
     "@waterbox/core": ["@waterbox/core@workspace:packages/sandbox-core"],
 
