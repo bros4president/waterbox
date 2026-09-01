@@ -22,7 +22,9 @@
     "build:mcp": "node scripts/build-waterbox.mjs mcp",
     "smoke:mcp-direct": "bun run build:mcp && bun run scripts/direct-mcp-smoke.ts",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:premerge": "bun run typecheck && bun run test && bun run test:node-sqlite && git diff --check HEAD",
+    "check:release": "bun run check:premerge && bun run build:mcp && npm pack --dry-run ./packages/mcp"
   },
   "dependencies": {
     "@aws-sdk/client-iam": "^3.883.0",

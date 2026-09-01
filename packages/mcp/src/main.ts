@@ -1,12 +1,13 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createRemoteApiBackend, WaterboxClient } from "@waterbox/client"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
-import { createMcpClient } from "./composition.ts"
+import { createMcpClient, type BoxProviderDiagnostic } from "./composition.ts"
 import { createWaterboxMcpServer } from "./server.ts"
 
 export async function main(): Promise<void> {
-  const client = await createStartupClient()
-  const server = createWaterboxMcpServer(client, process.env.WATERBOX_MCP_DIAGNOSTICS === "1"
+  const diagnostics = process.env.WATERBOX_MCP_DIAGNOSTICS === "1"
+  const client = await createStartupClient(process.env, diagnostics ? event => console.error(boxDiagnosticMessage(event)) : undefined)
+  const server = createWaterboxMcpServer(client, diagnostics
     ? { onError: (error) => console.error(diagnosticMessage(error)) }
     : {})
   let closed = false
@@ -39,14 +40,16 @@ function diagnosticMessage(error: unknown): string {
   return `Waterbox MCP diagnostic: ${messages.join(" <- ")}`
 }
 
-export async function createStartupClient(environment: Record<string, string | undefined> = process.env): Promise<WaterboxClient> {
+export async function createStartupClient(environment: Record<string, string | undefined> = process.env, diagnostic?: (event: BoxProviderDiagnostic) => void): Promise<WaterboxClient> {
   try {
-    return await createMcpClient(parseMcpConfig(environment))
+    return await createMcpClient(parseMcpConfig(environment), diagnostic)
   } catch (error) {
     if (!(error instanceof McpConfigurationError) && !(error instanceof Error && error.name === "UnsupportedMcpProviderError")) throw error
     return unavailableClient(error)
   }
 }
+
+function boxDiagnosticMessage(event: BoxProviderDiagnostic): string { return `Waterbox MCP diagnostic: ${JSON.stringify(event)}` }
 
 function unavailableClient(error: Error): WaterboxClient {
   const client = new WaterboxClient(createRemoteApiBackend("http://waterbox.unconfigured/", async () => { throw error }))

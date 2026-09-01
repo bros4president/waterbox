@@ -319,6 +319,7 @@ describe("Waterbox API", () => {
       app.request(`/v1/sandboxes/${sandbox.sandboxId}/snapshots`, { method: "POST", headers: jsonHeaders, body: '{"unknown":true}' }),
       app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/read`, { method: "POST", headers: jsonHeaders, body: '{"command":"pwd"}' }),
       app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/unknown`, { method: "POST", headers: jsonHeaders, body: "{}" }),
+      app.request("/v1/sandboxes", { method: "POST", headers: jsonHeaders, body: "{" }),
     ]
     for (const pending of requests) expect((await pending).status).toBe(400)
   })
@@ -380,6 +381,14 @@ describe("Waterbox API", () => {
     expect(JSON.parse(text)).toEqual({ error: { code: "not_found", message: "The resource was not found", requestId: "req_test" } })
   })
 
+  test("redacts internal SyntaxError instead of treating it as malformed request JSON", async () => {
+    const secret = "internal-parser-secret"
+    const { app } = api({ getSandbox: async () => { throw new SyntaxError(secret) } })
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth })
+    expect(response.status).toBe(500)
+    expect(await response.text()).not.toContain(secret)
+  })
+
   test("includes only the public sandbox recovery ID for post-checkpoint failures", async () => {
     const secret = "private provider detail"
     const recovery = new SandboxRecoveryError(new DomainError("provider_failure", secret), sandbox.sandboxId)
@@ -413,10 +422,13 @@ describe("Waterbox API", () => {
     let release!: () => void
     let signal!: AbortSignal
     const gate = new Promise<void>((resolve) => { release = resolve })
+    let returns = 0
     const events = async function* () {
       yield { type: "stdout", data: "first" }
-      await gate
-      yield { type: "result", outcome: "completed", title: "bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
+      try {
+        await gate
+        yield { type: "result", outcome: "completed", title: "bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
+      } finally { returns += 1 }
     }
     const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events() } })
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
@@ -429,6 +441,36 @@ describe("Waterbox API", () => {
     expect(signal.aborted).toBeTrue()
     release()
     await cancelling
+    expect(returns).toBe(1)
+  })
+
+  test("aborts and returns provider iterators when streamed output is malformed or fails", async () => {
+    for (const [name, second] of [
+      ["malformed output", async () => ({ done: false, value: { invalid: "provider output secret" } })],
+      ["iterator failure", async () => { throw new Error("provider iterator secret") }],
+    ] as const) {
+      let signal!: AbortSignal
+      let returns = 0
+      let nexts = 0
+      const events = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nexts += 1
+              if (nexts === 1) return { done: false, value: { type: "stdout", data: "first" } }
+              return second()
+            },
+            async return() { returns += 1; return { done: true, value: undefined } },
+          }
+        },
+      }
+      const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events as never } })
+      const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
+      await expect(response.text()).rejects.toBeDefined()
+      expect(nexts, name).toBe(2)
+      expect(signal.aborted).toBeTrue()
+      expect(returns).toBe(1)
+    }
   })
 
   test("forwards a dispatched bash receipt unchanged", async () => {

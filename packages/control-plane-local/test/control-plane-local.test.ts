@@ -4,6 +4,7 @@ import { FixedClock, FakeSandboxProvider, SequenceIdGenerator } from "@waterbox/
 import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
 import type { IdentityResolver } from "@waterbox/api"
 import { access, mkdtemp, rm, stat } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createEmbeddedApiBackend, createLocalControlPlane, type LocalControlPlaneConfig } from "../src/index.ts"
@@ -128,6 +129,28 @@ describe("local control-plane composition", () => {
     const invalid = { ...new FakeSandboxProvider(), name: "invalid", prepareSandbox: undefined }
     await expect(createLocalControlPlane(config(join(parent, "db.sqlite"), invalid as never), resolver)).rejects.toThrow("provider is invalid")
     await expect(access(parent)).rejects.toBeDefined()
+  })
+
+  test("propagates redacted Box diagnostics through the local composition boundary", async () => {
+    const diagnostics: Array<Parameters<NonNullable<LocalControlPlaneConfig["diagnostic"]>>[0]> = []
+    const config = boxConfig(":memory:")
+    if (config.provider.kind !== "box") throw new Error("Expected Box test configuration")
+    config.provider.runtimeArtifact.bytes = new TextEncoder().encode("#!/usr/bin/env node\n")
+    config.provider.runtimeArtifact.sha256 = createHash("sha256").update(config.provider.runtimeArtifact.bytes).digest("hex")
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input) => {
+      const url = String(input)
+      if (url.endsWith("/boxes")) return new Response(JSON.stringify({ ok: true, type: "box.created", status: "ready", box: { id: "bx_23456789", state: "ready" } }), { status: 202, headers: { "content-type": "application/json" } })
+      return new Response(JSON.stringify({ ok: true, type: "command.finished", success: true, exitCode: 0, stdout: "waterbox-bootstrap-ok\n", stderr: "", timedOut: false }), { headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    try {
+      const plane = await createLocalControlPlane({ ...config, diagnostic: event => diagnostics.push(event) }, resolver)
+      cleanup.push(() => plane.close())
+      const response = await plane.fetch(authenticated("/v1/sandboxes", { method: "POST", headers: { "content-type": "application/json", "idempotency-key": "diagnostic" }, body: "{}" }))
+      expect(response.status, await response.clone().text()).toBe(201)
+      expect(diagnostics).toContainEqual({ type: "preparation", stage: "verify", outcome: "complete" })
+      expect(JSON.stringify(diagnostics)).not.toContain("test-placeholder")
+    } finally { globalThis.fetch = originalFetch }
   })
 
   test("an opened store is closed once when later construction fails", async () => {

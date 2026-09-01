@@ -254,6 +254,35 @@ describe("bounded parsing", () => {
     }
   })
 
+  test("redacts successful JSON and NDJSON reader failures", async () => {
+    const secret = "https://reader-secret.test/?token=credential"
+    const responses = [
+      new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error(secret)) } }), { headers: { "content-type": "application/json" } }),
+      new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error(secret)) } }), { headers: { "content-type": "application/x-ndjson" } }),
+    ]
+    const client = new WaterboxClient(new FakeBackend((_, index) => responses[index]!))
+    for (const operation of [
+      () => client.probeSandbox({ sandboxId }, { signal }),
+      () => client.read({ sandboxId, filePath: "/x" }, { signal }),
+    ]) {
+      const error = await operation().catch(value => value)
+      expect(error).toBeInstanceOf(WaterboxClientError)
+      expect(String(error)).not.toContain("reader-secret")
+      expect(String(error)).not.toContain("credential")
+    }
+  })
+
+  test("parses a highly fragmented NDJSON line without changing its output", async () => {
+    const event = { type: "result", title: "Read", output: "x".repeat(12_000), metadata: { filePath: "/x", offset: 1 } }
+    const bytes = new TextEncoder().encode(`${JSON.stringify(event)}\n`)
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close() },
+    })
+    const result = await new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/x-ndjson" } })))
+      .read({ sandboxId, filePath: "/x" }, { signal })
+    expect(result).toEqual({ title: event.title, output: event.output, metadata: event.metadata })
+  })
+
   test("propagates caller abort and cancels an uncoupled JSON response reader", async () => {
     const controller = new AbortController()
     const reason = new DOMException("json cancelled", "AbortError")
