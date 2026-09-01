@@ -1,39 +1,19 @@
-import {
-  MAX_SECURE_CIPHERTEXT_BYTES,
-  MAX_SECURE_FILE_BYTES,
-  SecureTransferDeliveredSchema,
-  SecureTransferInitiatedSchema,
-  type SandboxId,
-} from "@waterbox/contracts"
-import { Encrypter } from "age-encryption"
+import { MAX_SECURE_FILE_BYTES, type SandboxId } from "@waterbox/contracts"
+import type { CommandContext, WaterboxClient } from "@waterbox/client"
 import { constants } from "node:fs"
 import { open, stat } from "node:fs/promises"
-import type { McpBackend } from "./backend.ts"
 
 export async function sendFileSecurely(
-  backend: McpBackend,
+  client: WaterboxClient,
   input: { sandboxId: SandboxId; sourcePath: string; targetPath: string },
-  signal: AbortSignal,
+  context: CommandContext,
 ) {
-  signal.throwIfAborted()
-  const plaintext = await readLocalFile(input.sourcePath, signal)
-  let ciphertext: Uint8Array | undefined
+  context.signal.throwIfAborted()
+  const plaintext = await readLocalFile(input.sourcePath, context.signal)
   try {
-    const initiated = SecureTransferInitiatedSchema.parse(await backend.initiateSecureFileTransfer(input.sandboxId, signal))
-    if (new Date(initiated.expiresAt).getTime() <= Date.now()) throw new Error("Secure transfer expired before encryption")
-    const encrypter = new Encrypter()
-    encrypter.addRecipient(initiated.publicKey)
-    ciphertext = await encrypter.encrypt(plaintext)
-    signal.throwIfAborted()
-    if (ciphertext.byteLength > MAX_SECURE_CIPHERTEXT_BYTES) throw new Error("Encrypted file is too large")
-    const delivered = await backend.consumeSecureFileTransfer(input.sandboxId, initiated.transferId, {
-      targetPath: input.targetPath,
-      ciphertext: Buffer.from(ciphertext).toString("base64"),
-    }, signal)
-    return SecureTransferDeliveredSchema.parse(delivered)
+    return await client.sendFileSecurely({ sandboxId: input.sandboxId, plaintext, targetPath: input.targetPath }, context)
   } finally {
     plaintext.fill(0)
-    ciphertext?.fill(0)
   }
 }
 

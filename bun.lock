@@ -66,15 +66,14 @@
       "name": "@waterbox/mcp",
       "version": "0.1.0",
       "bin": {
-        "waterbox-mcp": "./dist/waterbox-mcp.js",
+        "waterbox-mcp": "./dist/waterbox.js",
       },
       "devDependencies": {
         "@modelcontextprotocol/sdk": "1.25.3",
+        "@waterbox/client": "workspace:*",
         "@waterbox/contracts": "workspace:*",
-        "@waterbox/core": "workspace:*",
+        "@waterbox/control-plane-local": "workspace:*",
         "@waterbox/provider-box": "workspace:*",
-        "@waterbox/repository-sqlite": "workspace:*",
-        "age-encryption": "0.3.1",
         "zod": "4.1.8",
       },
     },

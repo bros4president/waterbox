@@ -1,6 +1,6 @@
 # @waterbox/mcp
 
-The supported Waterbox MCP server. It runs as a local stdio process and connects directly to the configured sandbox provider.
+The supported Waterbox MCP server. It runs as a local stdio process and renders `@waterbox/client` commands over an authenticated, in-process Waterbox API. Local Box mode opens no listener or daemon.
 
 The first release requires Node.js 24.15.0 or newer and supports the Box provider. Waterbox Cloud is represented in configuration but is not implemented yet.
 
@@ -20,7 +20,7 @@ Then configure `BOX_API_KEY` using the secret or environment mechanism recommend
 
 Installation may be completed before credentials are available. In that state the server remains connected, and lifecycle or operation calls return safe setup guidance instead of terminating the MCP connection.
 
-Direct state is stored in `~/.waterbox/direct.sqlite` by default. Sandboxes persist when the MCP process exits.
+Local state is stored in `~/.waterbox/direct.sqlite` by default. Sandboxes persist when the MCP process exits.
 
 ## Tools
 
