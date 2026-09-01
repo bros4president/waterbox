@@ -150,8 +150,13 @@ describe("Waterbox one-shot CLI", () => {
     expect(await call).toBe(2)
     const [jobId] = await readdir(jobRoot)
     expect(jobId).toBeDefined()
-    await Bun.sleep(500)
-    expect(await readFile(join(jobRoot, jobId!, "output.log"), "utf8")).toBe("survived")
+    const outputPath = join(jobRoot, jobId!, "output.log")
+    let output = ""
+    for (let attempt = 0; attempt < 40 && output !== "survived"; attempt += 1) {
+      await Bun.sleep(50)
+      output = await readFile(outputPath, "utf8")
+    }
+    expect(output).toBe("survived")
   })
 
   test.skipIf(process.platform === "win32")("returns failure and removes files when the detached worker executable cannot spawn", async () => {
