@@ -1,27 +1,65 @@
 import { describe, expect, test } from "bun:test"
-import { readFile } from "node:fs/promises"
-import { glob } from "node:fs/promises"
+import { glob, readFile } from "node:fs/promises"
 
-async function importsBelow(root: string): Promise<string[]> {
-  const imports: string[] = []
-  for await (const path of glob(`${root}/**/*.ts`)) {
-    const source = await readFile(path, "utf8")
-    imports.push(...[...source.matchAll(/from\s+["']([^"']+)["']/g)].map(match => match[1]!))
+type Reference = { specifier: string; kind: "static" | "dynamic" | "require"; symbols: string[] }
+
+function references(source: string): Reference[] {
+  const found: Reference[] = []
+  for (const match of source.matchAll(/(?:import|export)\s+([^;"']*?)\s+from\s+["']([^"']+)["']/g)) {
+    const clause = match[1]!.trim()
+    const symbols = [...clause.matchAll(/\b([A-Za-z_$][\w$]*)\b/g)].map(item => item[1]!).filter(value => !["type", "as", "default"].includes(value))
+    found.push({ specifier: match[2]!, kind: "static", symbols })
   }
-  return imports
+  for (const match of source.matchAll(/\bimport\s*["']([^"']+)["']/g)) found.push({ specifier: match[1]!, kind: "static", symbols: [] })
+  for (const match of source.matchAll(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) found.push({ specifier: match[1]!, kind: "dynamic", symbols: [] })
+  for (const match of source.matchAll(/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g)) found.push({ specifier: match[1]!, kind: "require", symbols: [] })
+  return found
 }
 
+async function referencesBelow(root: string): Promise<Reference[]> {
+  const result: Reference[] = []
+  for await (const path of glob(`${root}/**/*.{ts,tsx,js,mjs,cjs}`)) result.push(...references(await readFile(path, "utf8")))
+  return result
+}
+
+function forbiddenClient(value: string): boolean { return /^@waterbox\/(?:api|core|repository|provider|mcp|control-plane)/.test(value) }
+function forbiddenMcp(value: string): boolean { return /^@waterbox\/(?:core|repository|provider)/.test(value) }
+
+describe("dependency scanner", () => {
+  test("detects static, side-effect, re-export, dynamic, and require bypass forms", () => {
+    const source = `import x from "@waterbox/core"; import "@waterbox/repository-sqlite"; export { x } from "@waterbox/provider-box"; void import("@waterbox/api"); require("@waterbox/mcp");`
+    expect(references(source).map(item => [item.kind, item.specifier]).sort()).toEqual([
+      ["static", "@waterbox/core"], ["static", "@waterbox/repository-sqlite"], ["static", "@waterbox/provider-box"],
+      ["dynamic", "@waterbox/api"], ["require", "@waterbox/mcp"],
+    ].sort())
+  })
+})
+
 describe("static dependency boundaries", () => {
-  test("client cannot import server, core, repository, provider, MCP, or app packages", async () => {
-    const imports = await importsBelow("packages/client/src")
-    expect(imports.filter(value => /^@waterbox\/(?:api|core|repository|provider|mcp|control-plane)/.test(value))).toEqual([])
+  test("client source and runtime manifest cannot depend on server-side packages", async () => {
+    expect((await referencesBelow("packages/client/src")).filter(item => forbiddenClient(item.specifier))).toEqual([])
+    const manifest = JSON.parse(await readFile("packages/client/package.json", "utf8")) as { dependencies?: Record<string, string> }
+    expect(Object.keys(manifest.dependencies ?? {}).filter(forbiddenClient)).toEqual([])
   })
 
-  test("supported MCP cannot import core or repository implementation modules", async () => {
-    const imports = await importsBelow("packages/mcp/src")
-    expect(imports.filter(value => /^@waterbox\/(?:core|repository)/.test(value))).toEqual([])
-    // The one provider-package import is deliberately limited to validating the
-    // caller-adjacent runtime artifact; provider construction stays in control-plane-local.
-    expect(imports.filter(value => /^@waterbox\/provider/.test(value))).toEqual(["@waterbox/provider-box"])
+  test("supported MCP cannot reach core/repositories/providers except the exact artifact loader", async () => {
+    const denied: Reference[] = []
+    for (const item of await referencesBelow("packages/mcp/src")) {
+      if (!forbiddenMcp(item.specifier)) continue
+      if (item.kind === "static" && item.specifier === "@waterbox/provider-box" && item.symbols.join(",") === "loadSandboxRuntimeArtifact") continue
+      denied.push(item)
+    }
+    expect(denied).toEqual([])
+    const manifest = JSON.parse(await readFile("packages/mcp/package.json", "utf8")) as { dependencies?: Record<string, string> }
+    expect(Object.keys(manifest.dependencies ?? {}).filter(forbiddenMcp)).toEqual([])
+  })
+
+  test("artifact-loader exception is symbol- and syntax-specific", () => {
+    const allowed = references(`import { loadSandboxRuntimeArtifact } from "@waterbox/provider-box"`)[0]!
+    expect(allowed).toMatchObject({ kind: "static", specifier: "@waterbox/provider-box", symbols: ["loadSandboxRuntimeArtifact"] })
+    for (const source of [`import { BoxSandboxProvider } from "@waterbox/provider-box"`, `import "@waterbox/provider-box"`, `import("@waterbox/provider-box")`, `require("@waterbox/provider-box")`]) {
+      const item = references(source)[0]!
+      expect(item.kind === "static" && item.symbols.join(",") === "loadSandboxRuntimeArtifact").toBeFalse()
+    }
   })
 })
