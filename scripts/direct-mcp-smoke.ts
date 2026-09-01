@@ -11,6 +11,13 @@ const HEALTH = JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "w
 const VERSION = JSON.stringify({ protocolVersion: 2 })
 
 export interface BoxBaseline { ids: Set<string>; activeBoxes: number }
+export interface BaselineReconciliation { visibleSetRestored: boolean; activeCountRestored: boolean; timedOut: boolean }
+export interface ReconciliationOptions {
+  pollIntervalMs: number
+  pollTimeoutMs: number
+  sleep?: (milliseconds: number) => Promise<void>
+  now?: () => number
+}
 interface DirectSmokeClient {
   listTools(): Promise<{ tools: Array<{ name: string }> }>
   callTool(request: { name: string; arguments?: Record<string, unknown> }): Promise<any>
@@ -38,6 +45,23 @@ export async function compareBoxBaseline(baseUrl: string, apiKey: string, baseli
   if (!Number.isInteger(limits?.activeBoxes) || listed?.ok !== true || listed?.type !== "box.list" || !Array.isArray(listed.boxes) || !listed.boxes.every((item: any) => typeof item?.id === "string")) throw new Error("Box reconciliation returned an invalid response")
   const ids = new Set<string>(listed.boxes.map((item: any) => item.id))
   return { exactIds: ids.size === baseline.ids.size && [...ids].every((id) => baseline.ids.has(id)), activeBoxes: limits.activeBoxes }
+}
+
+export async function reconcileBoxBaseline(baseUrl: string, apiKey: string, baseline: BoxBaseline, options: ReconciliationOptions, fetch_: typeof fetch = fetch): Promise<BaselineReconciliation> {
+  const deadline = (options.now ?? Date.now)() + options.pollTimeoutMs
+  const now = options.now ?? Date.now
+  const sleep = options.sleep ?? Bun.sleep
+  while (true) {
+    const comparison = await compareBoxBaseline(baseUrl, apiKey, baseline, fetch_)
+    const result = { visibleSetRestored: comparison.exactIds, activeCountRestored: comparison.activeBoxes === baseline.activeBoxes, timedOut: false }
+    if (result.visibleSetRestored && result.activeCountRestored) return result
+    if (now() >= deadline) return { ...result, timedOut: true }
+    await sleep(options.pollIntervalMs)
+  }
+}
+
+export function baselineReconciliationError(result: BaselineReconciliation): Error {
+  return new Error(`Box baseline reconciliation did not converge: ${[!result.visibleSetRestored && "visible-set restoration", !result.activeCountRestored && "active-count restoration"].filter(Boolean).join(", ")}`)
 }
 
 export async function runDirectMcpProductFlow(client: DirectSmokeClient, options: ProductFlowOptions): Promise<void> {
@@ -104,6 +128,10 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
   const boxApiKey = environment.BOX_API_KEY
   if (!boxApiKey) throw new Error("The Direct MCP smoke requires Box credentials")
   const boxApiBaseUrl = (environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1").replace(/\/$/, "")
+  const reconciliation = {
+    pollIntervalMs: positiveInteger(environment.WATERBOX_BOX_SMOKE_RECONCILIATION_INTERVAL_MS ?? "1000", "WATERBOX_BOX_SMOKE_RECONCILIATION_INTERVAL_MS"),
+    pollTimeoutMs: positiveInteger(environment.WATERBOX_BOX_SMOKE_RECONCILIATION_TIMEOUT_MS ?? "120000", "WATERBOX_BOX_SMOKE_RECONCILIATION_TIMEOUT_MS"),
+  }
   const baseline = await readBoxBaseline(boxApiBaseUrl, boxApiKey)
   const directory = await mkdtemp(join(tmpdir(), "waterbox-direct-mcp-"))
   const localSecretPath = join(directory, "local-secret.bin")
@@ -120,9 +148,9 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
     await client.close().catch(() => {})
     await rm(directory, { recursive: true, force: true }).catch(() => {})
     try {
-      const reconciliation = await compareBoxBaseline(boxApiBaseUrl, boxApiKey, baseline)
-      console.log(JSON.stringify({ stage: "baseline", exact: reconciliation.exactIds && reconciliation.activeBoxes === baseline.activeBoxes }))
-      if (!reconciliation.exactIds || reconciliation.activeBoxes !== baseline.activeBoxes) failure = failure ?? new Error("Box baseline did not reconcile exactly; manual review is required")
+      const result = await reconcileBoxBaseline(boxApiBaseUrl, boxApiKey, baseline, reconciliation)
+      console.log(JSON.stringify({ stage: "baseline", visibleSetRestored: result.visibleSetRestored, activeCountRestored: result.activeCountRestored }))
+      if (result.timedOut) failure = failure ?? baselineReconciliationError(result)
     } catch {
       failure = failure ?? new Error("Box baseline reconciliation failed")
     }
@@ -216,6 +244,12 @@ function redact(text: string, secrets: string[]): string {
 
 function stringEnvironment(environment: Record<string, string | undefined>): Record<string, string> {
   return Object.fromEntries(Object.entries(environment).filter((entry): entry is [string, string] => entry[1] !== undefined))
+}
+
+function positiveInteger(value: string, name: string): number {
+  const number = Number(value)
+  if (!Number.isSafeInteger(number) || number <= 0) throw new Error(`${name} must be a positive integer`)
+  return number
 }
 
 if (import.meta.main) runDirectMcpSmoke().then((result) => console.log(JSON.stringify(result)), (error) => { console.error(redact(error instanceof Error ? error.message : "Direct MCP smoke failed", [process.env.BOX_API_KEY ?? ""])); process.exitCode = 1 })

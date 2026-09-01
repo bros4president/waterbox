@@ -22,8 +22,16 @@ export interface ProbeDependencies {
   fetch: Fetcher
   sleep(milliseconds: number, signal: AbortSignal): Promise<void>
   randomId(): string
+  now?(): number
   log(observation: Readonly<Record<string, string | number | boolean>>): void
 }
+export interface ProbeReleaseReconciliationOptions {
+  pollIntervalMs: number
+  pollTimeoutMs: number
+  sleep(milliseconds: number): Promise<void>
+  now(): number
+}
+export interface ProbeReleaseReconciliation { visibleSetReleased: boolean; activeCountReleased: boolean; activeBoxes: number }
 
 export function probeHelp(): string {
   return `Usage: BOX_API_KEY=... BOX_CAPABILITY_PROBE_AUTHORIZATION=${AUTHORIZATION} bun run scripts/box-capability-probe.ts --run`
@@ -42,6 +50,17 @@ export function loadProbeConfig(env: NodeJS.ProcessEnv, argv: readonly string[])
   }
 }
 
+export async function reconcileProbeBoxesReleased(ids: readonly string[], activeBaseline: number, readAccount: () => Promise<{ activeBoxes: number; visibleIds: readonly string[] }>, options: ProbeReleaseReconciliationOptions): Promise<ProbeReleaseReconciliation> {
+  const deadline = options.now() + options.pollTimeoutMs
+  while (true) {
+    const account = await readAccount()
+    const result = { visibleSetReleased: !ids.some(id => account.visibleIds.includes(id)), activeCountReleased: account.activeBoxes <= activeBaseline, activeBoxes: account.activeBoxes }
+    if (result.visibleSetReleased && result.activeCountReleased) return result
+    if (options.now() >= deadline) throw new Error(`Accepted Box deletion did not release probe resources: ${[!result.visibleSetReleased && "visible-set release", !result.activeCountReleased && "active-count release"].filter(Boolean).join(", ")} did not converge`)
+    await options.sleep(options.pollIntervalMs)
+  }
+}
+
 export async function runBoxCapabilityProbe(config: ProbeConfig, dependencies: ProbeDependencies): Promise<ReadonlyArray<Readonly<Record<string, string | number | boolean>>>> {
   const observations: Array<Readonly<Record<string, string | number | boolean>>> = []
   const observe = (value: Readonly<Record<string, string | number | boolean>>) => { observations.push(value); dependencies.log(value) }
@@ -53,7 +72,7 @@ export async function runBoxCapabilityProbe(config: ProbeConfig, dependencies: P
   const createBody = { noEnv: true, ttlSeconds: 300 }
   const boxes: string[] = []
   let snapshotCleanupIntent = false
-  const client = new ProbeClient(config, dependencies.fetch, dependencies.sleep, observe)
+  const client = new ProbeClient(config, dependencies.fetch, dependencies.sleep, observe, dependencies.now ?? Date.now)
 
   try {
     const limits = limitsResponse(await client.json("GET", "/limits"))
@@ -109,9 +128,9 @@ export async function runBoxCapabilityProbe(config: ProbeConfig, dependencies: P
     await client.deleteSnapshot(snapshotName)
     snapshotCleanupIntent = false
     observe({ stage: "snapshot-delete", status: "completed" })
-    await client.verifyBoxesReleased(deletedBoxIds, limits.activeBoxes)
+    const release = await client.verifyBoxesReleased(deletedBoxIds, limits.activeBoxes)
     const boxDeletionStatus = deletionStatuses.every(status => status === "completed") ? "completed" : "accepted_pending"
-    observe({ stage: "cleanup", boxesReleased: 2, boxDeletionStatus, snapshotDeleted: true })
+    observe({ stage: "cleanup", boxesReleased: 2, boxDeletionStatus, visibleSetReleased: release.visibleSetReleased, activeCountReleased: release.activeCountReleased, snapshotDeleted: true })
     return observations
   } catch (error) {
     await bestEffortCleanup(client, boxes, snapshotCleanupIntent ? snapshotName : undefined)
@@ -120,7 +139,7 @@ export async function runBoxCapabilityProbe(config: ProbeConfig, dependencies: P
 }
 
 class ProbeClient {
-  constructor(private readonly config: ProbeConfig, private readonly fetcher: Fetcher, private readonly sleep: ProbeDependencies["sleep"], private readonly progress: ProbeDependencies["log"]) {}
+  constructor(private readonly config: ProbeConfig, private readonly fetcher: Fetcher, private readonly sleep: ProbeDependencies["sleep"], private readonly progress: ProbeDependencies["log"], private readonly now: () => number) {}
 
   async json(method: string, path: string, options: { body?: unknown; idempotencyKey?: string; confirmDelete?: string; signal?: AbortSignal } = {}): Promise<unknown> {
     const signal = options.signal ?? AbortSignal.timeout(this.config.requestTimeoutMs)
@@ -135,7 +154,7 @@ class ProbeClient {
   }
 
   async waitForBox(id: string, terminal: readonly BoxState[], stage: string): Promise<{ id: string; state: BoxState }> {
-    const deadline = Date.now() + this.config.pollTimeoutMs
+    const deadline = this.now() + this.config.pollTimeoutMs
     let lastState: string | undefined
     let lastLogAt = 0
     while (true) {
@@ -143,13 +162,13 @@ class ProbeClient {
       ;({ lastState, lastLogAt } = this.#reportProgress(stage, box.state, lastState, lastLogAt))
       if (terminal.includes(box.state)) return box
       if (box.state === "error") throw new Error("Box entered error state")
-      if (Date.now() >= deadline) throw new Error("Box state polling timed out")
+      if (this.now() >= deadline) throw new Error("Box state polling timed out")
       await this.sleep(this.config.pollIntervalMs, AbortSignal.timeout(this.config.requestTimeoutMs))
     }
   }
 
   async waitForSnapshot(name: string, sourceId: string): Promise<{ state: SnapshotState; artifactId?: string }> {
-    const deadline = Date.now() + this.config.pollTimeoutMs
+    const deadline = this.now() + this.config.pollTimeoutMs
     let lastState: string | undefined
     let lastLogAt = 0
     while (true) {
@@ -157,14 +176,14 @@ class ProbeClient {
       ;({ lastState, lastLogAt } = this.#reportProgress("snapshot-save", snapshot.state, lastState, lastLogAt))
       if (snapshot.state === "ready") return snapshot
       if (snapshot.state === "failed") throw new Error("Named snapshot failed")
-      if (Date.now() >= deadline) throw new Error("Snapshot polling timed out")
+      if (this.now() >= deadline) throw new Error("Snapshot polling timed out")
       await this.sleep(this.config.pollIntervalMs, AbortSignal.timeout(this.config.requestTimeoutMs))
     }
   }
 
   async deleteBox(id: string, stage = "box-delete"): Promise<"completed" | "accepted_pending"> {
     const operation = deletionResponse(await this.json("DELETE", `/boxes/${segment(id)}`, { confirmDelete: id }), "box.deleting", id)
-    const deadline = Date.now() + this.config.pollTimeoutMs
+    const deadline = this.now() + this.config.pollTimeoutMs
     let lastState: string | undefined
     let lastLogAt = 0
     while (true) {
@@ -172,7 +191,7 @@ class ProbeClient {
       ;({ lastState, lastLogAt } = this.#reportProgress(stage, current.status, lastState, lastLogAt))
       if (current.status === "completed") return "completed"
       if (current.status === "blocked") return "accepted_pending"
-      if (Date.now() >= deadline) throw new Error("Box deletion polling timed out")
+      if (this.now() >= deadline) throw new Error("Box deletion polling timed out")
       await this.sleep(this.config.pollIntervalMs, AbortSignal.timeout(this.config.requestTimeoutMs))
     }
   }
@@ -182,15 +201,18 @@ class ProbeClient {
     if (!object(value) || value.ok !== true || value.type !== "snapshot.named.deleted" || value.name !== name || value.status !== "deleted") throw new Error("Box returned an invalid snapshot deletion")
   }
 
-  async verifyBoxesReleased(ids: readonly string[], activeBaseline: number): Promise<void> {
-    const limits = limitsResponse(await this.json("GET", "/limits"))
-    const visibleIds = boxListResponse(await this.json("GET", "/boxes"))
-    if (limits.activeBoxes > activeBaseline || ids.some(id => visibleIds.includes(id))) throw new Error("Accepted Box deletion did not release probe resources")
-    this.progress({ stage: "cleanup-verification", activeBoxes: limits.activeBoxes, probeBoxesVisible: false })
+  async verifyBoxesReleased(ids: readonly string[], activeBaseline: number): Promise<ProbeReleaseReconciliation> {
+    const result = await reconcileProbeBoxesReleased(ids, activeBaseline, async () => {
+      const limits = limitsResponse(await this.json("GET", "/limits"))
+      const visibleIds = boxListResponse(await this.json("GET", "/boxes"))
+      return { activeBoxes: limits.activeBoxes, visibleIds }
+    }, { pollIntervalMs: this.config.pollIntervalMs, pollTimeoutMs: this.config.pollTimeoutMs, sleep: milliseconds => this.sleep(milliseconds, AbortSignal.timeout(this.config.requestTimeoutMs)), now: this.now })
+    this.progress({ stage: "cleanup-verification", activeBoxes: result.activeBoxes, probeBoxesVisible: false })
+    return result
   }
 
   #reportProgress(stage: string, state: string, previousState: string | undefined, previousLogAt: number): { lastState: string; lastLogAt: number } {
-    const now = Date.now()
+    const now = this.now()
     if (state !== previousState || now - previousLogAt >= 10_000) {
       this.progress({ stage, state })
       return { lastState: state, lastLogAt: now }

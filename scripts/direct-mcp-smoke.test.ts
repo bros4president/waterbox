@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { assertDirectSmokeAuthorized, compareBoxBaseline, runDirectMcpProductFlow, type BoxBaseline } from "./direct-mcp-smoke.ts"
+import { assertDirectSmokeAuthorized, baselineReconciliationError, compareBoxBaseline, reconcileBoxBaseline, runDirectMcpProductFlow, type BoxBaseline } from "./direct-mcp-smoke.ts"
 
 const now = "2026-08-31T12:00:00.000Z"
 const sandboxId = "sbx_silver-forest-a1"
@@ -51,6 +51,37 @@ describe("Direct MCP smoke", () => {
     expect(await compareBoxBaseline("https://box.invalid", "secret", baseline, fetchFor(["bx_baseline1", "bx_replacement"], 2) as typeof fetch)).toEqual({ exactIds: false, activeBoxes: 2 })
     expect(methods.every((method) => method === undefined)).toBe(true)
   })
+
+  test("accepts immediate exact account baseline restoration", async () => {
+    const baseline: BoxBaseline = { ids: new Set(["bx_baseline1"]), activeBoxes: 1 }
+    await expect(reconcileBoxBaseline("https://box.invalid", "secret", baseline, reconciliationOptions(), fetchSnapshots([{ ids: ["bx_baseline1"], activeBoxes: 1 }]))).resolves.toEqual({ visibleSetRestored: true, activeCountRestored: true, timedOut: false })
+  })
+
+  test("waits for delayed visible-set restoration", async () => {
+    const baseline: BoxBaseline = { ids: new Set(["bx_baseline1"]), activeBoxes: 1 }
+    let now = 0
+    const result = await reconcileBoxBaseline("https://box.invalid", "secret", baseline, { ...reconciliationOptions(), now: () => now, sleep: async () => { now++ } }, fetchSnapshots([{ ids: ["bx_probe"], activeBoxes: 1 }, { ids: ["bx_baseline1"], activeBoxes: 1 }]))
+    expect(result).toEqual({ visibleSetRestored: true, activeCountRestored: true, timedOut: false })
+  })
+
+  test("waits for delayed active-count restoration", async () => {
+    const baseline: BoxBaseline = { ids: new Set(["bx_baseline1"]), activeBoxes: 1 }
+    let now = 0
+    const result = await reconcileBoxBaseline("https://box.invalid", "secret", baseline, { ...reconciliationOptions(), now: () => now, sleep: async () => { now++ } }, fetchSnapshots([{ ids: ["bx_baseline1"], activeBoxes: 2 }, { ids: ["bx_baseline1"], activeBoxes: 1 }]))
+    expect(result).toEqual({ visibleSetRestored: true, activeCountRestored: true, timedOut: false })
+  })
+
+  test("reports bounded non-convergence without exposing account identities", async () => {
+    const secret = "box-secret-value", id = "bx_probe_private"
+    let now = 0
+    const result = await reconcileBoxBaseline("https://box.invalid", secret, { ids: new Set(["bx_baseline1"]), activeBoxes: 1 }, { ...reconciliationOptions(), pollTimeoutMs: 1, now: () => now, sleep: async () => { now++ } }, fetchSnapshots([{ ids: [id], activeBoxes: 2 }, { ids: [id], activeBoxes: 2 }]))
+    expect(result).toEqual({ visibleSetRestored: false, activeCountRestored: false, timedOut: true })
+    const error = baselineReconciliationError(result).message
+    expect(error).toContain("visible-set restoration")
+    expect(error).toContain("active-count restoration")
+    expect(error).not.toContain(secret)
+    expect(error).not.toContain(id)
+  })
 })
 
 interface Call { name: string; arguments: Record<string, any> }
@@ -84,4 +115,13 @@ function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean } = 
     },
   }
   return { client, calls, deletions, sleep: async (milliseconds: number) => { if (milliseconds === 7_000) await new Promise(() => {}) } }
+}
+
+function reconciliationOptions() { return { pollIntervalMs: 1, pollTimeoutMs: 3, sleep: async () => {} } }
+function fetchSnapshots(snapshots: Array<{ ids: string[]; activeBoxes: number }>): typeof fetch {
+  let limitsAt = 0, boxesAt = 0
+  return (async (input: string | URL | Request) => {
+    const snapshot = snapshots[String(input).endsWith("/limits") ? limitsAt++ : boxesAt++] ?? snapshots.at(-1)!
+    return Response.json(String(input).endsWith("/limits") ? { ok: true, type: "limits.info", activeBoxes: snapshot.activeBoxes } : { ok: true, type: "box.list", boxes: snapshot.ids.map(id => ({ id })) })
+  }) as typeof fetch
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { loadProbeConfig, runBoxCapabilityProbe, type ProbeConfig } from "./box-capability-probe.ts"
+import { loadProbeConfig, reconcileProbeBoxesReleased, runBoxCapabilityProbe, type ProbeConfig } from "./box-capability-probe.ts"
 
 const config: ProbeConfig = { apiBaseUrl: "https://api.box.test", apiKey: "box-secret-key", pollIntervalMs: 1, pollTimeoutMs: 1000, requestTimeoutMs: 1000 }
 const source = "bx_23456789"
@@ -12,15 +12,40 @@ describe("Box capability probe", () => {
     expect(loadProbeConfig({ BOX_API_KEY: "key", BOX_CAPABILITY_PROBE_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES" }, ["--run"]).apiKey).toBe("key")
   })
 
+  test("accepts immediate probe resource release", async () => {
+    await expect(reconcileProbeBoxesReleased([source], 1, releaseSnapshots([{ visibleIds: [], activeBoxes: 1 }]), releaseOptions())).resolves.toEqual({ visibleSetReleased: true, activeCountReleased: true, activeBoxes: 1 })
+  })
+
+  test("waits for delayed probe visible-set release", async () => {
+    let now = 0
+    const result = await reconcileProbeBoxesReleased([source], 1, releaseSnapshots([{ visibleIds: [source], activeBoxes: 1 }, { visibleIds: [], activeBoxes: 1 }]), { ...releaseOptions(), now: () => now, sleep: async () => { now++ } })
+    expect(result).toEqual({ visibleSetReleased: true, activeCountReleased: true, activeBoxes: 1 })
+  })
+
+  test("waits for delayed probe active-count release", async () => {
+    let now = 0
+    const result = await reconcileProbeBoxesReleased([source], 1, releaseSnapshots([{ visibleIds: [], activeBoxes: 2 }, { visibleIds: [], activeBoxes: 1 }]), { ...releaseOptions(), now: () => now, sleep: async () => { now++ } })
+    expect(result).toEqual({ visibleSetReleased: true, activeCountReleased: true, activeBoxes: 1 })
+  })
+
+  test("reports sanitized probe release timeout conditions", async () => {
+    const secret = "box-secret-value", privateId = "bx_private1", url = "https://private.test/token"
+    let now = 0
+    let error: unknown
+    try { await reconcileProbeBoxesReleased([privateId], 1, releaseSnapshots([{ visibleIds: [privateId], activeBoxes: 2 }, { visibleIds: [privateId], activeBoxes: 2 }]), { ...releaseOptions(), pollTimeoutMs: 1, now: () => now, sleep: async () => { now++ } }) } catch (caught) { error = caught }
+    expect(String(error)).toContain("visible-set release, active-count release")
+    for (const value of [secret, privateId, url]) expect(String(error)).not.toContain(value)
+  })
+
   test("runs the full raw-fetch flow with exact replay, sanitized observations, and fresh signals", async () => {
     const requests: Request[] = []
-    let creates = 0; let snapshotGets = 0; let sourceGets = 0
+    let creates = 0; let snapshotGets = 0; let sourceGets = 0; let cleanupLimits = 0; let cleanupLists = 0
     const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
       const request = new Request(input, init); requests.push(request.clone()); const url = new URL(request.url); const body = request.body ? await request.clone().json() as any : undefined
-      if (url.pathname.endsWith("/limits")) return limits()
+      if (url.pathname.endsWith("/limits")) return ++cleanupLimits === 1 ? limits() : json({ ok: true, type: "limits.info", canStart: true, activeBoxes: cleanupLimits === 2 ? 1 : 0, maxActiveBoxes: 2 })
       if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; const id = creates <= 2 ? source : restored; const state = creates === 2 ? "ready" : "provisioning"; return json({ ok: true, type: "box.created", status: state, box: { id, state } }, 202) }
-      if (url.pathname.endsWith("/boxes") && request.method === "GET") return json({ ok: true, type: "box.list", boxes: [] })
+      if (url.pathname.endsWith("/boxes") && request.method === "GET") return json({ ok: true, type: "box.list", boxes: ++cleanupLists === 1 ? [{ id: restored, state: "ready" }] : [] })
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") { sourceGets++; return json({ ok: true, type: "box.info", box: { id: source, state: sourceGets === 2 ? "archived" : "ready" } }) }
       if (url.pathname.endsWith(`/boxes/${restored}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: restored, state: "ready" } })
       if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
@@ -47,7 +72,7 @@ describe("Box capability probe", () => {
     expect(requests.filter(request => request.method === "DELETE" && new URL(request.url).pathname.includes("/boxes/"))).toHaveLength(2)
     expect(new Set(requests.map(request => request.signal)).size).toBeGreaterThan(5)
     expect(requests.some(request => request.method === "GET" && new URL(request.url).pathname.endsWith("/boxes"))).toBe(true)
-    expect(observations.at(-1)).toEqual({ stage: "cleanup", boxesReleased: 2, boxDeletionStatus: "accepted_pending", snapshotDeleted: true })
+    expect(observations.at(-1)).toEqual({ stage: "cleanup", boxesReleased: 2, boxDeletionStatus: "accepted_pending", visibleSetReleased: true, activeCountReleased: true, snapshotDeleted: true })
     const serialized = JSON.stringify(logs)
     for (const secret of [config.apiKey, source, restored, "artifact-1", "0123456789abcdef"]) expect(serialized).not.toContain(secret)
   })
@@ -188,3 +213,8 @@ function json(value: unknown, status = 200): Response { return Response.json(val
 function limits(): Response { return json({ ok: true, type: "limits.info", canStart: true, activeBoxes: 0, maxActiveBoxes: 2, billingStatus: "active" }) }
 function retention(): Response { return json({ ok: true, type: "data_retention.info", enabled: false, enabledAt: null }) }
 function deps(fetcher: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) { return { fetch: fetcher, sleep: async (_ms: number, signal: AbortSignal) => signal.throwIfAborted(), randomId: () => "01234567-89ab-cdef", log: () => {} } }
+function releaseOptions() { return { pollIntervalMs: 1, pollTimeoutMs: 3, sleep: async () => {}, now: () => 0 } }
+function releaseSnapshots(snapshots: Array<{ visibleIds: string[]; activeBoxes: number }>) {
+  let index = 0
+  return async () => snapshots[index++] ?? snapshots.at(-1)!
+}
