@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Node 24.15.0, Phase 3, and the fresh Phase 4 Box flow are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; post-merge Node-minimum, live, and release-path re-verification remain pending. Snapshot-sourced Box reinstall and remaining Phase 0 live prerequisites are pending.
+Status: implementation in progress. Node 24.15.0, Phase 3, full Phase 4 Box bootstrap, and the post-PR #5 Fetch-backed live path are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; current-Node-24 CI and release-path verification remain pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -646,7 +646,7 @@ After npm launch, registry publication gets a separate plan or an appended phase
 
 ### Phase 0: Baseline And Capability Gate
 
-Status: partially verified live; stop/resume and snapshot overwrite remain pending
+Status: complete; credential-free baseline plus authorized snapshot restore, stop/resume, runtime overwrite, and exact cleanup gates passed
 
 Scope:
 
@@ -717,7 +717,7 @@ Also run focused Node 24 repository compatibility checks added by this phase.
 
 ### Phase 2: Node MCP And One-Shot CLI
 
-Status: implemented and verified on Node 24.15.0; current Node 24 CI verification remains pending. Its pre-PR #5 end-to-end MCP evidence must be rerun through the merged Fetch-backed architecture; depends on Phase 1.
+Status: implemented and verified on Node 24.15.0, including the post-PR #5 Fetch-backed live MCP path; current Node 24 CI verification remains pending; depends on Phase 1.
 
 Scope:
 
@@ -799,7 +799,7 @@ No live Box call is required for the credential-free completion of this phase.
 
 ### Phase 4: Box Bootstrap-On-Create
 
-Status: fresh live provider/bootstrap flow passed; snapshot-sourced reinstall failed during install and full live acceptance remains pending. The recorded evidence is not post-PR #5 end-to-end MCP evidence and must be rerun through the merged architecture; depends on Phase 3.
+Status: complete with authorized live acceptance. Fresh and deliberately stale snapshot-sourced runtime preparation, user-data preservation, stop/resume, optional capabilities, and exact cleanup passed through the merged architecture; depends on Phase 3.
 
 Scope:
 
@@ -831,11 +831,11 @@ bun run build:mcp
 git diff --check
 ```
 
-Then run separately authorized isolated-account live checks for the remaining stop/resume and snapshot-sourced reinstall gates. Snapshot-sourced creation from a stopped sandbox must reinstall the current runtime before Phase 4 receives full live acceptance.
+Authorized isolated-account evidence verified provider snapshot restore and stop/resume continuity, then verified through the supported Fetch-backed MCP that a snapshot missing the inherited CLI artifact triggers upload, install, final verification, current health/version, and user-data preservation. Bounded cleanup restored the exact Box account baseline.
 
 ### Phase 5: Fetch-Backed Product Boundary
 
-Status: merged in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and integrated into the current checkout; post-merge Node-minimum, live, and release-path re-verification remain pending; depends on the Phase 4 implementation, not its remaining live gates
+Status: merged in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and integrated into the current checkout. Credential-free tests and the Node 24.15.0 live MCP path are re-verified; current-Node-24 CI and release-path verification remain pending; depends on Phase 4
 
 Scope:
 
@@ -1165,15 +1165,15 @@ Live tests require explicit isolated-account authorization and must prove:
 
 ## Launch Checklist
 
-- [ ] Phase 0 baseline fully recorded.
-- [ ] Plain Box stop/resume and snapshot-overwrite capability calibrated live.
+- [x] Phase 0 baseline fully recorded.
+- [x] Plain Box stop/resume and snapshot-overwrite capability calibrated live.
 - [x] Shared SQLite migrated to Node.
 - [x] Local MCP runs on Node 24 without Bun.
 - [x] In-Box CLI runs on Node 24 without Bun.
 - [x] Provider create result persists as `preparing` before bootstrap.
 - [x] Same-key create resumes only durable preparation safely.
 - [x] Fresh Box creation no longer uses a system snapshot.
-- [ ] Snapshot-sourced creation installs the current runtime.
+- [x] Snapshot-sourced creation installs the current runtime and preserves user data.
 - [ ] Legacy system-template machinery removed after the snapshot/live gate.
 - [x] PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`.
 - [x] PR #5 integrated into the current checkout.
@@ -1206,3 +1206,4 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-08-31: Phase 4 fresh live flow passed: fresh create, initial incomplete verification, correlated upload, install, final verification, running probe, all tools, secure transfer, async Bash, concurrency, tracked cleanup, and exact baseline comparison. The verifier natural-EOF handling was corrected from this live observation.
 - 2026-08-31: Snapshot-sourced reinstall failed during install and remains pending. Stop/resume and snapshot overwrite are also pending, so Phase 0 and Phase 4 full live acceptance are not complete. Legacy template machinery deletion remains deferred until that gate passes.
 - 2026-09-01: PR #5 merged as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and was integrated into the current checkout. The launch plan was realigned to its Fetch-backed product boundary and adds audit-before-implementation pressure for Vercel Sandbox. Post-merge re-verification, the Vercel probe, and the Vercel adapter remain unclaimed.
+- 2026-09-01: Post-merge verification restored workspace links and passed 446 credential-free tests, typecheck, MCP build, focused Fetch-backed coverage, and Node 24.15.0 artifact checks. The authorized Fetch-backed Box smoke passed fresh preparation, all seven tools, secure transfer, Bash, concurrency, bounded exact cleanup, and a deliberately stale snapshot-sourced reinstall with user-data preservation and current runtime verification. The raw capability probe separately passed snapshot restore, stop/resume identity and marker continuity, accepted-pending deletion with visibility/capacity release, snapshot deletion, and zero active run-owned resources. Phase 0 and Phase 4 live gates are complete; no provider identifiers or credentials were retained.

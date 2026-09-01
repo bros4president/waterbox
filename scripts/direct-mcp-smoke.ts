@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { SandboxSchema } from "../packages/sandbox-contracts/src/index.ts"
+import { SandboxSchema, SnapshotPageSchema, SnapshotSchema } from "../packages/sandbox-contracts/src/index.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -9,6 +9,7 @@ const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
 const TOOL_NAMES = "create_sandbox,probe_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash"
 const HEALTH = JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })
 const VERSION = JSON.stringify({ protocolVersion: 2 })
+const SNAPSHOT_POLL_ATTEMPTS = 180
 
 export interface BoxBaseline { ids: Set<string>; activeBoxes: number }
 export interface BaselineReconciliation { visibleSetRestored: boolean; activeCountRestored: boolean; timedOut: boolean }
@@ -67,7 +68,7 @@ export function baselineReconciliationError(result: BaselineReconciliation): Err
 export async function runDirectMcpProductFlow(client: DirectSmokeClient, options: ProductFlowOptions): Promise<void> {
   const sleep = options.sleep ?? Bun.sleep
   const report = (stage: string, facts: Record<string, boolean | number>) => options.log?.(redact(JSON.stringify({ stage, ...facts }), options.secrets ?? []))
-  let sandboxId: string | undefined
+  let sandboxId: string | undefined, snapshotId: string | undefined, restoredSandboxId: string | undefined, marker: string | undefined
   let failure: unknown
 
   try {
@@ -107,20 +108,88 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     const bash = await successfulOutput(client, "bash", { ...target, command: "pwd; id -u; cat direct-smoke.txt", workdir: "/root" }, sleep)
     if (!bash.includes("/root") || !bash.includes("\n0\n") || !bash.includes("Beta")) throw new Error("Direct MCP bash assertion failed")
     report("flow", { tools: 7, secureTransfer: true, asyncBash: true })
+
+    marker = `waterbox-direct-marker-${crypto.randomUUID()}`
+    await successfulOutput(client, "write", { ...target, filePath: "/home/user/.waterbox-direct-marker", content: marker }, sleep)
+    // This command is already executing through the healthy CLI; removing its installed artifact
+    // makes the inherited snapshot incomplete without touching the user marker or user data.
+    await successfulOutput(client, "bash", { ...target, command: "sudo -n rm -f /usr/local/lib/waterbox-cli.js", workdir: "/root" }, sleep)
+    let snapshot
+    try {
+      const result = await callTool(client, { name: "create_snapshot", arguments: { sandboxId } }, 180_000)
+      if (result.isError) throw new Error("create failed")
+      snapshot = SnapshotSchema.parse(JSON.parse(resultText(result)))
+    } catch {
+      throw new Error("Direct MCP snapshot creation failed")
+    }
+    snapshotId = snapshot.snapshotId
+    await waitForSnapshotReady(client, snapshotId, sleep)
+    report("snapshot", { ready: true })
+
+    let restored
+    try {
+      const result = await callTool(client, { name: "create_sandbox", arguments: { sourceSnapshotId: snapshotId, idempotencyKey: `direct-smoke-restore-${crypto.randomUUID()}` } }, 180_000)
+      if (result.isError) throw new Error("create failed")
+      restored = SandboxSchema.parse(JSON.parse(resultText(result)))
+    } catch {
+      throw new Error("Direct MCP restored sandbox creation failed")
+    }
+    restoredSandboxId = restored.sandboxId
+    if (restored.state !== "running" || restored.sourceSnapshotId !== snapshotId) throw new Error("Direct MCP restored sandbox was not running from its tracked snapshot")
+    const restoredTarget = { sandboxId: restoredSandboxId }
+    if (SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "probe_sandbox", arguments: restoredTarget })))).state !== "running") throw new Error("Direct MCP restored sandbox probe was not running")
+    report("restored", { running: true })
+    if ((await successfulOutput(client, "read", { ...restoredTarget, filePath: "/home/user/.waterbox-direct-marker" }, sleep)) !== marker) throw new Error("Direct MCP restored user data verification failed")
+    report("restored-user-data", { preserved: true })
+    const restoredRuntime = await successfulOutput(client, "bash", { ...restoredTarget, command: "/usr/local/bin/waterbox health; /usr/local/bin/waterbox version; test -s /usr/local/lib/waterbox-cli.js && test -f /usr/local/lib/waterbox-bootstrap.json", workdir: "/root" }, sleep)
+    if (!restoredRuntime.includes(HEALTH) || !restoredRuntime.includes(VERSION)) throw new Error("Direct MCP restored runtime verification failed")
+    report("restored-runtime", { reinstalled: true, current: true })
   } catch (error) {
     failure = error
   } finally {
-    if (sandboxId) {
-      try {
-        const deleted = SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "delete_sandbox", arguments: { sandboxId } }, 180_000))))
-        if (deleted.sandboxId !== sandboxId || deleted.state !== "terminated") throw new Error("uncorrelated delete result")
-        report("cleanup", { deleted: true })
-      } catch {
-        failure = failure ?? new Error("Direct MCP tracked cleanup requires manual review")
-      }
-    }
+    const cleanupFailures: string[] = []
+    if (restoredSandboxId) await deleteTrackedSandbox(client, restoredSandboxId, report).catch(() => cleanupFailures.push("restored sandbox"))
+    if (snapshotId) await deleteTrackedSnapshot(client, snapshotId, report).catch(() => cleanupFailures.push("snapshot"))
+    if (sandboxId) await deleteTrackedSandbox(client, sandboxId, report).catch(() => cleanupFailures.push("source sandbox"))
+    if (cleanupFailures.length) failure = failure === undefined ? new Error("Direct MCP tracked cleanup requires manual review") : new Error(`${failure instanceof Error ? failure.message : "Direct MCP smoke failed"}; tracked cleanup requires manual review`)
   }
-  if (failure !== undefined) throw new Error(redact(failure instanceof Error ? failure.message : "Direct MCP smoke failed", options.secrets ?? []))
+  if (failure !== undefined) throw new Error(redact(failure instanceof Error ? failure.message : "Direct MCP smoke failed", [...(options.secrets ?? []), sandboxId ?? "", snapshotId ?? "", restoredSandboxId ?? "", marker ?? ""]))
+}
+
+async function waitForSnapshotReady(client: DirectSmokeClient, snapshotId: string, sleep: (milliseconds: number) => Promise<void>): Promise<void> {
+  for (let attempt = 0; attempt < SNAPSHOT_POLL_ATTEMPTS; attempt++) {
+    const snapshot = await findTrackedSnapshot(client, snapshotId)
+    if (snapshot?.state === "ready") return
+    if (snapshot?.state === "failed" || snapshot?.state === "deleted") throw new Error("Direct MCP tracked snapshot entered a terminal state")
+    await sleep(1_000)
+  }
+  throw new Error("Direct MCP snapshot readiness timed out")
+}
+
+async function findTrackedSnapshot(client: DirectSmokeClient, snapshotId: string) {
+  let cursor: string | undefined
+  for (let pageNumber = 0; pageNumber < 100; pageNumber++) {
+    const result = await callTool(client, { name: "list_snapshots", arguments: { limit: 100, ...(cursor === undefined ? {} : { cursor }) } })
+    if (result.isError) throw new Error("Direct MCP snapshot readiness check failed")
+    const page = SnapshotPageSchema.parse(JSON.parse(resultText(result)))
+    const snapshot = page.items.find((item) => item.snapshotId === snapshotId)
+    if (snapshot) return snapshot
+    if (!page.nextCursor) return undefined
+    cursor = page.nextCursor
+  }
+  throw new Error("Direct MCP snapshot readiness listing exceeded its safety bound")
+}
+
+async function deleteTrackedSandbox(client: DirectSmokeClient, sandboxId: string, report: (stage: string, facts: Record<string, boolean | number>) => void): Promise<void> {
+  const deleted = SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "delete_sandbox", arguments: { sandboxId } }, 180_000))))
+  if (deleted.sandboxId !== sandboxId || deleted.state !== "terminated") throw new Error("uncorrelated delete result")
+  report("cleanup", { sandboxDeleted: true })
+}
+
+async function deleteTrackedSnapshot(client: DirectSmokeClient, snapshotId: string, report: (stage: string, facts: Record<string, boolean | number>) => void): Promise<void> {
+  const deleted = SnapshotSchema.parse(JSON.parse(resultText(await callTool(client, { name: "delete_snapshot", arguments: { snapshotId } }, 180_000))))
+  if (deleted.snapshotId !== snapshotId || deleted.state !== "deleted") throw new Error("uncorrelated delete result")
+  report("cleanup", { snapshotDeleted: true })
 }
 
 export async function runDirectMcpSmoke(environment: Record<string, string | undefined> = process.env) {
