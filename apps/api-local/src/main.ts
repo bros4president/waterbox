@@ -1,9 +1,11 @@
-import { createLocalControlPlane } from "./app.ts"
+import { createDevelopmentControlPlane, loadDevelopmentRuntimeArtifact } from "./app.ts"
 import { parseLocalApiConfig } from "./config.ts"
 import { startLocalServer } from "./server.ts"
 
 const config = parseLocalApiConfig(process.env)
-const running = startLocalServer(createLocalControlPlane(config), { host: config.host, port: config.port, log: console.log })
+const runtimeArtifact = await loadDevelopmentRuntimeArtifact()
+const controlPlane = await createDevelopmentControlPlane(config, runtimeArtifact)
+const running = await startLocalServer(controlPlane, { host: config.host, port: config.port, log: console.log })
 let closing = false
 async function close() {
   if (closing) return

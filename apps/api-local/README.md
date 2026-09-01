@@ -1,7 +1,9 @@
 # Waterbox local control plane
 
-Configure the placeholder variables in the repository `.env.example`, create the parent
-directory for `WATERBOX_SQLITE_PATH`, and start with `bun run start:api-local`. This is a
+Configure the placeholder variables in the repository `.env.example` and start with
+`bun run start:api-local`. The start
+command explicitly builds the development sandbox CLI in `packages/sandbox-cli/dist` before
+the app loads and injects it into the shared local control plane. This is a
 development-only fixed bearer identity; do not expose the listener publicly.
 
 The examples below assume `URL=http://127.0.0.1:8787`, `KEY` is the configured development

@@ -25,7 +25,8 @@ import type {
 import { ProviderError } from "@waterbox/core/provider"
 import { FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { createDaemon } from "@waterbox/daemon"
-import { createLocalControlPlane, localRuntimeArtifact } from "../src/app.ts"
+import { createLocalControlPlane } from "@waterbox/control-plane-local"
+import { fixedDevelopmentIdentityResolver, loadDevelopmentRuntimeArtifact } from "../src/app.ts"
 import { LocalConfigurationError, parseLocalApiConfig, type LocalApiConfig } from "../src/config.ts"
 import { startLocalServer } from "../src/server.ts"
 
@@ -110,10 +111,14 @@ async function fixture(ids = [sandboxId, secondSandboxId]) {
     host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: apiKey, accountId,
     box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", polling: { intervalMs: 1, timeoutMs: 10 } },
   }
-  const create = () => createLocalControlPlane(config, { provider, clock: new FixedClock(), ids: new SequenceIdGenerator(ids, [snapshotId]) })
-  const plane = create()
+  const create = () => createLocalControlPlane({
+    sqlitePath: config.sqlitePath,
+    accountId: config.accountId,
+    provider: { kind: "injected", implementation: provider },
+  }, fixedDevelopmentIdentityResolver(apiKey, accountId), { clock: new FixedClock(), ids: new SequenceIdGenerator(ids, [snapshotId]) })
+  const plane = await create()
   const logs: string[] = []
-  const running = startLocalServer(plane, { host: "127.0.0.1", port: 0, log: (line) => logs.push(line) })
+  const running = await startLocalServer(plane, { host: "127.0.0.1", port: 0, log: (line) => logs.push(line) })
   const baseUrl = `http://127.0.0.1:${running.server.port}`
   cleanup.push(async () => { await running.close(); daemon.shutdown(); await daemonServer.stop(true); await rm(directory, { recursive: true, force: true }) })
   return { directory, config, create, provider, running, baseUrl, logs }
@@ -130,22 +135,49 @@ async function json(baseUrl: string, path: string, init: RequestInit = {}) {
 const post = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
 
 describe("local API composition", () => {
+  test("listener startup failure and repeated shutdown close the control plane once", async () => {
+    let startupCloses = 0
+    const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("occupied") })
+    try {
+      await expect(startLocalServer({
+        fetch: async () => new Response("unused"),
+        close: async () => { startupCloses++ },
+      }, { host: "127.0.0.1", port: occupied.port! })).rejects.toThrow()
+      expect(startupCloses).toBe(1)
+    } finally {
+      await occupied.stop(true)
+    }
+
+    let shutdownCloses = 0
+    const running = await startLocalServer({
+      fetch: async () => new Response("ok"),
+      close: async () => { shutdownCloses++ },
+    }, { host: "127.0.0.1", port: 0 })
+    await running.close()
+    await running.close()
+    expect(shutdownCloses).toBe(1)
+  })
+
   test("reads the fixed package-relative artifact and fails safely when it is missing", async () => {
     let reads = 0; let readUrl: URL | undefined
-    const artifact = localRuntimeArtifact({
-      read(url) { readUrl = url; reads++; return runtimeBytes },
+    const artifact = await loadDevelopmentRuntimeArtifact({
+      async load(url, artifactVersion) { readUrl = url; reads++; return { ...runtimeArtifact, artifactVersion } },
     })
     expect(reads).toBe(1)
-    expect(readUrl?.pathname.endsWith("/packages/mcp/dist/waterbox-cli.js")).toBe(true)
+    expect(readUrl?.pathname.endsWith("/packages/sandbox-cli/dist/waterbox-cli.js")).toBe(true)
     expect(artifact.sha256).toBe(runtimeArtifact.sha256)
-    expect(() => localRuntimeArtifact({ read() { throw new Error("missing") } })).toThrow("Waterbox local runtime artifact is unavailable")
+    await expect(loadDevelopmentRuntimeArtifact({ async load() { throw new Error("missing") } })).rejects.toThrow("Waterbox local runtime artifact is unavailable")
 
     const directory = await mkdtemp(join(tmpdir(), "waterbox-api-local-clean-"))
     const config: LocalApiConfig = {
       host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: "placeholder-development-key", accountId,
       box: { apiBaseUrl: "https://api.box.invalid", apiKey: "placeholder-not-a-live-key", polling: { intervalMs: 1, timeoutMs: 10 } },
     }
-    const plane = createLocalControlPlane(config, { artifact })
+    const plane = await createLocalControlPlane({
+      sqlitePath: config.sqlitePath,
+      accountId: config.accountId,
+      provider: { kind: "box", config: config.box, runtimeArtifact: artifact },
+    }, fixedDevelopmentIdentityResolver(config.developmentApiKey, config.accountId))
     try { expect((await plane.fetch(new Request("http://local.test/health"))).status).toBe(200) }
     finally { plane.close(); await rm(directory, { recursive: true, force: true }) }
   })
@@ -158,6 +190,7 @@ describe("local API composition", () => {
     expect(String(error)).not.toContain(apiKey)
     expect(String(error)).not.toContain("box-secret")
     const context = await fixture()
+    expect((await fetch(`${context.baseUrl}/v1/sandboxes`)).status).toBe(401)
     expect((await fetch(`${context.baseUrl}/v1/sandboxes`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401)
   })
 
@@ -167,8 +200,8 @@ describe("local API composition", () => {
     expect((await (await fetch(`${context.baseUrl}/openapi.json`)).json()).openapi).toBe("3.1.0")
     await json(context.baseUrl, "/v1/sandboxes", { ...post({}), headers: { "content-type": "application/json", "idempotency-key": "persist-1" } })
     await context.running.close()
-    const reconstructed = context.create()
-    const replacement = startLocalServer(reconstructed, { host: "127.0.0.1", port: 0 })
+    const reconstructed = await context.create()
+    const replacement = await startLocalServer(reconstructed, { host: "127.0.0.1", port: 0 })
     cleanup.push(() => replacement.close())
     const replacementUrl = `http://127.0.0.1:${replacement.server.port}`
     expect((await json(replacementUrl, "/v1/sandboxes")).items).toHaveLength(1)
