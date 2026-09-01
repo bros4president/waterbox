@@ -17,13 +17,23 @@ afterEach(async () => {
   while (cleanup.length > 0) await cleanup.pop()!()
 })
 
-function config(sqlitePath: string): LocalControlPlaneConfig {
+function config(sqlitePath: string, provider = new FakeSandboxProvider()): LocalControlPlaneConfig {
   return {
     sqlitePath,
     accountId,
-    provider: "box",
-    box: { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } },
-    runtimeArtifact: { bytes: new Uint8Array([1]), sha256: "0".repeat(64), cliProtocolVersion: 2, artifactVersion: "test" },
+    provider: { kind: "injected", implementation: provider },
+  }
+}
+
+function boxConfig(sqlitePath: string): LocalControlPlaneConfig {
+  return {
+    sqlitePath,
+    accountId,
+    provider: {
+      kind: "box",
+      config: { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } },
+      runtimeArtifact: { bytes: new Uint8Array([1]), sha256: "0".repeat(64), cliProtocolVersion: 2, artifactVersion: "test" },
+    },
   }
 }
 
@@ -43,7 +53,7 @@ function authenticated(path: string, init: RequestInit = {}): Request {
 
 describe("local control-plane composition", () => {
   test("raw API authentication is enforced without a listener", async () => {
-    const plane = await createLocalControlPlane(config(":memory:"), resolver, { provider: new FakeSandboxProvider() })
+    const plane = await createLocalControlPlane(config(":memory:"), resolver)
     cleanup.push(() => plane.close())
     expect((await plane.fetch(new Request("http://waterbox.local/v1/sandboxes"))).status).toBe(401)
     expect((await plane.fetch(new Request("http://waterbox.local/v1/sandboxes", { headers: { authorization: "Bearer wrong" } }))).status).toBe(401)
@@ -52,8 +62,7 @@ describe("local control-plane composition", () => {
 
   test("embedded client traverses API and replaces external Authorization", async () => {
     const provider = new FakeSandboxProvider()
-    const backend = await createEmbeddedApiBackend(config(":memory:"), {
-      provider,
+    const backend = await createEmbeddedApiBackend(config(":memory:", provider), {
       clock: new FixedClock(),
       ids: new SequenceIdGenerator([sandboxId]),
     })
@@ -77,8 +86,7 @@ describe("local control-plane composition", () => {
     const parent = join(root, "private", "nested")
     const sqlitePath = join(parent, "control-plane.sqlite")
     const provider = new FakeSandboxProvider()
-    const first = await createLocalControlPlane(config(sqlitePath), resolver, {
-      provider,
+    const first = await createLocalControlPlane(config(sqlitePath, provider), resolver, {
       clock: new FixedClock(),
       ids: new SequenceIdGenerator([sandboxId]),
     })
@@ -91,7 +99,7 @@ describe("local control-plane composition", () => {
     await first.close()
     expect((await stat(parent)).mode & 0o777).toBe(0o700)
 
-    const second = await createLocalControlPlane(config(sqlitePath), resolver, { provider })
+    const second = await createLocalControlPlane(config(sqlitePath, provider), resolver)
     cleanup.push(() => second.close())
     const listed = await (await second.fetch(authenticated("/v1/sandboxes"))).json()
     expect(listed.items).toHaveLength(1)
@@ -102,10 +110,23 @@ describe("local control-plane composition", () => {
     const root = await mkdtemp(join(tmpdir(), "waterbox-local-invalid-"))
     cleanup.push(() => rm(root, { recursive: true, force: true }))
     const parent = join(root, "must-not-exist")
-    const selected = config(join(parent, "db.sqlite"))
+    const selected = boxConfig(join(parent, "db.sqlite"))
 
     await expect(createLocalControlPlane({ ...selected, provider: undefined } as unknown as LocalControlPlaneConfig, resolver)).rejects.toThrow("provider selection")
-    await expect(createLocalControlPlane({ ...selected, runtimeArtifact: { ...selected.runtimeArtifact, sha256: "invalid" } }, resolver)).rejects.toThrow("artifact")
+    if (selected.provider.kind !== "box") throw new Error("Expected Box test configuration")
+    await expect(createLocalControlPlane({
+      ...selected,
+      provider: { ...selected.provider, runtimeArtifact: { ...selected.provider.runtimeArtifact, sha256: "invalid" } },
+    }, resolver)).rejects.toThrow("artifact")
+    await expect(access(parent)).rejects.toBeDefined()
+  })
+
+  test("injected selection needs no Box configuration or artifact and validates before filesystem effects", async () => {
+    const root = await mkdtemp(join(tmpdir(), "waterbox-local-injected-"))
+    cleanup.push(() => rm(root, { recursive: true, force: true }))
+    const parent = join(root, "must-not-exist")
+    const invalid = { ...new FakeSandboxProvider(), name: "invalid", prepareSandbox: undefined }
+    await expect(createLocalControlPlane(config(join(parent, "db.sqlite"), invalid as never), resolver)).rejects.toThrow("provider is invalid")
     await expect(access(parent)).rejects.toBeDefined()
   })
 
@@ -118,8 +139,7 @@ describe("local control-plane composition", () => {
       idempotency: undefined,
       close() { closes++ },
     }
-    await expect(createLocalControlPlane(config(":memory:"), resolver, {
-      provider,
+    await expect(createLocalControlPlane(config(":memory:", provider), resolver, {
       createStore: () => invalidStore as never,
     })).rejects.toThrow("construction failed")
     expect(closes).toBe(1)
@@ -129,7 +149,6 @@ describe("local control-plane composition", () => {
     let opens = 0
     let closes = 0
     const plane = await createLocalControlPlane(config(":memory:"), resolver, {
-      provider: new FakeSandboxProvider(),
       createStore(path) {
         opens++
         const store = new SqliteRepositoryStore(path, { create: true })
