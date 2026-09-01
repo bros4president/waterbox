@@ -1,5 +1,4 @@
-import { BashToolResultSchema, type DispatchedBashToolResult, type SandboxId } from "@waterbox/contracts"
-import type { BashJobObservation } from "@waterbox/core/provider"
+import { BashToolResultSchema, type BashJobObservation, type DispatchedBashToolResult, type SandboxId } from "@waterbox/contracts"
 import type { McpBackend } from "./backend.ts"
 
 const CHUNK_BYTES = 65_536

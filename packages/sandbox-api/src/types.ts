@@ -21,6 +21,7 @@ export interface IdentityResolver {
 export type WaterboxCore = Pick<SandboxService,
   | "createSandbox"
   | "getSandbox"
+  | "probeSandbox"
   | "listSandboxes"
   | "stopSandbox"
   | "resumeSandbox"

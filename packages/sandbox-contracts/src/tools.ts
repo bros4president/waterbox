@@ -5,6 +5,7 @@ const PositiveIntegerSchema = z.number().int().positive()
 export const FilePathSchema = NonEmptyStringSchema.max(4_096)
 
 export const ToolNameSchema = z.enum(["read", "write", "edit", "patch", "glob", "grep", "bash"])
+export const BashJobIdSchema = z.string().regex(/^job_[0-9a-f]{32}$/)
 
 export const ReadToolArgumentsSchema = z.object({
   filePath: FilePathSchema,
@@ -134,7 +135,7 @@ const DispatchedBashToolResultObjectSchema = z.object({
     description: z.string().optional(),
     workdir: z.string(),
     timeout: PositiveIntegerSchema.max(2_147_483_647).optional(),
-    jobId: z.string().regex(/^job_[0-9a-f]{32}$/),
+    jobId: BashJobIdSchema,
     outputPath: FilePathSchema,
     statusPath: FilePathSchema,
   }).strict(),
@@ -167,6 +168,27 @@ export const BashToolEventSchema = z.union([
   DispatchedBashToolResultObjectSchema.extend({ type: z.literal("result") }).superRefine(validateReceiptPaths),
 ])
 
+export const BashJobObservationRequestSchema = z.object({
+  offset: z.number().int().nonnegative(),
+  maxBytes: z.number().int().min(1).max(65_536),
+}).strict()
+
+export const BashJobObservationSchema = z.object({
+  jobId: BashJobIdSchema,
+  state: z.enum(["starting", "running", "completed", "failed"]),
+  chunkBase64: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
+  nextOffset: z.number().int().nonnegative(),
+  outputSize: z.number().int().nonnegative(),
+  exitCode: z.number().int().nullable().optional(),
+  signal: z.string().nullable().optional(),
+  timedOut: z.boolean().optional(),
+  durationMs: z.number().nonnegative().optional(),
+  error: z.enum(["spawn_failed", "worker_failed"]).optional(),
+}).strict().refine(value => value.outputSize >= value.nextOffset, {
+  path: ["outputSize"],
+  message: "Output size must include the observed offset",
+})
+
 export type ToolName = z.infer<typeof ToolNameSchema>
 export type ReadToolArguments = z.infer<typeof ReadToolArgumentsSchema>
 export type WriteToolArguments = z.infer<typeof WriteToolArgumentsSchema>
@@ -191,3 +213,25 @@ export type PatchToolEvent = z.infer<typeof PatchToolEventSchema>
 export type GlobToolEvent = z.infer<typeof GlobToolEventSchema>
 export type GrepToolEvent = z.infer<typeof GrepToolEventSchema>
 export type BashToolEvent = z.infer<typeof BashToolEventSchema>
+export type BashJobObservationRequest = z.infer<typeof BashJobObservationRequestSchema>
+export type BashJobObservation = z.infer<typeof BashJobObservationSchema>
+
+export interface ToolArgumentsByName {
+  read: ReadToolArguments
+  write: WriteToolArguments
+  edit: EditToolArguments
+  patch: PatchToolArguments
+  glob: GlobToolArguments
+  grep: GrepToolArguments
+  bash: BashToolArguments
+}
+
+export interface ToolEventByName {
+  read: ReadToolEvent
+  write: WriteToolEvent
+  edit: EditToolEvent
+  patch: PatchToolEvent
+  glob: GlobToolEvent
+  grep: GrepToolEvent
+  bash: BashToolEvent
+}

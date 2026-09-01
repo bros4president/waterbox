@@ -2,6 +2,9 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi"
 import type { Context } from "hono"
 import {
   BashToolArgumentsSchema,
+  BashJobIdSchema,
+  BashJobObservationRequestSchema,
+  BashJobObservationSchema,
   CreateSandboxRequestSchema,
   CreateSnapshotRequestSchema,
   CursorPaginationRequestSchema,
@@ -50,8 +53,7 @@ const SandboxPathSchema = z.object({ sandboxId: SandboxIdSchema }).strict()
 const SnapshotPathSchema = z.object({ snapshotId: SnapshotIdSchema }).strict()
 const ToolPathSchema = z.object({ sandboxId: SandboxIdSchema, toolName: ToolNameSchema }).strict()
 const SecureTransferPathSchema = z.object({ sandboxId: SandboxIdSchema, transferId: SecureTransferIdSchema }).strict()
-const BashJobPathSchema = z.object({ sandboxId: SandboxIdSchema, jobId: z.string().regex(/^job_[0-9a-f]{32}$/) }).strict()
-const BashJobObservationRequestSchema = z.object({ offset: z.number().int().nonnegative(), maxBytes: z.number().int().min(1).max(65_536) }).strict()
+const BashJobPathSchema = z.object({ sandboxId: SandboxIdSchema, jobId: BashJobIdSchema }).strict()
 const EmptySchema = z.object({}).strict()
 const HealthSchema = z.object({ status: z.literal("ok") }).strict()
 const OpenApiDocumentSchema = z.object({ openapi: z.literal("3.1.0") }).passthrough()
@@ -86,6 +88,7 @@ const routes = {
   createSandbox: createRoute({ method: "post", path: "/v1/sandboxes", security: bearerSecurity, request: { headers: CreateHeadersSchema, body: json(CreateSandboxRequestSchema) }, responses: { 201: { description: "Sandbox created", ...json(SandboxSchema) }, ...errorResponses } }),
   listSandboxes: createRoute({ method: "get", path: "/v1/sandboxes", security: bearerSecurity, request: { headers: AuthHeadersSchema, query: CursorPaginationRequestSchema }, responses: { 200: { description: "Sandbox page", ...json(SandboxPageSchema) }, ...errorResponses } }),
   getSandbox: createRoute({ method: "get", path: "/v1/sandboxes/{sandboxId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 200: { description: "Sandbox", ...json(SandboxSchema) }, ...errorResponses } }),
+  probeSandbox: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/probe", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 200: { description: "Provider-inspected sandbox", ...json(SandboxSchema) }, ...errorResponses } }),
   stopSandbox: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/stop", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 200: { description: "Sandbox stop initiated", ...json(SandboxSchema) }, ...errorResponses } }),
   resumeSandbox: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/resume", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 200: { description: "Sandbox resume initiated", ...json(SandboxSchema) }, ...errorResponses } }),
   deleteSandbox: createRoute({ method: "delete", path: "/v1/sandboxes/{sandboxId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 200: { description: "Sandbox deletion initiated", ...json(SandboxSchema) }, ...errorResponses } }),
@@ -96,6 +99,8 @@ const routes = {
   initiateSecureFileTransfer: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/secure-file-transfers", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 201: { description: "Secure file transfer initiated", ...json(SecureTransferInitiatedSchema) }, ...errorResponses } }),
   consumeSecureFileTransfer: createRoute({ method: "put", path: "/v1/sandboxes/{sandboxId}/secure-file-transfers/{transferId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SecureTransferPathSchema, body: json(SecureTransferConsumeRequestSchema) }, responses: { 200: { description: "Secure file delivered", ...json(SecureTransferDeliveredSchema) }, ...errorResponses } }),
   executeTool: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/tools/{toolName}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: ToolPathSchema, body: json(ToolArgumentsSchema) }, responses: { 200: { description: "Ordered canonical tool events, one event per line", content: { "application/x-ndjson": { schema: z.string().openapi({ example: `${JSON.stringify({ type: "stdout", data: "hello\\n" })}\n${JSON.stringify({ type: "result" })}\n` }) } } }, ...errorResponses } }),
+  observeBashJob: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/bash-jobs/{jobId}/observations", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: BashJobPathSchema, body: json(BashJobObservationRequestSchema) }, responses: { 200: { description: "One bounded Bash job observation", ...json(BashJobObservationSchema) }, ...errorResponses } }),
+  cleanupBashJob: createRoute({ method: "delete", path: "/v1/sandboxes/{sandboxId}/bash-jobs/{jobId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: BashJobPathSchema }, responses: { 204: { description: "Bash job cleaned up" }, ...errorResponses } }),
 }
 
 const toolSchemas = {
@@ -131,6 +136,7 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
   })
 
   app.use("*", async (c, next) => {
+    c.req.raw.signal.throwIfAborted()
     const id = requestId(c.req.raw, dependencies)
     c.set("requestId", id)
     await next()
@@ -145,11 +151,25 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
     try {
       const resolved = await dependencies.identityResolver.resolveBearer(match[1]!, c.req.raw.signal)
       identity = resolved === undefined ? undefined : IdentitySchema.parse(resolved)
-    } catch {
+    } catch (error) {
+      if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
       return errorResponse(c, c.get("requestId"), "unauthorized", "Authentication failed", 401)
     }
     if (identity === undefined) return errorResponse(c, c.get("requestId"), "unauthorized", "Authentication failed", 401)
     c.set("identity", identity)
+    await next()
+  })
+
+  app.use("/v1/*", async (c, next) => {
+    if (c.req.method !== "POST" || !/^\/v1\/sandboxes\/[^/]+\/bash-jobs\/[^/]+\/observations$/.test(new URL(c.req.url).pathname)) return next()
+    try {
+      const body = await readBoundedJson(c.req.raw, MAX_BASH_OBSERVATION_JSON_BYTES)
+      c.req.raw = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body, signal: c.req.raw.signal })
+    } catch (error) {
+      if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
+      const status = error instanceof RequestBodyError ? error.status : 400
+      return errorResponse(c, c.get("requestId"), "invalid_request", status === 413 ? "The request body is too large" : "The request is invalid", status)
+    }
     await next()
   })
 
@@ -160,6 +180,7 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
       c.req.raw = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body, signal: c.req.raw.signal })
     }
     catch (error) {
+      if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
       const status = error instanceof RequestBodyError ? error.status : 400
       return errorResponse(c, c.get("requestId"), "invalid_request", status === 413 ? "The request body is too large" : "The request is invalid", status)
     }
@@ -167,6 +188,8 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
   })
 
   app.onError((error, c) => {
+    if (c.req.raw.signal.aborted || isAbortError(error)) throw c.req.raw.signal.reason ?? error
+    if (error instanceof SyntaxError) return errorResponse(c, c.get("requestId"), "invalid_request", "The request is invalid", 400)
     if (error instanceof DomainError) {
       return errorResponse(
         c,
@@ -194,6 +217,7 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
   })
   app.openapi(routes.listSandboxes, async (c) => c.json(SandboxPageSchema.parse(await dependencies.core.listSandboxes(c.get("identity"), c.req.valid("query"), c.req.raw.signal)), 200))
   app.openapi(routes.getSandbox, async (c) => c.json(SandboxSchema.parse(await dependencies.core.getSandbox(c.get("identity"), c.req.valid("param").sandboxId, c.req.raw.signal)), 200))
+  app.openapi(routes.probeSandbox, async (c) => c.json(SandboxSchema.parse(await dependencies.core.probeSandbox(c.get("identity"), c.req.valid("param").sandboxId, c.req.raw.signal)), 200))
   app.openapi(routes.stopSandbox, async (c) => c.json(SandboxSchema.parse(await dependencies.core.stopSandbox(c.get("identity"), c.req.valid("param").sandboxId, c.req.raw.signal)), 200))
   app.openapi(routes.resumeSandbox, async (c) => c.json(SandboxSchema.parse(await dependencies.core.resumeSandbox(c.get("identity"), c.req.valid("param").sandboxId, c.req.raw.signal)), 200))
   app.openapi(routes.deleteSandbox, async (c) => c.json(SandboxSchema.parse(await dependencies.core.deleteSandbox(c.get("identity"), c.req.valid("param").sandboxId, c.req.raw.signal)), 200))
@@ -244,18 +268,23 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
   // the declared route still owns the NDJSON media contract and this remains a Web Response.
   app.openapi(routes.executeTool, executeToolHandler as never)
 
-  app.post("/v1/internal/sandboxes/:sandboxId/bash-jobs/:jobId/observe", async (c) => {
-    const { sandboxId, jobId } = BashJobPathSchema.parse(c.req.param())
-    const { offset, maxBytes } = BashJobObservationRequestSchema.parse(await c.req.json())
-    return c.json(await dependencies.core.observeBashJob(c.get("identity"), sandboxId, jobId, offset, maxBytes, c.req.raw.signal), 200)
+  app.openapi(routes.observeBashJob, async (c) => {
+    const { sandboxId, jobId } = c.req.valid("param")
+    const { offset, maxBytes } = BashJobObservationRequestSchema.parse(c.req.valid("json"))
+    const observation = await dependencies.core.observeBashJob(c.get("identity"), sandboxId, jobId, offset, maxBytes, c.req.raw.signal)
+    return c.json(BashJobObservationSchema.parse(observation), 200)
   })
-  app.delete("/v1/internal/sandboxes/:sandboxId/bash-jobs/:jobId", async (c) => {
-    const { sandboxId, jobId } = BashJobPathSchema.parse(c.req.param())
+  app.openapi(routes.cleanupBashJob, async (c) => {
+    const { sandboxId, jobId } = c.req.valid("param")
     await dependencies.core.cleanupBashJob(c.get("identity"), sandboxId, jobId, c.req.raw.signal)
     return c.body(null, 204)
   })
 
   return app
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError"
 }
 
 function linkedAbortController(signal: AbortSignal): AbortController {
@@ -321,6 +350,7 @@ function publicMessage(code: ErrorCode): string {
 }
 
 const MAX_SECURE_TRANSFER_JSON_BYTES = MAX_SECURE_CIPHERTEXT_BASE64_LENGTH + 8_192
+const MAX_BASH_OBSERVATION_JSON_BYTES = 8_192
 class RequestBodyError extends Error { constructor(readonly status: 400 | 413) { super("Invalid request body") } }
 async function readBoundedJson(request: Request, maximum: number): Promise<string> {
   const reader = request.body?.getReader()

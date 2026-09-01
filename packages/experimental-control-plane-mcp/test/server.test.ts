@@ -73,7 +73,7 @@ describe("experimental control-plane MCP", () => {
     const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const request = new Request(input, init); requests.push(request)
       if (request.url.endsWith("/v1/sandboxes")) return Response.json(sandbox, { status: 201 })
-      if (request.url.endsWith("/observe")) { await Bun.sleep(25); return Response.json({ jobId, state: "completed", chunkBase64: Buffer.from("absorbed output").toString("base64"), nextOffset: 15, outputSize: 15, exitCode: 0, signal: null, timedOut: false, durationMs: 20 }) }
+      if (request.url.endsWith("/observations")) { await Bun.sleep(25); return Response.json({ jobId, state: "completed", chunkBase64: Buffer.from("absorbed output").toString("base64"), nextOffset: 15, outputSize: 15, exitCode: 0, signal: null, timedOut: false, durationMs: 20 }) }
       if (request.method === "DELETE") {
         cleanupSignal = request.signal
         return await new Promise<Response>((_resolve, reject) => {
@@ -115,7 +115,7 @@ describe("experimental control-plane MCP", () => {
       expect(JSON.stringify(progress)).not.toContain("sleep 20")
       expect(JSON.stringify(progress)).not.toContain(jobId)
       expect(requests.filter((request) => request.url.includes("/tools/bash"))).toHaveLength(1)
-      expect(requests.filter((request) => request.url.endsWith("/observe"))).toHaveLength(1)
+      expect(requests.filter((request) => request.url.endsWith("/observations"))).toHaveLength(1)
       expect(requests.filter((request) => request.method === "DELETE")).toHaveLength(1)
     } finally { await Promise.all([client.close(), server.close()]) }
   })
@@ -129,7 +129,7 @@ describe("experimental control-plane MCP", () => {
     const fetcher = (async (input: RequestInfo | URL) => {
       const url = String(input)
       if (url.endsWith("/v1/sandboxes")) return Response.json(sandbox, { status: 201 })
-      if (url.endsWith("/observe")) return new Response("sensitive observer failure", { status: 500 })
+      if (url.endsWith("/observations")) return new Response("sensitive observer failure", { status: 500 })
       return new Response(`${JSON.stringify(receipt)}\n`, { headers: { "content-type": "application/x-ndjson" } })
     }) as typeof fetch
     const server = createExperimentalMcpServer({ apiUrl: "http://127.0.0.1:8787", apiKey: "local-secret", idempotencyKey: "smoke-run" }, fetcher)

@@ -12,9 +12,10 @@ import type {
   SecureTransferId,
   SecureTransferInitiated,
   ToolName,
+  ToolArgumentsByName,
+  ToolEventByName,
+  BashJobObservation,
 } from "@waterbox/contracts"
-import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
-import type { BashJobObservation } from "@waterbox/core/provider"
 
 export interface McpBackend {
   preflight?(): void

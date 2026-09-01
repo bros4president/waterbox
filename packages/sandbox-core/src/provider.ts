@@ -1,16 +1,5 @@
 import type {
-  BashToolArguments,
-  BashToolEvent,
-  EditToolArguments,
-  EditToolEvent,
-  GlobToolArguments,
-  GlobToolEvent,
-  GrepToolArguments,
-  GrepToolEvent,
-  PatchToolArguments,
-  PatchToolEvent,
-  ReadToolArguments,
-  ReadToolEvent,
+  BashJobObservation,
   SecureTransferConsumeRequest,
   SecureTransferDelivered,
   SecureTransferId,
@@ -20,30 +9,10 @@ import type {
   SnapshotId,
   SnapshotState,
   ToolName,
-  WriteToolArguments,
-  WriteToolEvent,
+  ToolArgumentsByName,
+  ToolEventByName,
 } from "@waterbox/contracts"
 import type { JsonValue } from "./records.ts"
-
-export interface ToolArgumentsByName {
-  read: ReadToolArguments
-  write: WriteToolArguments
-  edit: EditToolArguments
-  patch: PatchToolArguments
-  glob: GlobToolArguments
-  grep: GrepToolArguments
-  bash: BashToolArguments
-}
-
-export interface ToolEventByName {
-  read: ReadToolEvent
-  write: WriteToolEvent
-  edit: EditToolEvent
-  patch: PatchToolEvent
-  glob: GlobToolEvent
-  grep: GrepToolEvent
-  bash: BashToolEvent
-}
 
 export interface ProviderSandboxObservation {
   state: SandboxState
@@ -83,19 +52,6 @@ export interface ProviderSnapshotOperationInput extends ProviderOperationInput {
 export interface ProviderExecuteInput<N extends ToolName = ToolName> extends ProviderOperationInput {
   toolName: N
   arguments: ToolArgumentsByName[N]
-}
-
-export interface BashJobObservation {
-  jobId: string
-  state: "starting" | "running" | "completed" | "failed"
-  chunkBase64: string
-  nextOffset: number
-  outputSize: number
-  exitCode?: number | null
-  signal?: string | null
-  timedOut?: boolean
-  durationMs?: number
-  error?: "spawn_failed" | "worker_failed"
 }
 
 export interface ProviderObserveBashJobInput extends ProviderOperationInput {

@@ -232,7 +232,7 @@ async function absorbReceipt(options: ExperimentalMcpOptions, fetcher: typeof fe
   try {
     while (true) {
       extra.signal.throwIfAborted()
-      const response = await apiFetch(options, fetcher, `/v1/internal/sandboxes/${encodeURIComponent(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}/observe`, {
+      const response = await apiFetch(options, fetcher, `/v1/sandboxes/${encodeURIComponent(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}/observations`, {
         method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ offset, maxBytes: 65_536 }), signal: extra.signal,
       })
       const sample = validateObservation(await response.json(), receipt.metadata.jobId, offset)
@@ -246,7 +246,7 @@ async function absorbReceipt(options: ExperimentalMcpOptions, fetcher: typeof fe
         const finalOutput = retained || (sample.timedOut ? "Command timed out" : "Command completed without output")
         const metadata = { command: receipt.metadata.command, ...(receipt.metadata.description === undefined ? {} : { description: receipt.metadata.description }), workdir: receipt.metadata.workdir, exitCode: sample.exitCode, signal: sample.signal ?? null, timedOut: sample.timedOut, aborted: false, durationMs: sample.durationMs, outputTruncated }
         const structuredContent = BashToolResultSchema.parse({ title: receipt.metadata.description ?? "Bash command", outcome: "completed", output: finalOutput, metadata })
-        cleanupDetached(signal => apiFetch(options, fetcher, `/v1/internal/sandboxes/${encodeURIComponent(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}`, { method: "DELETE", signal }).then(() => undefined), cleanupDeadlineMs)
+        cleanupDetached(signal => apiFetch(options, fetcher, `/v1/sandboxes/${encodeURIComponent(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}`, { method: "DELETE", signal }).then(() => undefined), cleanupDeadlineMs)
         return { content: [{ type: "text" as const, text: finalOutput }], structuredContent, ...(metadata.exitCode !== 0 || metadata.timedOut ? { isError: true } : {}) }
       }
       if (chunk.byteLength === 0) await abortableSleep(1_000, extra.signal)

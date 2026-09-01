@@ -30,7 +30,7 @@ import {
   type SandboxId,
   type ToolName,
 } from "@waterbox/contracts"
-import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
+import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/contracts"
 import { SandboxRecoveryError } from "@waterbox/core"
 import { z } from "zod"
 import type { McpBackend } from "./backend.ts"

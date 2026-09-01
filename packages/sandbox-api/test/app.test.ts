@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { DomainError, SandboxRecoveryError } from "@waterbox/core"
-import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH } from "@waterbox/contracts"
-import { createWaterboxApi, type WaterboxCore } from "../src/index.ts"
+import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
+import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH, type SandboxId } from "@waterbox/contracts"
+import { FakeSandboxProvider, FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { createWaterboxApi, type IdentityResolver, type WaterboxCore } from "../src/index.ts"
 
 const sandbox = {
   sandboxId: "sbx_calm-cactus-7k3m",
@@ -23,7 +24,11 @@ const snapshot = {
 const transfer = { transferId: "123e4567-e89b-42d3-a456-426614174000", publicKey: `age1${"q".repeat(58)}`, algorithm: "age-x25519" as const, expiresAt: "2026-08-29T00:10:00.000Z" }
 const delivery = { transferId: transfer.transferId, targetPath: "/root/.aws/credentials", bytes: 6 }
 
-function api(overrides: Partial<Record<keyof WaterboxCore, Function>> = {}, credential = "good") {
+function api(
+  overrides: Partial<Record<keyof WaterboxCore, Function>> = {},
+  credential = "good",
+  identityResolver: IdentityResolver = { async resolveBearer(value: string) { return value === credential ? { accountId: "acct_test" } : undefined } },
+) {
   const calls: Array<[string, ...unknown[]]> = []
   const method = (name: string, value: unknown) => async (...args: unknown[]) => {
     calls.push([name, ...args])
@@ -32,6 +37,7 @@ function api(overrides: Partial<Record<keyof WaterboxCore, Function>> = {}, cred
   const core = {
     createSandbox: method("createSandbox", sandbox),
     getSandbox: method("getSandbox", sandbox),
+    probeSandbox: method("probeSandbox", sandbox),
     listSandboxes: method("listSandboxes", { items: [sandbox] }),
     stopSandbox: method("stopSandbox", { ...sandbox, state: "stopped" }),
     resumeSandbox: method("resumeSandbox", sandbox),
@@ -52,7 +58,7 @@ function api(overrides: Partial<Record<keyof WaterboxCore, Function>> = {}, cred
   return {
     app: createWaterboxApi({
       core,
-      identityResolver: { async resolveBearer(value) { return value === credential ? { accountId: "acct_test" } : undefined } },
+      identityResolver,
       generateRequestId: () => "req_test",
     }),
     calls,
@@ -82,12 +88,72 @@ describe("Waterbox API", () => {
     }
   })
 
+  test("preserves cancellation before routing and during asynchronous bearer resolution", async () => {
+    const preAbort = new AbortController()
+    const preReason = new DOMException("caller left", "AbortError")
+    preAbort.abort(preReason)
+    const { app } = api()
+    await expect(app.fetch(new Request("http://localhost/v1/sandboxes", { headers: auth, signal: preAbort.signal }))).rejects.toBe(preReason)
+
+    const resolving = new AbortController()
+    const duringReason = new DOMException("authentication cancelled", "AbortError")
+    const during = api({}, "good", {
+      async resolveBearer(_value: string, signal: AbortSignal) {
+        return await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))
+      },
+    }).app.fetch(new Request("http://localhost/v1/sandboxes", { headers: auth, signal: resolving.signal }))
+    await Promise.resolve()
+    resolving.abort(duringReason)
+    await expect(during).rejects.toBe(duringReason)
+  })
+
+  test("preserves cancellation from core execution instead of fabricating an API envelope", async () => {
+    const controller = new AbortController()
+    const reason = new DOMException("provider cancelled", "AbortError")
+    const { app } = api({
+      getSandbox: async (...args: unknown[]) => {
+        const signal = args.at(-1) as AbortSignal
+        signal.throwIfAborted()
+        return await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))
+      },
+    })
+    const pending = app.fetch(new Request(`http://localhost/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth, signal: controller.signal }))
+    await Promise.resolve()
+    controller.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+  })
+
+  test("preserves cancellation while setting up a provider event stream", async () => {
+    const controller = new AbortController()
+    const reason = new DOMException("stream setup cancelled", "AbortError")
+    const { app } = api({
+      executeTool: async (...args: unknown[]) => {
+        const signal = args.at(-1) as AbortSignal
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              async next() {
+                signal.throwIfAborted()
+                return await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))
+              },
+            }
+          },
+        }
+      },
+    })
+    const pending = app.fetch(new Request(`http://localhost/v1/sandboxes/${sandbox.sandboxId}/tools/read`, { method: "POST", headers: jsonHeaders, body: '{"filePath":"a"}', signal: controller.signal }))
+    await Promise.resolve()
+    controller.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+  })
+
   test("dispatches every canonical resource route with resolved identity", async () => {
     const { app, calls } = api()
     const cases: Array<[string, string, RequestInit, number]> = [
       ["createSandbox", "/v1/sandboxes", { method: "POST", headers: { ...jsonHeaders, "idempotency-key": "idem-1" }, body: "{}" }, 201],
       ["listSandboxes", "/v1/sandboxes?limit=10", { headers: auth }, 200],
       ["getSandbox", `/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth }, 200],
+      ["probeSandbox", `/v1/sandboxes/${sandbox.sandboxId}/probe`, { method: "POST", headers: auth }, 200],
       ["stopSandbox", `/v1/sandboxes/${sandbox.sandboxId}/stop`, { method: "POST", headers: auth }, 200],
       ["resumeSandbox", `/v1/sandboxes/${sandbox.sandboxId}/resume`, { method: "POST", headers: auth }, 200],
       ["deleteSandbox", `/v1/sandboxes/${sandbox.sandboxId}`, { method: "DELETE", headers: auth }, 200],
@@ -106,6 +172,103 @@ describe("Waterbox API", () => {
     }
     const create = calls.find(([name]) => name === "createSandbox")!
     expect(create[3]).toMatchObject({ idempotencyKey: "idem-1", signal: expect.any(AbortSignal) })
+  })
+
+  test("keeps ordinary get distinct from active provider probe semantics", async () => {
+    let gets = 0
+    let probes = 0
+    const { app } = api({
+      getSandbox: async () => { gets++; return { ...sandbox, state: "preparing" } },
+      probeSandbox: async () => { probes++; return sandbox },
+    })
+    const ordinary = await app.request(`/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth })
+    expect(await ordinary.json()).toMatchObject({ state: "preparing" })
+    expect({ gets, probes }).toEqual({ gets: 1, probes: 0 })
+    const probed = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/probe`, { method: "POST", headers: auth })
+    expect(await probed.json()).toMatchObject({ state: "running" })
+    expect({ gets, probes }).toEqual({ gets: 1, probes: 1 })
+  })
+
+  test("preserves core probe reconciliation semantics across the authenticated API boundary", async () => {
+    const sandboxes = new InMemorySandboxRepository()
+    const provider = new FakeSandboxProvider()
+    const core = new SandboxService({
+      sandboxes,
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })
+    const ids = {
+      stable: "sbx_stable-cloud-a1",
+      readyPreparation: "sbx_ready-cloud-a1",
+      failedPreparation: "sbx_failed-cloud-a1",
+      terminatedPreparation: "sbx_gone-cloud-a1",
+      failedSticky: "sbx_sticky-cloud-a1",
+      nullProvisioning: "sbx_null-cloud-a1",
+      getProvisioning: "sbx_get-cloud-a1",
+      probeProvisioning: "sbx_probe-cloud-a1",
+    } as const
+    const record = (sandboxId: string, state: "provisioning" | "preparing" | "running" | "failed", providerRef?: null | { privateSandboxId: string }) => ({
+      accountId: "acct_test", sandboxId: sandboxId as SandboxId, provider: "fake", providerRef: providerRef === undefined ? { privateSandboxId: sandboxId } : providerRef, state,
+      version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+      ...(state === "failed" ? { lastError: { code: "provider_failure" as const, message: "A prior operation failed" } } : {}),
+    })
+    for (const [id, state, reference] of [
+      [ids.stable, "running"], [ids.readyPreparation, "preparing"], [ids.failedPreparation, "preparing"],
+      [ids.terminatedPreparation, "preparing"], [ids.failedSticky, "failed"], [ids.nullProvisioning, "provisioning", null],
+      [ids.getProvisioning, "provisioning"], [ids.probeProvisioning, "provisioning"],
+    ] as const) await sandboxes.createIfAbsent(record(id, state, reference))
+    provider.sandboxStates.set(ids.stable, "stopped")
+    provider.sandboxStates.set(ids.readyPreparation, "running")
+    provider.sandboxStates.set(ids.failedPreparation, "failed")
+    provider.sandboxStates.set(ids.terminatedPreparation, "terminated")
+    provider.sandboxStates.set(ids.failedSticky, "running")
+    provider.sandboxStates.set(ids.getProvisioning, "running")
+    provider.sandboxStates.set(ids.probeProvisioning, "running")
+    const app = createWaterboxApi({ core, identityResolver: { async resolveBearer() { return { accountId: "acct_test" } } }, generateRequestId: () => "req_test" })
+    const get = (id: string) => app.request(`/v1/sandboxes/${id}`, { headers: auth })
+    const probe = (id: string) => app.request(`/v1/sandboxes/${id}/probe`, { method: "POST", headers: auth })
+
+    expect((await (await get(ids.readyPreparation)).json()).state).toBe("preparing")
+    expect(provider.inspectSandboxCalls).toBe(0)
+    expect((await (await probe(ids.stable)).json()).state).toBe("stopped")
+    expect((await (await probe(ids.readyPreparation)).json()).state).toBe("preparing")
+    expect((await (await probe(ids.failedPreparation)).json()).state).toBe("failed")
+    expect((await (await probe(ids.terminatedPreparation)).json()).state).toBe("terminated")
+    expect((await (await probe(ids.failedSticky)).json()).state).toBe("failed")
+    expect((await (await probe(ids.nullProvisioning)).json()).state).toBe("provisioning")
+    expect((await (await get(ids.getProvisioning)).json()).state).toBe("running")
+    expect((await (await probe(ids.probeProvisioning)).json()).state).toBe("running")
+    expect(provider.prepareCalls).toBe(2)
+    provider.sandboxStates.set(ids.failedSticky, "terminated")
+    expect((await (await probe(ids.failedSticky)).json()).state).toBe("terminated")
+  })
+
+  test("keeps cross-account probe and Bash job access non-revealing", async () => {
+    const owned = (identity: unknown) => {
+      if ((identity as { accountId?: string }).accountId !== "acct_owner") throw new DomainError("not_found", "private ownership detail")
+      return sandbox
+    }
+    const resolver: IdentityResolver = { async resolveBearer(value) { return value === "owner" ? { accountId: "acct_owner" } : value === "other" ? { accountId: "acct_other" } : undefined } }
+    const { app } = api({
+      probeSandbox: async (identity: unknown) => owned(identity),
+      observeBashJob: async (identity: unknown) => owned(identity),
+      cleanupBashJob: async (identity: unknown) => { owned(identity) },
+    }, "owner", resolver)
+    const other = { authorization: "Bearer other", "content-type": "application/json" }
+    const jobId = `job_${"a".repeat(32)}`
+    for (const [path, init] of [
+      [`/v1/sandboxes/${sandbox.sandboxId}/probe`, { method: "POST", headers: other }],
+      [`/v1/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}/observations`, { method: "POST", headers: other, body: '{"offset":0,"maxBytes":1}' }],
+      [`/v1/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}`, { method: "DELETE", headers: other }],
+    ] as const) {
+      const response = await app.request(path, init)
+      expect(response.status).toBe(404)
+      expect(await response.json()).toEqual({ error: { code: "not_found", message: "The resource was not found", requestId: "req_test" } })
+    }
   })
 
   test("strictly rejects malformed paths, queries, bodies, and tool/body mismatches", async () => {
@@ -165,7 +328,7 @@ describe("Waterbox API", () => {
     const pending = app.fetch(request(stalled, { signal: controller.signal }))
     await Promise.resolve()
     controller.abort(new DOMException("client left", "AbortError"))
-    expect((await pending).status).toBe(400)
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" })
     expect(abortedCancelled).toBeTrue()
   })
 
@@ -251,18 +414,24 @@ describe("Waterbox API", () => {
     expect(JSON.parse(body)).toEqual(receipt)
   })
 
-  test("authenticates and forwards hidden Bash job observation endpoints", async () => {
+  test("authenticates, validates, and forwards canonical Bash job primitives", async () => {
     const jobId = `job_${"a".repeat(32)}`
     const { app, calls } = api()
-    const path = `/v1/internal/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}`
+    const path = `/v1/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}`
 
-    expect((await app.request(`${path}/observe`, { method: "POST", headers: jsonHeaders, body: '{"offset":3,"maxBytes":64}' })).status).toBe(200)
+    expect((await app.request(`${path}/observations`, { method: "POST", headers: jsonHeaders, body: '{"offset":3,"maxBytes":64}' })).status).toBe(200)
     expect((await app.request(path, { method: "DELETE", headers: auth })).status).toBe(204)
     expect(calls.filter(([name]) => name === "observeBashJob" || name === "cleanupBashJob").map(([name, identity, sandboxId, observedJobId, ...rest]) => [name, identity, sandboxId, observedJobId, ...rest.slice(0, name === "observeBashJob" ? 2 : 0)])).toEqual([
       ["observeBashJob", { accountId: "acct_test" }, sandbox.sandboxId, jobId, 3, 64],
       ["cleanupBashJob", { accountId: "acct_test" }, sandbox.sandboxId, jobId],
     ])
-    expect((await app.request(`${path}/observe`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"offset":0,"maxBytes":1}' })).status).toBe(401)
+    expect((await app.request(`${path}/observations`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"offset":0,"maxBytes":1}' })).status).toBe(401)
+    for (const body of ['{"offset":-1,"maxBytes":64}', '{"offset":0,"maxBytes":65537}', '{"offset":0,"maxBytes":1,"extra":true}', '{']) {
+      const malformed = await app.request(`${path}/observations`, { method: "POST", headers: jsonHeaders, body })
+      expect(malformed.status, body).toBe(400)
+      expect(await malformed.json()).toMatchObject({ error: { code: "invalid_request" } })
+    }
+    expect((await app.request(`/v1/internal/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}/observe`, { method: "POST", headers: jsonHeaders, body: '{"offset":0,"maxBytes":1}' })).status).toBe(404)
   })
 
   test("returns a normal error envelope when the provider fails before its first event", async () => {
@@ -279,11 +448,14 @@ describe("Waterbox API", () => {
     expect(first).toBe(second)
     const document = JSON.parse(first)
     expect(document.openapi).toBe("3.1.0")
-    for (const path of ["/health", "/openapi.json", "/v1/sandboxes", "/v1/sandboxes/{sandboxId}", "/v1/sandboxes/{sandboxId}/stop", "/v1/sandboxes/{sandboxId}/resume", "/v1/sandboxes/{sandboxId}/snapshots", "/v1/snapshots", "/v1/snapshots/{snapshotId}", "/v1/sandboxes/{sandboxId}/tools/{toolName}"]) {
+    for (const path of ["/health", "/openapi.json", "/v1/sandboxes", "/v1/sandboxes/{sandboxId}", "/v1/sandboxes/{sandboxId}/probe", "/v1/sandboxes/{sandboxId}/stop", "/v1/sandboxes/{sandboxId}/resume", "/v1/sandboxes/{sandboxId}/snapshots", "/v1/snapshots", "/v1/snapshots/{snapshotId}", "/v1/sandboxes/{sandboxId}/tools/{toolName}", "/v1/sandboxes/{sandboxId}/bash-jobs/{jobId}/observations", "/v1/sandboxes/{sandboxId}/bash-jobs/{jobId}"]) {
       expect(document.paths[path], path).toBeDefined()
     }
     expect(document.components.securitySchemes.bearerAuth).toEqual({ type: "http", scheme: "bearer" })
     expect(document.paths["/v1/sandboxes/{sandboxId}/tools/{toolName}"].post.responses[200].content["application/x-ndjson"]).toBeDefined()
     expect(document.paths["/v1/sandboxes"].post.responses[401]).toBeDefined()
+    expect(first).toContain('"preparing"')
+    expect(first).toContain('"sandboxId"')
+    expect(first).not.toContain("providerRef")
   })
 })

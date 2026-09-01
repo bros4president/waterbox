@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { z } from "zod"
 import {
   BashToolArgumentsSchema,
+  BashJobObservationRequestSchema,
   CreateSandboxHeadersSchema,
   CreateSandboxRequestSchema,
   CreateSnapshotRequestSchema,
@@ -140,6 +141,12 @@ const cases: RequestCase[] = [
     schema: BashToolArgumentsSchema,
     valid: [{ command: "pwd" }, { command: "bun test", description: "tests", timeout: 30_000, workdir: "/workspace" }],
     invalid: [{ command: "" }, { command: "pwd", timeout: 0 }, { command: "pwd", timeout: 1.5 }, { command: "pwd", timeout: 2_147_483_648 }, { command: "pwd", env: {} }],
+  },
+  {
+    name: "Bash job observation",
+    schema: BashJobObservationRequestSchema,
+    valid: [{ offset: 0, maxBytes: 1 }, { offset: 1_048_576, maxBytes: 65_536 }],
+    invalid: [{ offset: -1, maxBytes: 1 }, { offset: 0, maxBytes: 0 }, { offset: 0, maxBytes: 65_537 }, { offset: 0, maxBytes: 1, extra: true }],
   },
 ]
 

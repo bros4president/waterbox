@@ -12,6 +12,7 @@ import {
   ReadToolEventSchema,
   WriteToolEventSchema,
   type ToolName,
+  type ToolEventByName,
 } from "@waterbox/contracts"
 import type {
   ProviderCreateSandboxInput,
@@ -20,7 +21,6 @@ import type {
   ProviderOperationInput,
   ProviderSnapshotOperationInput,
   SandboxProvider,
-  ToolEventByName,
 } from "@waterbox/core/provider"
 import { ProviderError } from "@waterbox/core/provider"
 import { FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"

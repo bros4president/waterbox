@@ -2,13 +2,13 @@ import {
   BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema, PatchToolEventSchema,
   ReadToolEventSchema, WriteToolEventSchema, MAX_SECURE_CIPHERTEXT_BYTES,
   SecureTransferDeliveredSchema, SecureTransferInitiatedSchema,
-  type SandboxState, type SnapshotState, type ToolName,
+  type SandboxState, type SnapshotState, type ToolName, type ToolEventByName, type BashJobObservation,
 } from "@waterbox/contracts"
 import {
   ProviderError, type ProviderCreateSandboxInput, type ProviderCreateSnapshotInput,
   type ProviderConsumeSecureTransferInput, type ProviderExecuteInput, type ProviderOperationInput, type ProviderSandboxObservation,
   type ProviderSnapshotObservation, type ProviderSnapshotOperationInput,
-  type SandboxProvider, type ToolEventByName, type BashJobObservation, type ProviderObserveBashJobInput, type ProviderCleanupBashJobInput,
+  type SandboxProvider, type ProviderObserveBashJobInput, type ProviderCleanupBashJobInput,
 } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
 import { CliProtocolError, encodeInvocation, encodeSecureTransferInput } from "@waterbox/cli/protocol"
