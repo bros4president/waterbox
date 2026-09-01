@@ -559,7 +559,7 @@ Do not add or redesign these in this plan:
 
 ### Phase 0: Baseline And Contract Lock
 
-Status: pending
+Status: complete
 
 Scope:
 
@@ -1117,3 +1117,4 @@ At that point implementation stops. OAuth, cloud deployment, hosted MCP, WebMCP 
 
 - 2026-08-31: Standalone plan created. It records the existing MCP-to-core shadow contract, makes `@waterbox/api` canonical for embedded and remote-shaped consumers, introduces reusable client commands over an injected `ApiBackend`, keeps MCP as a presentation renderer, separates local file acquisition from secure-transfer orchestration, moves Bash observation policy into the client, and explicitly defers cloud, OAuth, WebMCP, MCP Tasks, lifecycle-job, daemon, and release-plan work. No implementation, provider credential access, live provider operation, or change to another plan occurred.
 - 2026-08-31: Baseline amended after concurrent lifecycle and Box preparation work. The plan now preserves canonical `preparing`, mandatory provider preparation, same-key preparation resume, exact `error.sandboxId` recovery, artifact-backed plain-Box bootstrap, removed system-template configuration, current get/probe distinctions, artifact-before-SQLite initialization, and expanded embedded/network parity. No Fetch-backed implementation or edit to another durable plan occurred.
+- 2026-09-01: Phase 0 completed. `docs/fetch-backed-client-phase-0-contract.md` records the current MCP-to-client/API parity matrix, complete API and MCP inventories, missing probe route, composite secure-transfer and Bash workflows, MCP-owned file acquisition, preparation/recovery/cancellation/reconstruction/deletion behavior, get/probe distinctions, runtime-artifact lookup and initialization ordering, direct MCP dependencies, and API-local extraction scope. No credential values were read and no live provider request occurred. Baseline verification found an incomplete dependency installation: all 14 focused API tests passed, while MCP/API-local loading, typecheck, and MCP build failed on unresolved workspace/external packages; `git diff --check` passed.
