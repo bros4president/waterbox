@@ -240,6 +240,7 @@ export class WaterboxClient {
   ): Promise<Omit<Extract<z.output<S>, { type: "result" }>, "type">> {
     const response = await this.#request("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/tools/${name}`, context.signal, input)
     await requireStatus(response, 200, context.signal)
+    await propagateResponseAbort(response, context.signal)
     if (!hasMediaType(response, "application/x-ndjson")) { await cancelBody(response); throw protocolError() }
     let terminal: Extract<z.output<S>, { type: "result" }> | undefined
     for await (const raw of parseNdjson(response, context.signal)) {
@@ -299,6 +300,7 @@ export class WaterboxClient {
   async #json<T>(method: string, path: string, expectedStatus: number, schema: z.ZodType<T>, signal: AbortSignal, body?: unknown, headers?: HeadersInit): Promise<T> {
     const response = await this.#request(method, path, signal, body, headers)
     await requireStatus(response, expectedStatus, signal)
+    await propagateResponseAbort(response, signal)
     if (!hasMediaType(response, "application/json")) { await cancelBody(response); throw protocolError() }
     const value = await parseJson(response, MAX_API_JSON_RESPONSE_BYTES, signal)
     const parsed = schema.safeParse(value)
@@ -336,6 +338,7 @@ function nonnegativeDuration(value: number | undefined, fallback: number): numbe
 }
 
 async function requireStatus(response: Response, expected: number, signal: AbortSignal): Promise<void> {
+  await propagateResponseAbort(response, signal)
   if (response.status === expected) return
   if (!response.ok) throw await apiError(response, signal)
   await cancelBody(response)
@@ -343,6 +346,7 @@ async function requireStatus(response: Response, expected: number, signal: Abort
 }
 
 async function apiError(response: Response, signal: AbortSignal): Promise<WaterboxClientError> {
+  await propagateResponseAbort(response, signal)
   if (!hasMediaType(response, "application/json")) { await cancelBody(response); return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status }) }
   let value: unknown
   try { value = await parseJson(response, MAX_API_ERROR_RESPONSE_BYTES, signal) }
@@ -440,6 +444,11 @@ function decodeJsonLine(line: Uint8Array): unknown {
   catch { throw protocolError() }
 }
 async function cancelBody(response: Response): Promise<void> { await response.body?.cancel().catch(() => undefined) }
+async function propagateResponseAbort(response: Response, signal: AbortSignal): Promise<void> {
+  if (!signal.aborted) return
+  await cancelBody(response)
+  throw signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+}
 function protocolError(): WaterboxClientError { return new WaterboxClientError("The Waterbox API returned an invalid response") }
 function hasMediaType(response: Response, expected: string): boolean {
   return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === expected

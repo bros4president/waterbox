@@ -285,6 +285,30 @@ describe("bounded parsing", () => {
     expect(cancelled).toBe(true)
   })
 
+  test("preserves a backend-triggered caller abort across every post-fetch response branch", async () => {
+    const cases = [
+      { status: 500, mediaType: "text/plain" },
+      { status: 202, mediaType: "application/json" },
+      { status: 200, mediaType: "text/plain" },
+    ]
+    for (const [index, item] of cases.entries()) {
+      const controller = new AbortController()
+      const reason = new DOMException(`post-fetch abort ${index}`, "AbortError")
+      let cancelled = false
+      const body = new ReadableStream<Uint8Array>({
+        start(stream) { stream.enqueue(new Uint8Array([1])) },
+        cancel(value) { cancelled = value === undefined },
+      })
+      const backend = new FakeBackend(() => {
+        controller.abort(reason)
+        return new Response(body, { status: item.status, headers: { "content-type": item.mediaType } })
+      })
+      const result = new WaterboxClient(backend).probeSandbox({ sandboxId }, { signal: controller.signal }).catch(value => value)
+      expect(await result).toBe(reason)
+      expect(cancelled).toBe(true)
+    }
+  })
+
   test("rejects and cancels unexpected successful statuses by operation contract", async () => {
     const cases: Array<(client: WaterboxClient) => Promise<unknown>> = [
       client => client.createSandbox({}, { idempotencyKey: "key", signal }),
