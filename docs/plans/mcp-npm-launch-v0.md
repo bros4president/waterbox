@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Node 24.15.0, Phase 3, and the fresh Phase 4 Box flow are verified. PR #5 merged the Fetch-backed product boundary upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`; the current checkout still needs that merge and post-merge Node-minimum, live, and release-path re-verification. Snapshot-sourced Box reinstall and remaining Phase 0 live prerequisites are pending.
+Status: implementation in progress. Node 24.15.0, Phase 3, and the fresh Phase 4 Box flow are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; post-merge Node-minimum, live, and release-path re-verification remain pending. Snapshot-sourced Box reinstall and remaining Phase 0 live prerequisites are pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -717,7 +717,7 @@ Also run focused Node 24 repository compatibility checks added by this phase.
 
 ### Phase 2: Node MCP And One-Shot CLI
 
-Status: implemented and verified on Node 24.15.0; current Node 24 CI verification remains pending. Its pre-PR #5 end-to-end MCP evidence must be rerun after the merged Fetch-backed architecture is integrated into the checkout; depends on Phase 1.
+Status: implemented and verified on Node 24.15.0; current Node 24 CI verification remains pending. Its pre-PR #5 end-to-end MCP evidence must be rerun through the merged Fetch-backed architecture; depends on Phase 1.
 
 Scope:
 
@@ -799,7 +799,7 @@ No live Box call is required for the credential-free completion of this phase.
 
 ### Phase 4: Box Bootstrap-On-Create
 
-Status: fresh live provider/bootstrap flow passed; snapshot-sourced reinstall failed during install and full live acceptance remains pending. The recorded evidence is not post-PR #5 end-to-end MCP evidence and must be rerun after the merged architecture is integrated into the checkout; depends on Phase 3.
+Status: fresh live provider/bootstrap flow passed; snapshot-sourced reinstall failed during install and full live acceptance remains pending. The recorded evidence is not post-PR #5 end-to-end MCP evidence and must be rerun through the merged architecture; depends on Phase 3.
 
 Scope:
 
@@ -835,7 +835,7 @@ Then run separately authorized isolated-account live checks for the remaining st
 
 ### Phase 5: Fetch-Backed Product Boundary
 
-Status: merged upstream in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`; checkout integration plus post-merge Node-minimum, live, and release-path re-verification remain pending; depends on the Phase 4 implementation, not its remaining live gates
+Status: merged in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and integrated into the current checkout; post-merge Node-minimum, live, and release-path re-verification remain pending; depends on the Phase 4 implementation, not its remaining live gates
 
 Scope:
 
@@ -1176,7 +1176,8 @@ Live tests require explicit isolated-account authorization and must prove:
 - [ ] Snapshot-sourced creation installs the current runtime.
 - [ ] Legacy system-template machinery removed after the snapshot/live gate.
 - [x] PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`.
-- [ ] PR #5 integrated into the checkout and post-merge embedded MCP Node-minimum, live, and release-path re-verification completed.
+- [x] PR #5 integrated into the current checkout.
+- [ ] Post-merge embedded MCP Node-minimum, live, and release-path re-verification completed.
 - [ ] Vercel Sandbox provider-port audit has an approved verdict.
 - [ ] Vercel Sandbox provider implemented only after the approved audit verdict.
 - [ ] npm package renamed to `waterbox`.
@@ -1204,4 +1205,4 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-08-31: Phase 3 credential-free implementation verified the existing create operation followed by a durable `preparing` checkpoint and mandatory provider preparation. No create replay, allocation/readiness split, or list-diff correlation was added.
 - 2026-08-31: Phase 4 fresh live flow passed: fresh create, initial incomplete verification, correlated upload, install, final verification, running probe, all tools, secure transfer, async Bash, concurrency, tracked cleanup, and exact baseline comparison. The verifier natural-EOF handling was corrected from this live observation.
 - 2026-08-31: Snapshot-sourced reinstall failed during install and remains pending. Stop/resume and snapshot overwrite are also pending, so Phase 0 and Phase 4 full live acceptance are not complete. Legacy template machinery deletion remains deferred until that gate passes.
-- 2026-09-01: PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`. The launch plan was realigned to its Fetch-backed product boundary and adds audit-before-implementation pressure for Vercel Sandbox. The local checkout integration, post-merge re-verification, Vercel probe, and Vercel adapter remain unclaimed.
+- 2026-09-01: PR #5 merged as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and was integrated into the current checkout. The launch plan was realigned to its Fetch-backed product boundary and adds audit-before-implementation pressure for Vercel Sandbox. Post-merge re-verification, the Vercel probe, and the Vercel adapter remain unclaimed.
