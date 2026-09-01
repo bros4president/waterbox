@@ -54,7 +54,7 @@ describe("static dependency boundaries", () => {
     expect(manifestReferences(manifest).filter(item => forbiddenClient(item.specifier))).toEqual([])
   })
 
-  test("supported MCP cannot reach core/repositories/providers except the exact artifact loader", async () => {
+  test("supported MCP cannot reach core/repositories/providers except the exact artifact loader and test-only core support", async () => {
     const denied: Reference[] = []
     for (const item of await referencesBelow("packages/mcp/src")) {
       if (!forbiddenMcp(item.specifier)) continue
@@ -63,7 +63,7 @@ describe("static dependency boundaries", () => {
     }
     expect(denied).toEqual([])
     const manifest = JSON.parse(await readFile("packages/mcp/package.json", "utf8")) as Manifest
-    expect(manifestReferences(manifest).filter(item => forbiddenMcp(item.specifier) && !(item.section === "devDependencies" && item.specifier === "@waterbox/provider-box"))).toEqual([])
+    expect(manifestReferences(manifest).filter(item => forbiddenMcp(item.specifier) && !(item.section === "devDependencies" && ["@waterbox/provider-box", "@waterbox/core"].includes(item.specifier)))).toEqual([])
   })
 
   test("artifact-loader exception is symbol- and syntax-specific", () => {

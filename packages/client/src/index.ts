@@ -243,11 +243,16 @@ export class WaterboxClient {
     await propagateResponseAbort(response, context.signal)
     if (!hasMediaType(response, "application/x-ndjson")) { await cancelBody(response); throw protocolError() }
     let terminal: Extract<z.output<S>, { type: "result" }> | undefined
-    for await (const raw of parseNdjson(response, context.signal)) {
-      const event = schema.safeParse(raw)
-      if (!event.success) { await cancelBody(response); throw protocolError() }
-      if (terminal !== undefined) { await cancelBody(response); throw protocolError() }
-      if (event.data.type === "result") terminal = event.data as Extract<z.output<S>, { type: "result" }>
+    try {
+      for await (const raw of parseNdjson(response, context.signal)) {
+        const event = schema.safeParse(raw)
+        if (!event.success) { await cancelBody(response); throw protocolError() }
+        if (terminal !== undefined) { await cancelBody(response); throw protocolError() }
+        if (event.data.type === "result") terminal = event.data as Extract<z.output<S>, { type: "result" }>
+      }
+    } catch (error) {
+      if (context.signal.aborted) throw context.signal.reason ?? error
+      throw protocolError()
     }
     if (terminal === undefined) throw protocolError()
     const { type: _, ...result } = terminal
@@ -302,7 +307,12 @@ export class WaterboxClient {
     await requireStatus(response, expectedStatus, signal)
     await propagateResponseAbort(response, signal)
     if (!hasMediaType(response, "application/json")) { await cancelBody(response); throw protocolError() }
-    const value = await parseJson(response, MAX_API_JSON_RESPONSE_BYTES, signal)
+    let value: unknown
+    try { value = await parseJson(response, MAX_API_JSON_RESPONSE_BYTES, signal) }
+    catch (error) {
+      if (signal.aborted) throw signal.reason ?? error
+      throw protocolError()
+    }
     const parsed = schema.safeParse(value)
     if (!parsed.success) throw protocolError()
     return parsed.data
@@ -400,7 +410,8 @@ async function readBounded(response: Response, limit: number, signal: AbortSigna
 async function* parseNdjson(response: Response, signal: AbortSignal): AsyncGenerator<unknown> {
   if (response.body === null) throw protocolError()
   const reader = response.body.getReader()
-  let pending = new Uint8Array()
+  let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
+  let pendingLength = 0
   let total = 0
   let complete = false
   const abort = () => { void reader.cancel(signal.reason).catch(() => undefined) }
@@ -413,21 +424,30 @@ async function* parseNdjson(response: Response, signal: AbortSignal): AsyncGener
       if (item.done) break
       total += item.value.byteLength
       if (total > MAX_API_NDJSON_TOTAL_BYTES) { await reader.cancel(); throw protocolError() }
-      const joined = new Uint8Array(pending.byteLength + item.value.byteLength)
-      joined.set(pending); joined.set(item.value, pending.byteLength)
       let start = 0
-      for (let index = 0; index < joined.byteLength; index += 1) {
-        if (joined[index] !== 10) continue
-        const line = joined.subarray(start, index)
-        if (line.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
+      for (let index = 0; index < item.value.byteLength; index += 1) {
+        if (item.value[index] !== 10) continue
+        const fragment = item.value.subarray(start, index)
+        const lineLength = pendingLength + fragment.byteLength
+        if (lineLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
+        if (pendingLength !== 0) {
+          pending = appendPending(pending, pendingLength, fragment)
+          pendingLength = lineLength
+        }
+        const line = pendingLength === 0 ? fragment : pending.subarray(0, pendingLength)
         if (line.byteLength !== 0) yield decodeJsonLine(line)
         start = index + 1
+        pendingLength = 0
       }
-      pending = joined.slice(start)
-      if (pending.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
+      const fragment = item.value.subarray(start)
+      if (fragment.byteLength !== 0) {
+        if (pendingLength + fragment.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
+        pending = appendPending(pending, pendingLength, fragment)
+        pendingLength += fragment.byteLength
+      }
     }
     signal.throwIfAborted()
-    if (pending.byteLength !== 0) yield decodeJsonLine(pending)
+    if (pendingLength !== 0) yield decodeJsonLine(pending.subarray(0, pendingLength))
     complete = true
   } catch (error) {
     await reader.cancel().catch(() => undefined)
@@ -437,6 +457,17 @@ async function* parseNdjson(response: Response, signal: AbortSignal): AsyncGener
     if (!complete) await reader.cancel().catch(() => undefined)
     reader.releaseLock()
   }
+}
+
+function appendPending(pending: Uint8Array<ArrayBufferLike>, length: number, fragment: Uint8Array<ArrayBufferLike>): Uint8Array<ArrayBufferLike> {
+  const required = length + fragment.byteLength
+  if (required > pending.byteLength) {
+    const expanded = new Uint8Array(Math.min(MAX_API_NDJSON_LINE_BYTES, Math.max(required, pending.byteLength * 2, 1_024)))
+    expanded.set(pending.subarray(0, length))
+    pending = expanded
+  }
+  pending.set(fragment, length)
+  return pending
 }
 
 function decodeJsonLine(line: Uint8Array): unknown {

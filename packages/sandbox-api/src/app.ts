@@ -187,9 +187,18 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
     await next()
   })
 
+  app.use("/v1/*", async (c, next) => {
+    if (c.req.raw.body === null || !c.req.header("content-type")?.toLowerCase().startsWith("application/json")) return next()
+    try { await c.req.raw.clone().json() }
+    catch (error) {
+      if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
+      return errorResponse(c, c.get("requestId"), "invalid_request", "The request is invalid", 400)
+    }
+    await next()
+  })
+
   app.onError((error, c) => {
     if (c.req.raw.signal.aborted || isAbortError(error)) throw c.req.raw.signal.reason ?? error
-    if (error instanceof SyntaxError) return errorResponse(c, c.get("requestId"), "invalid_request", "The request is invalid", 400)
     if (error instanceof DomainError) {
       return errorResponse(
         c,
@@ -238,10 +247,21 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
     const controller = linkedAbortController(c.req.raw.signal)
     const events = await dependencies.core.executeTool(c.get("identity"), sandboxId, toolName, parsed.data as never, controller.signal)
     const iterator = events[Symbol.asyncIterator]()
+    let terminated = false
+    const terminate = async (reason: unknown) => {
+      if (terminated) return
+      terminated = true
+      if (!controller.signal.aborted) controller.abort(reason)
+      try { await iterator.return?.() } catch {}
+    }
     let first
     try { first = await iterator.next() }
-    catch (error) { controller.abort(error); throw error }
-    if (first.done) { controller.abort(); throw new DomainError("provider_failure", "The provider operation failed") }
+    catch (error) { await terminate(error); throw error }
+    if (first.done) {
+      const error = new DomainError("provider_failure", "The provider operation failed")
+      await terminate(error)
+      throw error
+    }
     const encoder = new TextEncoder()
     let prefetched: Awaited<ReturnType<typeof iterator.next>> | undefined = first
     const stream = new ReadableStream<Uint8Array>({
@@ -254,12 +274,12 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
           const parsedEvent = toolEventSchemas[toolName].parse(event.value)
           streamController.enqueue(encoder.encode(`${JSON.stringify(parsedEvent)}\n`))
         } catch (error) {
+          await terminate(error)
           streamController.error(error)
         }
       },
       async cancel(reason) {
-        controller.abort(reason)
-        await iterator.return?.()
+        await terminate(reason)
       },
     })
     return c.body(stream, 200, { "Content-Type": "application/x-ndjson" })

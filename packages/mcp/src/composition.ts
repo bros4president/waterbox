@@ -1,7 +1,9 @@
 import { WaterboxClient } from "@waterbox/client"
-import { createEmbeddedApiBackend } from "@waterbox/control-plane-local"
+import { createEmbeddedApiBackend, type BoxProviderDiagnostic } from "@waterbox/control-plane-local"
 import { loadSandboxRuntimeArtifact } from "@waterbox/provider-box"
 import type { BoxMcpConfig, WaterboxMcpConfig } from "./config.ts"
+
+export type { BoxProviderDiagnostic } from "@waterbox/control-plane-local"
 
 export class UnsupportedMcpProviderError extends Error {
   constructor() {
@@ -10,12 +12,12 @@ export class UnsupportedMcpProviderError extends Error {
   }
 }
 
-export async function createMcpClient(config: WaterboxMcpConfig): Promise<WaterboxClient> {
+export async function createMcpClient(config: WaterboxMcpConfig, diagnostic?: (event: BoxProviderDiagnostic) => void): Promise<WaterboxClient> {
   if (config.provider.type === "waterbox") throw new UnsupportedMcpProviderError()
-  return createLocalMcpClient(config as BoxMcpConfig)
+  return createLocalMcpClient(config as BoxMcpConfig, diagnostic)
 }
 
-export async function createLocalMcpClient(config: BoxMcpConfig): Promise<WaterboxClient> {
+export async function createLocalMcpClient(config: BoxMcpConfig, diagnostic?: (event: BoxProviderDiagnostic) => void): Promise<WaterboxClient> {
   // The CLI is deliberately resolved relative to this module so the same lookup
   // works in the packed bundle without relying on the source tree or cwd.
   const artifact = await loadSandboxRuntimeArtifact(new URL("../dist/waterbox-cli.js", import.meta.url), "0.1.0")
@@ -23,6 +25,7 @@ export async function createLocalMcpClient(config: BoxMcpConfig): Promise<Waterb
     sqlitePath: config.sqlitePath,
     accountId: "local",
     provider: { kind: "box", config: config.provider.config, runtimeArtifact: artifact },
+    ...(diagnostic === undefined ? {} : { diagnostic }),
   })
   return new WaterboxClient(backend)
 }

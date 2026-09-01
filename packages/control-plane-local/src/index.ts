@@ -7,11 +7,14 @@ import {
   BoxSandboxProvider,
   SystemBoxProviderClock,
   type BoxProviderConfig,
+  type BoxProviderDiagnostic,
   type SandboxRuntimeArtifact,
 } from "@waterbox/provider-box"
 import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
+
+export type { BoxProviderDiagnostic } from "@waterbox/provider-box"
 
 const EMBEDDED_ORIGIN = new URL("http://waterbox.local/")
 
@@ -21,6 +24,7 @@ export interface LocalControlPlaneConfig {
   provider:
     | { kind: "box"; config: BoxProviderConfig; runtimeArtifact: SandboxRuntimeArtifact }
     | { kind: "injected"; implementation: SandboxProvider }
+  diagnostic?: (event: BoxProviderDiagnostic) => void
 }
 
 export interface LocalControlPlaneOverrides {
@@ -68,6 +72,7 @@ export async function createLocalControlPlane(
     : new BoxSandboxProvider(config.provider.config, {
         clock: new SystemBoxProviderClock(),
         artifact: config.provider.runtimeArtifact,
+        ...(config.diagnostic === undefined ? {} : { diagnostic: config.diagnostic }),
       })
   validateProvider(provider)
 
