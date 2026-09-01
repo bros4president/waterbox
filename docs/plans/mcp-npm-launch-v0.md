@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Node 24.15.0, Phase 3, full Phase 4 Box bootstrap, and the post-PR #5 Fetch-backed live path are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; current-Node-24 CI and release-path verification remain pending.
+Status: implementation in progress. Node 24.15.0, Phase 3, full Phase 4 Box bootstrap, the post-PR #5 Fetch-backed live path, and the Phase 6 Vercel capability audit are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; the approved supplementary provider-primitives/Vercel implementation, current-Node-24 CI, and release-path verification remain pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -240,7 +240,7 @@ BOX_API_KEY=<configured through the MCP client's environment or secret mechanism
 
 The package README provides client-specific examples for supported clients without placing a real key in command history or committed project configuration.
 
-Vercel Sandbox is listed as a launch provider, but its exact credential and non-secret configuration variable names are reserved for the Phase 6 audit report. Do not invent them in this plan or implementation. The audit must establish the exact installed SDK version, official authentication/configuration mechanism, and supporting documentation before the provider is implemented. Until then, unconfigured guidance may name Vercel Sandbox but must not claim variable names or a usable configuration.
+The completed Vercel audit established official external-hosting access-token configuration. The supplementary implementation plan settles `WATERBOX_PROVIDER=vercel`, `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`; setup guidance may render those names only after its side-effect-free composition phase lands. OIDC remains deferred unless that plan is amended with tested local refresh behavior.
 
 ### Configuration Precedence
 
@@ -357,7 +357,7 @@ Exact names may follow repository conventions, but these semantics are mandatory
 - A provider without preparation is not supported; core has no compatibility branch that bypasses `preparing`.
 - Core remains independent of Box artifact paths and installation commands.
 - Provider live status cannot promote a `preparing` Waterbox record to `running`; only successful preparation and Waterbox health verification can do that.
-- `stopResume` and `snapshots` remain optional cohesive capability groups and are not made mandatory for either launch provider.
+- `stopResume` and `snapshots` remain optional cohesive capability groups. The approved supplementary implementation targets both groups for Box and Vercel, so each provider must pass the optional gates it advertises; this does not make the groups mandatory for every future launch provider.
 - Existing optional secure-transfer and Bash-job groups remain optional with their current status; this plan neither promotes nor removes them.
 - Unsupported optional capabilities fail before public-ID allocation or persistence and before provider dispatch, under the existing behavior.
 
@@ -374,7 +374,7 @@ providerRef = <opaque>, state = failed
 
 Rules:
 
-- Existing provider-create failure and ambiguity behavior remains unchanged, including the interval before its result is persisted.
+- The provider-create/result-persistence interval remains unchanged. The approved supplementary provider plan may make the provider-neutral correction that an adapter-reported ambiguous dispatched mutation is not discarded by a racing caller abort; it does not add create replay or invent a provider reference.
 - A provider reference is never cleared after it has been persisted.
 - Cancellation or process loss after the `preparing` checkpoint preserves the record and in-progress idempotency reservation.
 - Reusing the same public idempotency key resumes only a `preparing` record with a persisted provider reference; it does not introduce a new provider-create retry path.
@@ -866,7 +866,7 @@ Also run the configured embedded fake-provider flow under Node 24.15.0 and curre
 
 ### Phase 6: Vercel Sandbox Capability Probe And Provider-Port Audit
 
-Status: pending; depends on the merged Phase 5 credential-free baseline. Full live and release-path re-verification may continue independently before launch.
+Status: complete. The direct-REST fake suite and authorized isolated-project live probe passed with exact baseline reconciliation. The report's initial adapter-local recommendation was refined by the approved Phase 7 architecture review into the supplementary provider-neutral primitive extraction; implementation remains pending.
 
 Scope:
 
@@ -887,25 +887,26 @@ Acceptance criteria:
 
 ### Phase 7: Evaluate Audit, Approve Contract, Then Implement Vercel Provider
 
-Status: pending; evaluation begins after the Phase 6 report. No production change begins before explicit verdict and contract approval.
+Status: approved for implementation through `docs/plans/sandbox-provider-primitives-and-vercel-v0.md`; the supplementary plan's Phases 1-7 remain pending.
 
 Scope:
 
-- Review the Phase 6 evidence, select one verdict, and record the approved decision and exact adapter/port boundary in this plan.
-- If the verdict requires a port change, amend this durable plan first, implement the generic change, and prove Box regression and conformance before the adapter.
-- Only after the port decision, add the Vercel provider package, local composition, and settled configuration contract.
+- Use `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` as the durable implementation plan for this phase.
+- Introduce the provider-neutral primitive infrastructure port and shared Waterbox runtime composition described there.
+- Migrate Box without behavior or persisted-reference regression and pass the authorized Box gate before production Vercel composition.
+- Then add the Vercel primitive adapter, local composition, settled configuration contract, shared parity, and authorized live acceptance.
 - Keep Vercel-specific behavior below adapter/composition. Provider selection stays in composition/registry configuration; setup rendering above composition consumes provider-neutral metadata instead of branching on provider names.
 
 Acceptance criteria:
 
-- The approved verdict, evidence, and any generic contract amendment are recorded before implementation starts.
+- The approved boundary, evidence, phased Box-preserving migration, and generic contract amendment are recorded in the supplementary plan before implementation starts.
 - `name`, `createSandbox`, `prepareSandbox`, `inspectSandbox`, `deleteSandbox`, and `executeTool` remain mandatory. `stopResume`, `snapshots`, `secureFileTransfer`, and `bashJobs` remain optional cohesive groups even if an approved generic extension is added.
 - No Box- or Vercel-name branch exists in core, API, client, or MCP.
 - Add credential-free conformance tests using shared provider-neutral expectations where valuable, without reviving an oversized conformance framework.
 - Add an isolated live Vercel smoke for every mandatory method and each optional capability advertised as supported.
 - Launch documentation includes an honest provider capability table and official credential-injection instructions.
 - Once its configuration contract is settled, unconfigured setup guidance lists Box and Vercel Sandbox without reading artifacts, SQLite, local files, or provider APIs.
-- Vercel becomes launch-supported only when its adapter, configured Node path, packaging/legal closure, documentation, and isolated live smoke pass.
+- Vercel reaches implementation-level launch support when its adapter, configured Node path, provider documentation, and isolated live smoke pass. Phase 8 separately owns package/legal/release-document closure before npm launch.
 
 Verification:
 
@@ -1178,7 +1179,7 @@ Live tests require explicit isolated-account authorization and must prove:
 - [x] PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`.
 - [x] PR #5 integrated into the current checkout.
 - [ ] Post-merge embedded MCP Node-minimum, live, and release-path re-verification completed.
-- [ ] Vercel Sandbox provider-port audit has an approved verdict.
+- [x] Vercel Sandbox provider-port audit has an approved follow-up architecture decision.
 - [ ] Vercel Sandbox provider implemented only after the approved audit verdict.
 - [ ] npm package renamed to `waterbox`.
 - [ ] Package is CLI-only.
@@ -1207,3 +1208,5 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-08-31: Snapshot-sourced reinstall failed during install and remains pending. Stop/resume and snapshot overwrite are also pending, so Phase 0 and Phase 4 full live acceptance are not complete. Legacy template machinery deletion remains deferred until that gate passes.
 - 2026-09-01: PR #5 merged as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and was integrated into the current checkout. The launch plan was realigned to its Fetch-backed product boundary and adds audit-before-implementation pressure for Vercel Sandbox. Post-merge re-verification, the Vercel probe, and the Vercel adapter remain unclaimed.
 - 2026-09-01: Post-merge verification restored workspace links and passed 446 credential-free tests, typecheck, MCP build, focused Fetch-backed coverage, and Node 24.15.0 artifact checks. The authorized Fetch-backed Box smoke passed fresh preparation, all seven tools, secure transfer, Bash, concurrency, bounded exact cleanup, and a deliberately stale snapshot-sourced reinstall with user-data preservation and current runtime verification. The raw capability probe separately passed snapshot restore, stop/resume identity and marker continuity, accepted-pending deletion with visibility/capacity release, snapshot deletion, and zero active run-owned resources. Phase 0 and Phase 4 live gates are complete; no provider identifiers or credentials were retained.
+- 2026-09-01: Phase 6 completed without adding the Vercel SDK or changing production behavior. Twelve direct-REST fake tests passed request-contract, ambiguity, lifecycle, transient snapshot, bounded-output, redaction, and cleanup cases. The separately authorized isolated-project probe passed fresh named create, Node 24, `rg`, privilege/workspace preparation, gzip-tar upload, command wait/log/kill, stop/resume persistence with replaced session identity, manual and automatic snapshots, snapshot-source restore, deletion/tombstones, and exact baseline reconciliation with zero cleanup errors. The audit in `docs/research/vercel-sandbox-provider-port-audit.md` records exactly one verdict: adapter-local shim needed, port unchanged. Phase 7 approval, production implementation, and configuration selection remain pending; no credential or provider identifier was retained in the plan or report.
+- 2026-09-01: Phase 7 architecture review approved `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` as the supplementary implementation plan. The review refined the audit recommendation: Box and Vercel share a direct low-level intersection, while the current provider implementation boundary mixes native sandbox primitives with shared Waterbox preparation, CLI, secure-transfer, and Bash-job logic. Implementation must introduce the primitive port, extract the shared runtime, migrate and live-regress Box, and only then implement and live-accept Vercel. No production code or live provider operation occurred while recording this decision.
