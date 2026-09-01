@@ -158,6 +158,30 @@ describe("local API composition", () => {
     expect(shutdownCloses).toBe(1)
   })
 
+  test("throwing address logging stops the bound listener and closes once without replacing the error", async () => {
+    const loggerError = new Error("deterministic logger failure")
+    let closes = 0
+    let loggedAddress = ""
+    let caught: unknown
+    try {
+      await startLocalServer({
+        fetch: async () => new Response("unused"),
+        close: async () => { closes++; throw new Error("cleanup failure must not replace logger failure") },
+      }, {
+        host: "127.0.0.1",
+        port: 0,
+        log(message) { loggedAddress = message; throw loggerError },
+      })
+    } catch (error) { caught = error }
+
+    expect(caught).toBe(loggerError)
+    expect(closes).toBe(1)
+    const port = Number(loggedAddress.match(/:(\d+)$/)?.[1])
+    expect(Number.isInteger(port) && port > 0).toBeTrue()
+    const rebound = Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("rebound") })
+    await rebound.stop(true)
+  })
+
   test("reads the fixed package-relative artifact and fails safely when it is missing", async () => {
     let reads = 0; let readUrl: URL | undefined
     const artifact = await loadDevelopmentRuntimeArtifact({
