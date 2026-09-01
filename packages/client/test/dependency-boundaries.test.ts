@@ -24,6 +24,12 @@ async function referencesBelow(root: string): Promise<Reference[]> {
 
 function forbiddenClient(value: string): boolean { return /^@waterbox\/(?:api|core|repository|provider|mcp|control-plane)/.test(value) }
 function forbiddenMcp(value: string): boolean { return /^@waterbox\/(?:core|repository|provider)/.test(value) }
+const dependencySections = ["dependencies", "optionalDependencies", "peerDependencies", "devDependencies"] as const
+type Manifest = Partial<Record<(typeof dependencySections)[number], Record<string, string>>>
+
+function manifestReferences(manifest: Manifest): Array<{ section: string; specifier: string }> {
+  return dependencySections.flatMap(section => Object.keys(manifest[section] ?? {}).map(specifier => ({ section, specifier })))
+}
 
 describe("dependency scanner", () => {
   test("detects static, side-effect, re-export, dynamic, and require bypass forms", () => {
@@ -33,13 +39,19 @@ describe("dependency scanner", () => {
       ["dynamic", "@waterbox/api"], ["require", "@waterbox/mcp"],
     ].sort())
   })
+  test("detects forbidden packages in every dependency map", () => {
+    for (const section of dependencySections) {
+      const manifest = { [section]: { "@waterbox/core": "workspace:*" } }
+      expect(manifestReferences(manifest).filter(item => forbiddenMcp(item.specifier))).toEqual([{ section, specifier: "@waterbox/core" }])
+    }
+  })
 })
 
 describe("static dependency boundaries", () => {
   test("client source and runtime manifest cannot depend on server-side packages", async () => {
     expect((await referencesBelow("packages/client/src")).filter(item => forbiddenClient(item.specifier))).toEqual([])
-    const manifest = JSON.parse(await readFile("packages/client/package.json", "utf8")) as { dependencies?: Record<string, string> }
-    expect(Object.keys(manifest.dependencies ?? {}).filter(forbiddenClient)).toEqual([])
+    const manifest = JSON.parse(await readFile("packages/client/package.json", "utf8")) as Manifest
+    expect(manifestReferences(manifest).filter(item => forbiddenClient(item.specifier))).toEqual([])
   })
 
   test("supported MCP cannot reach core/repositories/providers except the exact artifact loader", async () => {
@@ -50,8 +62,8 @@ describe("static dependency boundaries", () => {
       denied.push(item)
     }
     expect(denied).toEqual([])
-    const manifest = JSON.parse(await readFile("packages/mcp/package.json", "utf8")) as { dependencies?: Record<string, string> }
-    expect(Object.keys(manifest.dependencies ?? {}).filter(forbiddenMcp)).toEqual([])
+    const manifest = JSON.parse(await readFile("packages/mcp/package.json", "utf8")) as Manifest
+    expect(manifestReferences(manifest).filter(item => forbiddenMcp(item.specifier) && !(item.section === "devDependencies" && item.specifier === "@waterbox/provider-box"))).toEqual([])
   })
 
   test("artifact-loader exception is symbol- and syntax-specific", () => {

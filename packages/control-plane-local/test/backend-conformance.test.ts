@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createEmbeddedApiBackend, createLocalControlPlane } from "@waterbox/control-plane-local"
 import { FixedClock, FakeSandboxProvider, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
 import { ProviderError, type ProviderCleanupBashJobInput, type ProviderConsumeSecureTransferInput, type ProviderExecuteInput, type ProviderObserveBashJobInput, type ProviderOperationInput } from "@waterbox/core/provider"
 import type { SecureTransferDelivered, SecureTransferInitiated, ToolEventByName, ToolName } from "@waterbox/contracts"
 import { MAX_API_ERROR_RESPONSE_BYTES, WaterboxClient, WaterboxClientError, createRemoteApiBackend, type ApiBackend } from "@waterbox/client"
@@ -21,10 +22,15 @@ const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!() })
 
 class ConformanceProvider extends FakeSandboxProvider {
+  readonly runtimeArtifact = { sha256: "a".repeat(64), cliProtocolVersion: 2 as const, artifactVersion: "conformance" }
+  artifactPreparations = 0
   readonly ciphertexts: string[] = []
   bashMode: "completed" | "dispatched" | "fallback" = "completed"
   bashOffsets: number[] = []
   bashCleanups = 0
+  bashCleanupBeforeTerminal = false
+  bashCleanupError?: unknown
+  bashObservations = 0
   bashOutput = "observed"
   secureConsumeError?: unknown
   readonly #recipient: string
@@ -35,6 +41,12 @@ class ConformanceProvider extends FakeSandboxProvider {
   declare readonly bashJobs: {
     observe(input: ProviderObserveBashJobInput): ReturnType<ConformanceProvider["observeBash"]>
     cleanup(input: ProviderCleanupBashJobInput): Promise<void>
+  }
+
+  override async prepareSandbox(input: ProviderOperationInput) {
+    const observation = await super.prepareSandbox(input)
+    this.artifactPreparations++
+    return observation
   }
 
   override executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]> {
@@ -70,11 +82,17 @@ class ConformanceProvider extends FakeSandboxProvider {
     this.bashOffsets.push(input.offset)
     if (this.bashMode === "fallback") throw new ProviderError("failure", "private-observation-detail")
     const bytes = new TextEncoder().encode(this.bashOutput)
+    this.bashObservations++
+    if (this.bashObservations === 1) return { jobId: input.jobId, state: "running" as const, chunkBase64: "", nextOffset: input.offset, outputSize: bytes.length }
     const chunk = bytes.subarray(input.offset, input.offset + input.maxBytes)
     return { jobId: input.jobId, state: "completed" as const, chunkBase64: Buffer.from(chunk).toString("base64"), nextOffset: input.offset + chunk.length, outputSize: bytes.length, exitCode: 0, signal: null, timedOut: false, durationMs: 3 }
   }
 
-  private async cleanupBash(_input: ProviderCleanupBashJobInput) { this.bashCleanups++ }
+  private async cleanupBash(_input: ProviderCleanupBashJobInput) {
+    this.bashCleanups++
+    if (this.bashObservations < 2) this.bashCleanupBeforeTerminal = true
+    if (this.bashCleanupError !== undefined) throw this.bashCleanupError
+  }
 }
 
 type Mode = "embedded" | "network"
@@ -93,12 +111,14 @@ async function authenticationTransport(mode: Mode) {
     },
   })
   if (mode === "embedded") {
-    cleanup.push(() => plane.close())
-    return { fetch: (request: Request) => plane.fetch(request), release: () => release?.() }
+    const embedded = await createEmbeddedApiBackend({ sqlitePath: ":memory:", accountId, provider: { kind: "injected", implementation: new ConformanceProvider(ephemeralRecipient) } })
+    cleanup.push(async () => { await embedded.close(); await plane.close() })
+    return { rawFetch: (request: Request) => plane.fetch(request), authorizedFetch: (request: Request) => embedded.fetch(request), release: () => release?.() }
   }
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: plane.fetch })
   cleanup.push(async () => { await server.stop(true); await plane.close() })
-  return { fetch: (request: Request) => fetch(new Request(request.url.replace("http://waterbox.local", `http://127.0.0.1:${server.port}`), request)), release: () => release?.() }
+  const rawFetch = (request: Request) => fetch(new Request(request.url.replace("http://waterbox.local", `http://127.0.0.1:${server.port}`), request))
+  return { rawFetch, authorizedFetch(request: Request) { const headers = new Headers(request.headers); headers.set("authorization", `Bearer ${bearer}`); return rawFetch(new Request(request, { headers })) }, release: () => release?.() }
 }
 
 async function fixture(mode: Mode, options: { provider?: ConformanceProvider; decorate?: (response: Response, request: Request) => Response | Promise<Response>; sqlitePath?: string; ids?: SequenceIdGenerator } = {}) {
@@ -122,25 +142,34 @@ async function fixture(mode: Mode, options: { provider?: ConformanceProvider; de
   }
   const client = new WaterboxClient(backend, { bashObservationIntervalMs: 0, bashCleanupDeadlineMs: 50 })
   cleanup.push(() => client.close())
-  return { client, provider }
+  return { client, provider, backend }
+}
+
+async function seedProvisioning(sqlitePath: string) {
+  const store = new SqliteRepositoryStore(sqlitePath, { create: true })
+  await store.sandboxes.createIfAbsent({ accountId, sandboxId, provider: "fake", providerRef: { privateSandboxId: sandboxId }, state: "provisioning", version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" })
+  store.close()
 }
 
 for (const mode of ["embedded", "network"] as const) {
   describe(`${mode} ApiBackend conformance`, () => {
     test("enforces missing/wrong bearer and aborts during asynchronous identity resolution", async () => {
       const transport = await authenticationTransport(mode)
-      expect((await transport.fetch(new Request("http://waterbox.local/v1/sandboxes"))).status).toBe(401)
-      expect((await transport.fetch(new Request("http://waterbox.local/v1/sandboxes", { headers: { authorization: "Bearer wrong" } }))).status).toBe(401)
+      expect((await transport.rawFetch(new Request("http://waterbox.local/v1/sandboxes"))).status).toBe(401)
+      expect((await transport.rawFetch(new Request("http://waterbox.local/v1/sandboxes", { headers: { authorization: "Bearer wrong" } }))).status).toBe(401)
+      expect((await transport.authorizedFetch(new Request("http://waterbox.local/v1/sandboxes", { headers: { authorization: "Bearer caller-cannot-control" } }))).status).toBe(200)
       const controller = new AbortController()
-      const pending = transport.fetch(new Request("http://waterbox.local/v1/sandboxes", { headers: { authorization: "Bearer delayed" }, signal: controller.signal }))
+      const pending = transport.rawFetch(new Request("http://waterbox.local/v1/sandboxes", { headers: { authorization: "Bearer delayed" }, signal: controller.signal }))
       await Bun.sleep(5); controller.abort(new DOMException("identity cancelled", "AbortError"))
       await expect(pending).rejects.toMatchObject({ name: "AbortError" })
       transport.release()
     })
     test("runs the identical complete supported command surface", async () => {
-      const { client, provider } = await fixture(mode)
+      const { client, provider, backend } = await fixture(mode)
       const created = await client.createSandbox({}, { idempotencyKey: "conformance-create", signal })
       expect(created).toMatchObject({ sandboxId, state: "running" })
+      expect(provider.artifactPreparations).toBe(1)
+      expect(provider.runtimeArtifact).toMatchObject({ cliProtocolVersion: 2, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) })
       expect(await client.probeSandbox({ sandboxId }, { signal })).toMatchObject({ sandboxId, state: "running" })
 
       expect((await client.read({ sandboxId, filePath: "/workspace/a" }, { signal })).output).toBe("alpha")
@@ -189,12 +218,37 @@ for (const mode of ["embedded", "network"] as const) {
       expect(error).toMatchObject({ status: 502, code: "ambiguous_execution", recoverySandboxId: sandboxId, requestId: expect.any(String) })
       expect(String(error)).not.toContain("private-provider-detail")
       expect(provider.createCalls).toBe(1)
+      expect(await client.probeSandbox({ sandboxId }, { signal })).toMatchObject({ sandboxId, state: "preparing" })
+      expect(provider.prepareCalls).toBe(1)
       provider.prepareError = undefined
       expect(await client.createSandbox({}, { idempotencyKey: "recover", signal })).toMatchObject({ sandboxId, state: "running" })
       expect(provider.createCalls).toBe(1)
       expect(provider.prepareCalls).toBe(2)
       expect((await client.deleteSandbox({ sandboxId }, { signal })).state).toBe("terminated")
       await expect(client.read({ sandboxId, filePath: "/workspace/a" }, { signal })).rejects.toMatchObject({ code: "invalid_state", requestId: expect.any(String) })
+
+      const definiteProvider = new ConformanceProvider(ephemeralRecipient)
+      definiteProvider.prepareError = new ProviderError("failure", "private-definite-detail")
+      const definite = await fixture(mode, { provider: definiteProvider })
+      const definiteError = await definite.client.createSandbox({}, { idempotencyKey: "definite", signal }).catch(value => value)
+      expect(definiteError).toMatchObject({ code: "provider_failure", recoverySandboxId: sandboxId, requestId: expect.any(String) })
+      expect(String(definiteError)).not.toContain("private-definite-detail")
+    })
+
+    test("does not invent a recovery ID when cancellation wins after the checkpoint and permits explicit replay", async () => {
+      const provider = new ConformanceProvider(ephemeralRecipient)
+      provider.prepareError = new ProviderError("ambiguous_execution", "private-cancelled-detail")
+      const controller = new AbortController()
+      const { client } = await fixture(mode, { provider, decorate(response, request) {
+        if (request.method === "POST" && new URL(request.url).pathname === "/v1/sandboxes" && response.status === 502) controller.abort(new DOMException("caller cancelled after checkpoint", "AbortError"))
+        return response
+      } })
+      const error = await client.createSandbox({}, { idempotencyKey: "cancelled-checkpoint", signal: controller.signal }).catch(value => value)
+      expect(error).toMatchObject({ name: "AbortError" })
+      expect((error as { recoverySandboxId?: string }).recoverySandboxId).toBeUndefined()
+      provider.prepareError = undefined
+      expect(await client.createSandbox({}, { idempotencyKey: "cancelled-checkpoint", signal })).toMatchObject({ sandboxId, state: "running" })
+      expect(provider.createCalls).toBe(1)
     })
 
     test("reconstructs durable preparing state and resumes only by explicit same-key replay", async () => {
@@ -214,13 +268,38 @@ for (const mode of ["embedded", "network"] as const) {
     })
 
     test("keeps probe active and distinct from ordinary get semantics", async () => {
-      const { client, provider } = await fixture(mode)
+      const { client, provider, backend } = await fixture(mode)
       await client.createSandbox({}, { idempotencyKey: "probe", signal })
       const before = provider.inspectSandboxCalls
+      const get = await backend.fetch(new Request(new URL(`/v1/sandboxes/${sandboxId}`, backend.origin), { signal }))
+      expect(get.status).toBe(200)
+      expect(provider.inspectSandboxCalls).toBe(before)
       await client.probeSandbox({ sandboxId }, { signal })
       expect(provider.inspectSandboxCalls).toBe(before + 1)
       provider.sandboxStates.set(sandboxId, "failed")
       expect((await client.probeSandbox({ sandboxId }, { signal })).state).toBe("failed")
+    })
+
+    test("probe prepares referenced provisioning and retains canonical recovery on preparation failure", async () => {
+      for (const failure of [false, true]) {
+        const directory = await mkdtemp(join(tmpdir(), `waterbox-${mode}-probe-provisioning-`))
+        cleanup.push(() => rm(directory, { recursive: true, force: true }))
+        const sqlitePath = join(directory, "state.sqlite")
+        await seedProvisioning(sqlitePath)
+        const provider = new ConformanceProvider(ephemeralRecipient)
+        provider.sandboxStates.set(sandboxId, "running")
+        if (failure) provider.prepareError = new ProviderError("failure", "private-probe-prepare-detail")
+        const { client } = await fixture(mode, { provider, sqlitePath, ids: new SequenceIdGenerator([]) })
+        if (failure) {
+          const error = await client.probeSandbox({ sandboxId }, { signal }).catch(value => value)
+          expect(error).toMatchObject({ code: "provider_failure", recoverySandboxId: sandboxId, requestId: expect.any(String) })
+          expect(String(error)).not.toContain("private-probe-prepare-detail")
+        } else {
+          expect(await client.probeSandbox({ sandboxId }, { signal })).toMatchObject({ sandboxId, state: "running" })
+        }
+        expect(provider.inspectSandboxCalls).toBe(1)
+        expect(provider.prepareCalls).toBe(1)
+      }
     })
 
     test("handles split/multiple NDJSON and rejects empty, malformed, and post-terminal streams", async () => {
@@ -251,15 +330,19 @@ for (const mode of ["embedded", "network"] as const) {
       await client.createSandbox({}, { idempotencyKey: "bash-dispatched", signal })
       let progress = 0
       expect(await client.bash({ sandboxId, command: "printf done" }, { signal, onProgress() { progress++ } })).toMatchObject({ outcome: "completed", output: "observed" })
-      expect(provider.bashOffsets).toEqual([0])
+      expect(provider.bashOffsets).toEqual([0, 0])
       for (let attempt = 0; attempt < 20 && provider.bashCleanups === 0; attempt++) await Bun.sleep(5)
       expect(provider.bashCleanups).toBe(1)
-      expect(progress).toBeGreaterThanOrEqual(0)
+      expect(provider.bashCleanupBeforeTerminal).toBeFalse()
+      expect(progress).toBeGreaterThan(0)
       provider.bashMode = "fallback"
       expect(await client.bash({ sandboxId, command: "printf done" }, { signal })).toMatchObject({ outcome: "dispatched" })
-      provider.bashMode = "dispatched"; provider.bashOutput = "x".repeat(1_048_577); provider.bashOffsets = []
+      expect(provider.bashCleanups).toBe(1)
+      provider.bashMode = "dispatched"; provider.bashOutput = "x".repeat(1_048_577); provider.bashOffsets = []; provider.bashObservations = 0; provider.bashCleanupError = new Error("best-effort cleanup failure")
       expect(await client.bash({ sandboxId, command: "printf done" }, { signal })).toMatchObject({ outcome: "completed", metadata: { outputTruncated: true } })
       expect(provider.bashOffsets.length).toBeGreaterThan(1)
+      for (let attempt = 0; attempt < 20 && provider.bashCleanups < 2; attempt++) await Bun.sleep(5)
+      expect(provider.bashCleanups).toBe(2)
     })
 
     test("retains only canonical errors and cancels malformed error bodies", async () => {
