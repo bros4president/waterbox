@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
 import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH, type SandboxId } from "@waterbox/contracts"
 import { FakeSandboxProvider, FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { ProviderError } from "@waterbox/core/provider"
 import { createWaterboxApi, type IdentityResolver, type WaterboxCore } from "../src/index.ts"
 
 const sandbox = {
@@ -247,6 +248,43 @@ describe("Waterbox API", () => {
     expect((await (await probe(ids.failedSticky)).json()).state).toBe("terminated")
   })
 
+  test("returns canonical recovery errors when referenced provisioning preparation fails through get or probe", async () => {
+    const secret = "provider preparation detail must stay private"
+    const sandboxes = new InMemorySandboxRepository()
+    const provider = new FakeSandboxProvider()
+    provider.prepareError = new ProviderError("failure", secret)
+    const core = new SandboxService({
+      sandboxes,
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })
+    const ids = ["sbx_get-failure-a1", "sbx_probe-failure-a1"] as const
+    for (const sandboxId of ids) {
+      await sandboxes.createIfAbsent({
+        accountId: "acct_test", sandboxId, provider: "fake", providerRef: { privateSandboxId: sandboxId }, state: "provisioning",
+        version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
+      })
+      provider.sandboxStates.set(sandboxId, "running")
+    }
+    const app = createWaterboxApi({ core, identityResolver: { async resolveBearer() { return { accountId: "acct_test" } } }, generateRequestId: () => "req_test" })
+    const responses = [
+      await app.request(`/v1/sandboxes/${ids[0]}`, { headers: auth }),
+      await app.request(`/v1/sandboxes/${ids[1]}/probe`, { method: "POST", headers: auth }),
+    ]
+    for (const [index, response] of responses.entries()) {
+      expect(response.status).toBe(502)
+      const text = await response.text()
+      expect(text).not.toContain(secret)
+      expect(text).not.toContain("privateSandboxId")
+      expect(JSON.parse(text)).toEqual({ error: { code: "provider_failure", message: "The provider operation failed", requestId: "req_test", sandboxId: ids[index] } })
+    }
+    expect(provider.prepareCalls).toBe(2)
+  })
+
   test("keeps cross-account probe and Bash job access non-revealing", async () => {
     const owned = (identity: unknown) => {
       if ((identity as { accountId?: string }).accountId !== "acct_owner") throw new DomainError("not_found", "private ownership detail")
@@ -426,11 +464,13 @@ describe("Waterbox API", () => {
       ["cleanupBashJob", { accountId: "acct_test" }, sandbox.sandboxId, jobId],
     ])
     expect((await app.request(`${path}/observations`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"offset":0,"maxBytes":1}' })).status).toBe(401)
-    for (const body of ['{"offset":-1,"maxBytes":64}', '{"offset":0,"maxBytes":65537}', '{"offset":0,"maxBytes":1,"extra":true}', '{']) {
+    for (const body of ['{"offset":-1,"maxBytes":64}', `{"offset":${Number.MAX_SAFE_INTEGER + 1},"maxBytes":1}`, '{"offset":0,"maxBytes":65537}', '{"offset":0,"maxBytes":1,"extra":true}', '{']) {
       const malformed = await app.request(`${path}/observations`, { method: "POST", headers: jsonHeaders, body })
       expect(malformed.status, body).toBe(400)
       expect(await malformed.json()).toMatchObject({ error: { code: "invalid_request" } })
     }
+    const invalidOutput = api({ observeBashJob: async () => ({ jobId, state: "running", chunkBase64: "", nextOffset: Number.MAX_SAFE_INTEGER + 1, outputSize: Number.MAX_SAFE_INTEGER + 1 }) }).app
+    expect((await invalidOutput.request(`${path}/observations`, { method: "POST", headers: jsonHeaders, body: '{"offset":0,"maxBytes":1}' })).status).toBe(500)
     expect((await app.request(`/v1/internal/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}/observe`, { method: "POST", headers: jsonHeaders, body: '{"offset":0,"maxBytes":1}' })).status).toBe(404)
   })
 
@@ -456,6 +496,7 @@ describe("Waterbox API", () => {
     expect(document.paths["/v1/sandboxes"].post.responses[401]).toBeDefined()
     expect(first).toContain('"preparing"')
     expect(first).toContain('"sandboxId"')
+    expect(first).toContain(`"maximum":${Number.MAX_SAFE_INTEGER}`)
     expect(first).not.toContain("providerRef")
   })
 })

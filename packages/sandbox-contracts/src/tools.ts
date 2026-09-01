@@ -169,7 +169,7 @@ export const BashToolEventSchema = z.union([
 ])
 
 export const BashJobObservationRequestSchema = z.object({
-  offset: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   maxBytes: z.number().int().min(1).max(65_536),
 }).strict()
 
@@ -177,8 +177,8 @@ export const BashJobObservationSchema = z.object({
   jobId: BashJobIdSchema,
   state: z.enum(["starting", "running", "completed", "failed"]),
   chunkBase64: z.string().regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/),
-  nextOffset: z.number().int().nonnegative(),
-  outputSize: z.number().int().nonnegative(),
+  nextOffset: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  outputSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   exitCode: z.number().int().nullable().optional(),
   signal: z.string().nullable().optional(),
   timedOut: z.boolean().optional(),
