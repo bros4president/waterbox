@@ -1,6 +1,6 @@
 # Contributing
 
-Run `bun run check:premerge` before merging. It is the canonical local gate for type checking, the full Bun test suite, Node's SQLite compatibility test, and whitespace validation against `HEAD`.
+Run `bun run check:premerge` before merging. It is the canonical local gate for type checking, the full Bun test suite, Node's SQLite compatibility test, and whitespace validation for the committed PR range against `origin/main` plus staged and unstaged work.
 
 Run `bun run check:release` before an MCP package release. It inherits the pre-merge gate and adds the production MCP build and `npm pack --dry-run` package validation.
 

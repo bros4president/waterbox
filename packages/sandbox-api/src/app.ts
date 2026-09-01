@@ -161,38 +161,14 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
   })
 
   app.use("/v1/*", async (c, next) => {
-    if (c.req.method !== "POST" || !/^\/v1\/sandboxes\/[^/]+\/bash-jobs\/[^/]+\/observations$/.test(new URL(c.req.url).pathname)) return next()
+    if (c.req.raw.body === null || !c.req.header("content-type")?.toLowerCase().startsWith("application/json")) return next()
     try {
-      const body = await readBoundedJson(c.req.raw, MAX_BASH_OBSERVATION_JSON_BYTES)
+      const body = await readBoundedJson(c.req.raw, jsonRequestMaximum(c.req.raw))
       c.req.raw = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body, signal: c.req.raw.signal })
     } catch (error) {
       if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
       const status = error instanceof RequestBodyError ? error.status : 400
       return errorResponse(c, c.get("requestId"), "invalid_request", status === 413 ? "The request body is too large" : "The request is invalid", status)
-    }
-    await next()
-  })
-
-  app.use("/v1/*", async (c, next) => {
-    if (c.req.method !== "PUT" || !/^\/v1\/sandboxes\/[^/]+\/secure-file-transfers\/[^/]+$/.test(new URL(c.req.url).pathname)) return next()
-    try {
-      const body = await readBoundedJson(c.req.raw, MAX_SECURE_TRANSFER_JSON_BYTES)
-      c.req.raw = new Request(c.req.raw.url, { method: c.req.raw.method, headers: c.req.raw.headers, body, signal: c.req.raw.signal })
-    }
-    catch (error) {
-      if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
-      const status = error instanceof RequestBodyError ? error.status : 400
-      return errorResponse(c, c.get("requestId"), "invalid_request", status === 413 ? "The request body is too large" : "The request is invalid", status)
-    }
-    await next()
-  })
-
-  app.use("/v1/*", async (c, next) => {
-    if (c.req.raw.body === null || !c.req.header("content-type")?.toLowerCase().startsWith("application/json")) return next()
-    try { await c.req.raw.clone().json() }
-    catch (error) {
-      if (c.req.raw.signal.aborted) throw c.req.raw.signal.reason ?? error
-      return errorResponse(c, c.get("requestId"), "invalid_request", "The request is invalid", 400)
     }
     await next()
   })
@@ -248,18 +224,18 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
     const events = await dependencies.core.executeTool(c.get("identity"), sandboxId, toolName, parsed.data as never, controller.signal)
     const iterator = events[Symbol.asyncIterator]()
     let terminated = false
-    const terminate = async (reason: unknown) => {
+    const terminate = (reason: unknown) => {
       if (terminated) return
       terminated = true
       if (!controller.signal.aborted) controller.abort(reason)
-      try { await iterator.return?.() } catch {}
+      try { void Promise.resolve(iterator.return?.()).catch(() => {}) } catch {}
     }
     let first
     try { first = await iterator.next() }
-    catch (error) { await terminate(error); throw error }
+    catch (error) { terminate(error); throw error }
     if (first.done) {
       const error = new DomainError("provider_failure", "The provider operation failed")
-      await terminate(error)
+      terminate(error)
       throw error
     }
     const encoder = new TextEncoder()
@@ -274,12 +250,12 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
           const parsedEvent = toolEventSchemas[toolName].parse(event.value)
           streamController.enqueue(encoder.encode(`${JSON.stringify(parsedEvent)}\n`))
         } catch (error) {
-          await terminate(error)
+          terminate(error)
           streamController.error(error)
         }
       },
-      async cancel(reason) {
-        await terminate(reason)
+      cancel(reason) {
+        terminate(reason)
       },
     })
     return c.body(stream, 200, { "Content-Type": "application/x-ndjson" })
@@ -371,7 +347,15 @@ function publicMessage(code: ErrorCode): string {
 
 const MAX_SECURE_TRANSFER_JSON_BYTES = MAX_SECURE_CIPHERTEXT_BASE64_LENGTH + 8_192
 const MAX_BASH_OBSERVATION_JSON_BYTES = 8_192
+// Matches the 1 MiB JSON boundary used by API clients and provider commands.
+const MAX_JSON_REQUEST_BYTES = 1_048_576
 class RequestBodyError extends Error { constructor(readonly status: 400 | 413) { super("Invalid request body") } }
+function jsonRequestMaximum(request: Request): number {
+  const pathname = new URL(request.url).pathname
+  if (request.method === "POST" && /^\/v1\/sandboxes\/[^/]+\/bash-jobs\/[^/]+\/observations$/.test(pathname)) return MAX_BASH_OBSERVATION_JSON_BYTES
+  if (request.method === "PUT" && /^\/v1\/sandboxes\/[^/]+\/secure-file-transfers\/[^/]+$/.test(pathname)) return MAX_SECURE_TRANSFER_JSON_BYTES
+  return MAX_JSON_REQUEST_BYTES
+}
 async function readBoundedJson(request: Request, maximum: number): Promise<string> {
   const reader = request.body?.getReader()
   if (!reader) throw new RequestBodyError(400)
@@ -396,7 +380,7 @@ async function readBoundedJson(request: Request, maximum: number): Promise<strin
     JSON.parse(text)
     return text
   } catch (error) {
-    try { await reader.cancel(error) } catch {}
+    void reader.cancel(error).catch(() => {})
     if (error instanceof RequestBodyError || request.signal.aborted) throw error
     throw new RequestBodyError(400)
   }
