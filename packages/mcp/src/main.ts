@@ -1,28 +1,27 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import type { SandboxId, ToolArgumentsByName, ToolEventByName, ToolName } from "@waterbox/contracts"
-import type { McpBackend } from "./backend.ts"
+import { createRemoteApiBackend, WaterboxClient } from "@waterbox/client"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
-import { createMcpBackend } from "./direct.ts"
+import { createMcpClient } from "./composition.ts"
 import { createWaterboxMcpServer } from "./server.ts"
 
 export async function main(): Promise<void> {
-  const backend = await createStartupBackend()
-  const server = createWaterboxMcpServer(backend, process.env.WATERBOX_MCP_DIAGNOSTICS === "1"
+  const client = await createStartupClient()
+  const server = createWaterboxMcpServer(client, process.env.WATERBOX_MCP_DIAGNOSTICS === "1"
     ? { onError: (error) => console.error(diagnosticMessage(error)) }
     : {})
   let closed = false
   const close = async () => {
     if (closed) return
     closed = true
-    try { await server.close() } finally { await backend.close() }
+    try { await server.close() } finally { await client.close() }
   }
-  server.onclose = () => { void backend.close() }
+  server.onclose = () => { void client.close() }
   process.once("SIGINT", () => { void close() })
   process.once("SIGTERM", () => { void close() })
   try {
     await server.connect(new StdioServerTransport())
   } catch (error) {
-    await backend.close()
+    await client.close()
     throw error
   }
 }
@@ -40,30 +39,18 @@ function diagnosticMessage(error: unknown): string {
   return `Waterbox MCP diagnostic: ${messages.join(" <- ")}`
 }
 
-export async function createStartupBackend(environment: Record<string, string | undefined> = process.env): Promise<McpBackend> {
+export async function createStartupClient(environment: Record<string, string | undefined> = process.env): Promise<WaterboxClient> {
   try {
-    return await createMcpBackend(parseMcpConfig(environment))
+    return await createMcpClient(parseMcpConfig(environment))
   } catch (error) {
     if (!(error instanceof McpConfigurationError) && !(error instanceof Error && error.name === "UnsupportedMcpProviderError")) throw error
-    return {
-      preflight() { throw error },
-      async createSandbox() { throw error },
-      async probeSandbox() { throw error },
-      async deleteSandbox() { throw error },
-      async listSnapshots() { throw error },
-      async createSnapshot() { throw error },
-      async deleteSnapshot() { throw error },
-      async initiateSecureFileTransfer() { throw error },
-      async consumeSecureFileTransfer() { throw error },
-      async executeTool<N extends ToolName>(
-        _sandboxId: SandboxId,
-        _toolName: N,
-        _arguments: ToolArgumentsByName[N],
-        _signal: AbortSignal,
-      ): Promise<AsyncIterable<ToolEventByName[N]>> { throw error },
-      async close() {},
-    }
+    return unavailableClient(error)
   }
+}
+
+function unavailableClient(error: Error): WaterboxClient {
+  const client = new WaterboxClient(createRemoteApiBackend("http://waterbox.unconfigured/", async () => { throw error }))
+  return Object.assign(client, { preflight() { throw error } })
 }
 
 export function startupMessage(error: unknown): string {
