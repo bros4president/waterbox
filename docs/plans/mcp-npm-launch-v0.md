@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress; Node 24.15.0, Phase 3, and the fresh Phase 4 flow are verified. Snapshot-sourced reinstall and remaining Phase 0 live prerequisites are pending.
+Status: implementation in progress. Node 24.15.0, Phase 3, and the fresh Phase 4 Box flow are verified. PR #5 merged the Fetch-backed product boundary upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`; the current checkout still needs that merge and post-merge Node-minimum, live, and release-path re-verification. Snapshot-sourced Box reinstall and remaining Phase 0 live prerequisites are pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -17,9 +17,9 @@ An implementation agent assigned a phase must:
 5. Update the phase status and append a short implementation-log entry with verification facts.
 6. Stop at the phase boundary.
 
-Do not reinterpret settled requirements inside a phase. If Box behavior, Node behavior, npm behavior, or an external registry contract contradicts this plan, record the exact blocker and stop instead of adding an unsafe fallback.
+Do not reinterpret settled requirements inside a phase. If provider behavior, Node behavior, npm behavior, or an external registry contract contradicts this plan, record the exact blocker and stop instead of adding an unsafe fallback.
 
-No live Box mutation is authorized merely by this document. Every live capability probe and smoke run remains separately credentialed, explicitly authorized, isolated-account gated, bounded, and cleanup-reconciled.
+No live provider mutation is authorized merely by this document. Every live capability probe and smoke run remains separately credentialed, explicitly authorized, isolated-account gated, bounded, and cleanup-reconciled.
 
 ## Launch Objective
 
@@ -35,9 +35,9 @@ and receive a valid local stdio MCP configuration whose process:
 - Connects successfully even before a provider is configured.
 - Explains provider setup without accepting secrets through model-visible tool arguments.
 - Uses an explicitly selected user-owned provider after credentials are supplied through the MCP client's environment or secret mechanism.
-- Creates a fresh Box without a Waterbox system snapshot.
-- Reinstalls the current Waterbox one-shot CLI when creating from a user snapshot.
-- Persists the provider resource identity before bootstrap can fail or the process can exit.
+- Creates a fresh sandbox with either explicitly configured launch provider, Box or Vercel Sandbox, without a Waterbox system snapshot.
+- Reinstalls the current Waterbox one-shot CLI when creating from a supported provider user snapshot where that provider advertises snapshots.
+- Persists the provider resource identity before preparation/bootstrap starts, while retaining the acknowledged provider-return/result-persistence failure interval.
 - Publishes from a reviewed Git commit through a reproducible, tested npm tarball.
 
 The launch command installs configuration. It does not silently choose a provider or acquire credentials.
@@ -50,8 +50,9 @@ The launch command installs configuration. It does not silently choose a provide
 - The package has one public executable named `waterbox`.
 - The package is CLI-only in V0. It has no public JavaScript `exports` entry and ships no declarations.
 - `npx add-mcp waterbox` is the primary advertised installation command.
-- The supported server remains a local stdio MCP that composes repositories, core, and the selected user-owned provider directly.
-- Waterbox remains provider-neutral. Box is the first supported provider, not an implicit default.
+- The supported server remains a local Node stdio MCP with no listener: MCP renderer -> private `@waterbox/client` -> authenticated in-process Fetch `ApiBackend` -> `@waterbox/api` -> core -> SQLite/provider.
+- `@waterbox/control-plane-local` owns embedded core, repository, and provider composition. Its embedded bearer is process-private; synthetic URLs are in-process Fetch routing, not network traffic. A remote `ApiBackend` seam does not imply hosted Waterbox exists.
+- Waterbox remains provider-neutral. Box and Vercel Sandbox are the launch-supported providers, neither is an implicit default.
 - Missing provider configuration is a connected setup state, not a process startup failure.
 - Provider credentials are supplied by the user through environment or client-specific secret facilities.
 - Credentials are never accepted through MCP tool arguments, returned in MCP content, or written to ordinary diagnostics.
@@ -96,6 +97,7 @@ Do not add in this launch:
 - Secret entry through chat, MCP tools, shell arguments, or committed configuration.
 - An npm alias or forwarding package for `@waterbox/mcp`.
 - A public library API from the `waterbox` package.
+- Hosted Waterbox or a network listener in the supported MCP process.
 - A daemon inside Box.
 - An HTTP receiver inside Box.
 - A systemd service for ordinary tool execution.
@@ -110,25 +112,16 @@ Do not add in this launch:
 
 ```text
 MCP client
-    |
     | stdio: npx -y waterbox
     v
-waterbox Node 24 bundle
-    |
-    +-- unconfigured backend -> provider setup guidance
-    |
-    +-- configured backend
-            |
-            +-- node:sqlite repositories
-            +-- provider-neutral core
-            +-- selected provider
-                    |
-                    +-- create provider sandbox normally
-                    +-- persist returned provider reference as preparing
-                    +-- install current one-shot CLI
-                    +-- verify runtime
-                    +-- expose canonical tools
+thin MCP renderer
+    -> private @waterbox/client
+    -> authenticated in-process Fetch ApiBackend
+    -> @waterbox/api
+    -> core -> SQLite repositories -> selected provider registry entry
 ```
+
+`@waterbox/control-plane-local` composes the embedded API, core, repositories, selected provider, and process-private bearer. The supported MCP has no network listener; synthetic request URLs never leave the process. Its remote `ApiBackend` seam is a product boundary and test seam, not a hosted-service commitment.
 
 The one-shot CLI remains the execution boundary inside full-Linux sandboxes:
 
@@ -208,6 +201,8 @@ Because npm cannot pack files from outside the workspace package automatically, 
 
 The internal `dist/waterbox-cli.js` artifact is package data used for provider bootstrap. It is not a public npm executable or export.
 
+`@waterbox/client` and `@waterbox/control-plane-local` are private workspace packages. They are bundled into `dist/waterbox.js`, are not separately published, and expose no public package API or source-package contract to npm consumers.
+
 ### Entry Point
 
 The npm bin file must begin with:
@@ -231,10 +226,10 @@ The unconfigured backend:
 - Registers the normal supported tool surface.
 - Does not initialize SQLite or any concrete provider unnecessarily.
 - Returns stable setup guidance from lifecycle and operation calls.
-- Lists currently supported provider names and required configuration variable names.
+- Lists both launch-supported provider names and only their settled configuration variable names.
 - Never asks the model to provide a secret as a tool argument.
-- Does not pretend the configured provider is Box.
-- Performs no local file read, SQLite initialization, provider request, artifact load, or other operation side effect before returning setup guidance.
+- Does not pretend either configured provider is selected.
+- Performs no local file read, SQLite initialization, provider request, artifact load, provider API call, or other operation side effect before returning setup guidance.
 
 The setup guidance for Box identifies:
 
@@ -245,6 +240,8 @@ BOX_API_KEY=<configured through the MCP client's environment or secret mechanism
 
 The package README provides client-specific examples for supported clients without placing a real key in command history or committed project configuration.
 
+Vercel Sandbox is listed as a launch provider, but its exact credential and non-secret configuration variable names are reserved for the Phase 6 audit report. Do not invent them in this plan or implementation. The audit must establish the exact installed SDK version, official authentication/configuration mechanism, and supporting documentation before the provider is implemented. Until then, unconfigured guidance may name Vercel Sandbox but must not claim variable names or a usable configuration.
+
 ### Configuration Precedence
 
 V0 configuration is environment-based:
@@ -253,7 +250,7 @@ V0 configuration is environment-based:
 2. Documented non-secret defaults for provider endpoints and timing only.
 3. No provider selection default.
 
-Waterbox does not read the Box CLI's login state, browser cookies, unrelated dotfiles, or provider-specific credential stores in V0.
+Waterbox does not read provider CLI login state, browser cookies, unrelated dotfiles, local files, or provider-specific credential stores in V0.
 
 Provider selection is parsed before provider-specific fields. Unknown providers receive a stable unsupported-provider message. Missing credentials leave the MCP connected and produce setup guidance. Malformed non-secret configuration may reject provider initialization but must not corrupt MCP stdout.
 
@@ -288,6 +285,7 @@ Required changes:
 - Keep integer reads as numbers and test `run().changes` behavior.
 - Preserve existing SQLite file format and reopen compatibility.
 - Verify Web Crypto, Web Streams, X25519, and secure-transfer encryption at the declared minimum Node version.
+- Execute configured fake-provider/client/API/SQLite flows through the embedded Fetch architecture under Node 24.15.0 and a current Node 24 patch; syntax checks alone are insufficient.
 
 No native addon, postinstall compilation, or platform-specific SQLite package is allowed.
 
@@ -341,11 +339,13 @@ The existing provider create operation remains the creation reliability boundary
 
 ```ts
 interface SandboxProvider {
+  readonly name: string
   createSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation>
   prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
-  // existing execution and optional capability groups
+  executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]>
+  // stopResume?, snapshots?, secureFileTransfer?, and bashJobs? remain optional capability groups
 }
 ```
 
@@ -357,6 +357,9 @@ Exact names may follow repository conventions, but these semantics are mandatory
 - A provider without preparation is not supported; core has no compatibility branch that bypasses `preparing`.
 - Core remains independent of Box artifact paths and installation commands.
 - Provider live status cannot promote a `preparing` Waterbox record to `running`; only successful preparation and Waterbox health verification can do that.
+- `stopResume` and `snapshots` remain optional cohesive capability groups and are not made mandatory for either launch provider.
+- Existing optional secure-transfer and Bash-job groups remain optional with their current status; this plan neither promotes nor removes them.
+- Unsupported optional capabilities fail before public-ID allocation or persistence and before provider dispatch, under the existing behavior.
 
 ### Core Durability
 
@@ -386,7 +389,7 @@ The existing behavior that returns `idempotency_in_progress` forever for every i
 
 ### Concurrency
 
-V0 Direct MCP is one local process, but correctness must not rely only on a process-local flag:
+V0 local MCP is one local process, but correctness must not rely only on a process-local flag:
 
 - Preparation must be intrinsically idempotent for the same artifact digest.
 - Compare-and-swap updates preserve one authoritative Waterbox record.
@@ -437,7 +440,7 @@ The request retains the existing Box create behavior. This plan does not depend 
 
 ### Artifact
 
-The npm package ships an immutable Node bundle plus build metadata. Provider composition loads it relative to the installed package, not the current working directory.
+The MCP package loads the immutable Node CLI bundle relative to the installed package and injects it into local control-plane composition. `@waterbox/control-plane-local` never discovers or builds the artifact, and the shared local package does not read ambient paths.
 
 The provider receives an injected artifact object conceptually equivalent to:
 
@@ -534,7 +537,13 @@ Bootstrap has a distinct retry policy from user commands:
 - Cancellation preserves recoverable `preparing` state.
 - Definite bootstrap failure stores failed state and a safe error while preserving deletion capability.
 - Unresolved bootstrap ambiguity preserves `preparing` state and in-progress idempotency.
-- A failed response must not expose Box IDs, API keys, commands, response bodies, request IDs, or temporary paths.
+- A failed response must not expose provider IDs, API keys, commands, response bodies, request IDs, or temporary paths.
+
+### Product-Boundary Serialization
+
+- Preparation, recovery, and cancellation semantics cross API serialization and client parsing; they are not direct MCP/core shortcuts.
+- The canonical `error.sandboxId` is validated by the client and becomes the caller recovery ID. Invalid or absent values never become recovery handles.
+- Create replay remains caller-controlled. The client and MCP renderer do not invent replay keys or retry ambiguous create operations.
 
 ### Deletion
 
@@ -563,6 +572,7 @@ The final MCP and sandbox CLI bundles, not the full lockfile, determine the ship
 Known embedded candidates use permissive licenses, including:
 
 - MIT: `@modelcontextprotocol/sdk`, Zod, AJV, Noble packages, Scure packages, and related helpers.
+- Hono, OpenAPI, API, and private-client dependencies included by the Fetch-backed bundle: inventory their exact shipped closure and notices.
 - BSD-3-Clause: `age-encryption` and `fast-uri`.
 - MIT adapted code: OpenCode edit and patch implementations.
 
@@ -598,6 +608,7 @@ It must then explain:
 - Installation does not select a provider.
 - Waterbox starts connected but unconfigured.
 - The supported providers table.
+- Each provider's mandatory preparation behavior and optional capability support, based only on completed audit and live evidence.
 - Provider-specific environment variable names.
 - Safe credential configuration for each documented MCP client.
 - Node 24.15 or newer is required locally.
@@ -662,7 +673,7 @@ Acceptance criteria:
 - The live probe cannot run without exact authorization and isolated-account gates.
 - Sanitized observations support every Box bootstrap assumption.
 - No provider IDs, credentials, raw bodies, commands, or protected URLs are committed.
-- A failed probe blocks Phase 3 rather than adding apt or Bun fallback installation.
+- A failed probe blocks full Phase 4 acceptance rather than adding apt or Bun fallback installation.
 
 Verification:
 
@@ -706,7 +717,7 @@ Also run focused Node 24 repository compatibility checks added by this phase.
 
 ### Phase 2: Node MCP And One-Shot CLI
 
-Status: implemented and verified on Node 24.15.0; current Node 24 CI verification remains pending; depends on Phase 1
+Status: implemented and verified on Node 24.15.0; current Node 24 CI verification remains pending. Its pre-PR #5 end-to-end MCP evidence must be rerun after the merged Fetch-backed architecture is integrated into the checkout; depends on Phase 1.
 
 Scope:
 
@@ -724,6 +735,7 @@ Acceptance criteria:
 - All seven canonical tools, secure transfer, quick Bash, dispatched Bash, observation, cleanup, health, and version pass focused tests.
 - MCP with no provider, an unknown provider, a supported provider with missing credentials, and malformed non-secret provider configuration behaves according to the provider-neutral setup contract without corrupting stdout.
 - Every unconfigured lifecycle and operation path, including `send_file_securely`, returns setup guidance before reading local files, opening SQLite, loading the bootstrap artifact, or contacting a provider.
+- Under Node 24.15.0 and current Node 24, configured fake-provider flows exercise MCP renderer -> client -> authenticated embedded API -> SQLite/core, including API/client serialization and parsing; `node --check` is not sufficient evidence.
 - The current package can be packed and launched in a clean environment with Node and no Bun.
 
 Verification:
@@ -741,7 +753,7 @@ Run the generated artifacts under the declared Node minimum and a current Node 2
 
 ### Phase 3: Durable Preparing Checkpoint
 
-Status: credential-free implementation verified; depends on Phases 0 and 2
+Status: credential-free implementation verified; depends on the Phase 0 credential-free baseline and Phase 2, not Phase 0's remaining Box live gates
 
 Scope:
 
@@ -754,7 +766,7 @@ Scope:
 Acceptance criteria:
 
 - Provider creation still runs through the existing `createSandbox` method; no allocation/readiness split, automatic create replay, or list reconciliation is added.
-- Core stores the Box identity and commits `preparing` before any file upload or installation command.
+- Core stores the opaque provider identity and commits `preparing` before any file upload or installation command.
 - Provider readiness alone cannot transition a sandbox to `running`.
 - Tools, secure transfer, lifecycle mutations, and snapshot creation reject `preparing`; probe and deletion remain available.
 - Same-key replay resumes only persisted `preparing` work and never repeats provider create from a null-reference `provisioning` record.
@@ -787,7 +799,7 @@ No live Box call is required for the credential-free completion of this phase.
 
 ### Phase 4: Box Bootstrap-On-Create
 
-Status: fresh live flow passed; snapshot-sourced reinstall failed during install and full live acceptance remains pending; depends on Phase 3
+Status: fresh live provider/bootstrap flow passed; snapshot-sourced reinstall failed during install and full live acceptance remains pending. The recorded evidence is not post-PR #5 end-to-end MCP evidence and must be rerun after the merged architecture is integrated into the checkout; depends on Phase 3.
 
 Scope:
 
@@ -821,29 +833,107 @@ git diff --check
 
 Then run separately authorized isolated-account live checks for the remaining stop/resume and snapshot-sourced reinstall gates. Snapshot-sourced creation from a stopped sandbox must reinstall the current runtime before Phase 4 receives full live acceptance.
 
-### Phase 5: Package, License, And Documentation
+### Phase 5: Fetch-Backed Product Boundary
 
-Status: pending; depends on Phase 4
+Status: merged upstream in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`; checkout integration plus post-merge Node-minimum, live, and release-path re-verification remain pending; depends on the Phase 4 implementation, not its remaining live gates
 
 Scope:
 
-- Rename the package and executable to `waterbox`.
-- Remove the public library export.
-- Add complete npm metadata.
-- Add Apache-2.0 licensing and exact bundled-code notices.
-- Rewrite package and root documentation for the launch architecture.
-- Remove supported-path system-template documentation and scripts after successful bootstrap verification.
+- Establish canonical API routes, private `@waterbox/client`, embedded authenticated `ApiBackend`, a thin MCP renderer, and a thin `api-local` listener trigger.
+- Preserve embedded/network fake conformance and add parity and dependency guards.
 
 Acceptance criteria:
 
-- `npx waterbox` resolves the sole package bin and starts stdio MCP.
-- `npx add-mcp waterbox` writes the expected package command and inferred server name.
-- The tarball contains only approved files.
-- Package metadata points at the actual repository and issue tracker.
-- License and notices cover both generated bundles.
-- OpenCode adapted-code paths are correct.
-- README examples contain placeholders only.
-- Root docs distinguish supported, experimental, and historical components.
+- No MCP production path calls core, repositories, or providers directly, and the supported MCP has no listener.
+- The embedded bearer remains process-private; API authentication, body bounds, serialization, client parsing, cancellation, recovery, and diagnostics redaction apply equally to embedded and network fakes.
+- Recovery/cancellation plus Bash and secure-transfer flows retain parity through API and client boundaries.
+- All 14 MCP tools under absent, unknown, incomplete, and malformed provider configurations return side-effect-free setup guidance before local files, SQLite, artifacts, or provider APIs are touched.
+- Provider diagnostics, including the Box provider diagnostic callback, are preserved.
+- Pre-merge review fixes preserve the Box provider diagnostic callback and restore comprehensive unconfigured safety coverage.
+
+Existing direct-path live evidence remains provider/bootstrap evidence only. A fresh end-to-end MCP smoke must run against the merged Fetch-backed path.
+
+Verification:
+
+```sh
+bun test packages/sandbox-api/test packages/client/test packages/control-plane-local/test packages/mcp/test apps/api-local/test
+bun run typecheck
+bun run build:mcp
+git diff --check
+```
+
+Also run the configured embedded fake-provider flow under Node 24.15.0 and current Node 24, the client conformance suite against embedded and real-listener fake backends, and the MCP dependency/no-listener guard.
+
+### Phase 6: Vercel Sandbox Capability Probe And Provider-Port Audit
+
+Status: pending; depends on the merged Phase 5 credential-free baseline. Full live and release-path re-verification may continue independently before launch.
+
+Scope:
+
+- Do not implement a production adapter, change the provider port, or alter API, client, MCP, or core behavior in this phase.
+- Read official Vercel Sandbox SDK/API documentation and inspect the exact installed SDK version.
+- Run credential-free static/fake probes and, separately, a minimally scoped authorized live capability probe.
+- Map `createSandbox`, `prepareSandbox`, `inspectSandbox`, `deleteSandbox`, and `executeTool`, plus every existing optional group: `stopResume`, `snapshots`, `secureFileTransfer`, and `bashJobs`.
+- Audit resource identity/durability; create ambiguity and idempotency; state mapping; command execution/events; filesystem/upload; runtime/base image/preparation; Node, `rg`, and `sudo` availability or alternatives; cancellation/timeouts; deletion; quotas/billing; snapshots; stop/resume; secure transfer; Bash jobs; source-snapshot semantics; credential/configuration; and secret/redaction concerns.
+
+Acceptance criteria:
+
+- Produce `docs/research/vercel-sandbox-provider-port-audit.md` with cited evidence, installed-version facts, static/fake and separately authorized live observations, cleanup reconciliation, and exactly one verdict:
+  1. adapter fits current port unchanged;
+  2. adapter-local shim needed, port unchanged;
+  3. generic port change required before adapter.
+- The live probe uses exact authorization, minimal resources, tracked cleanup, and exact baseline reconciliation. It makes no production implementation claim.
+- Any proposed port change is minimal, provider-neutral, justified by both providers or general semantics, and explicitly approved in this launch plan before implementation. No provider-name branch is added in core, API, client, or MCP.
+
+### Phase 7: Evaluate Audit, Approve Contract, Then Implement Vercel Provider
+
+Status: pending; evaluation begins after the Phase 6 report. No production change begins before explicit verdict and contract approval.
+
+Scope:
+
+- Review the Phase 6 evidence, select one verdict, and record the approved decision and exact adapter/port boundary in this plan.
+- If the verdict requires a port change, amend this durable plan first, implement the generic change, and prove Box regression and conformance before the adapter.
+- Only after the port decision, add the Vercel provider package, local composition, and settled configuration contract.
+- Keep Vercel-specific behavior below adapter/composition. Provider selection stays in composition/registry configuration; setup rendering above composition consumes provider-neutral metadata instead of branching on provider names.
+
+Acceptance criteria:
+
+- The approved verdict, evidence, and any generic contract amendment are recorded before implementation starts.
+- `name`, `createSandbox`, `prepareSandbox`, `inspectSandbox`, `deleteSandbox`, and `executeTool` remain mandatory. `stopResume`, `snapshots`, `secureFileTransfer`, and `bashJobs` remain optional cohesive groups even if an approved generic extension is added.
+- No Box- or Vercel-name branch exists in core, API, client, or MCP.
+- Add credential-free conformance tests using shared provider-neutral expectations where valuable, without reviving an oversized conformance framework.
+- Add an isolated live Vercel smoke for every mandatory method and each optional capability advertised as supported.
+- Launch documentation includes an honest provider capability table and official credential-injection instructions.
+- Once its configuration contract is settled, unconfigured setup guidance lists Box and Vercel Sandbox without reading artifacts, SQLite, local files, or provider APIs.
+- Vercel becomes launch-supported only when its adapter, configured Node path, packaging/legal closure, documentation, and isolated live smoke pass.
+
+Verification:
+
+```sh
+bun test packages/sandbox-core/test packages/sandbox-provider-box/test packages/sandbox-provider-vercel/test packages/control-plane-local/test packages/sandbox-api/test packages/client/test packages/mcp/test
+bun run typecheck
+bun run build:mcp
+git diff --check
+```
+
+Also run the shared mandatory provider expectations against both adapters, optional expectations only for groups each adapter exposes, configured fake flows under Node 24.15.0 and current Node 24, and the separately authorized Vercel live smoke.
+
+### Phase 8: Package, Legal, And Documentation
+
+Status: pending; depends on Phase 7 and full Phase 4 live acceptance before legacy system-template removal or package completion
+
+Scope:
+
+- Rename the package and executable to `waterbox`, retain its CLI-only contract, and add complete npm metadata.
+- Add Apache-2.0 licensing and exact bundle closure notices, including Hono/OpenAPI/API/client dependencies.
+- Rewrite package and root documentation for the Fetch-backed local architecture and both providers.
+- Remove supported-path system-template documentation and scripts only after full Phase 4 live acceptance, including snapshot-sourced reinstall.
+
+Acceptance criteria:
+
+- `npx waterbox` resolves the sole package bin and starts stdio MCP; `npx add-mcp waterbox` writes the expected package command.
+- The tarball contains only approved files; private workspace internals are bundled, not public APIs or source packages.
+- Package metadata, legal notices, and documentation are factual for Box and Vercel Sandbox, optional capabilities, and no hosted mode.
 - `server.json` is either valid for an owned namespace or omitted from the release tarball and explicitly deferred.
 
 Verification:
@@ -857,11 +947,11 @@ npx publint ./packages/mcp
 git diff --check
 ```
 
-The phase must add an installed-tarball test in an external temporary directory and inspect the actual packed file list, executable mode, shebang, bundle imports, and license files.
+The phase must add an installed-tarball test in an external temporary directory and inspect the packed file list, executable mode, shebang, bundle imports, exact post-refactor dependency/legal closure, and license files.
 
-### Phase 6: CI And Release Automation
+### Phase 9: CI And Release Automation
 
-Status: pending; depends on Phase 5
+Status: pending; depends on Phase 8
 
 Scope:
 
@@ -904,9 +994,9 @@ Acceptance criteria:
 - The first package can establish npm trusted publishing safely; any unavoidable bootstrap publish is documented and immediately followed by trusted-publisher restriction.
 - Publication failure does not mutate versions or tags automatically.
 
-### Phase 7: Release Candidate And npm Launch
+### Phase 10: Release Candidate And npm Launch
 
-Status: pending; depends on Phase 6
+Status: pending; depends on Phase 9
 
 Scope:
 
@@ -923,7 +1013,7 @@ Release candidate gates:
 4. No secrets or local state in tarball.
 5. Node minimum and current Node 24 launch pass with Bun absent.
 6. Unconfigured MCP connects and returns provider-neutral setup guidance.
-7. Configured isolated-account Box smoke passes and returns to exact baseline.
+7. Configured isolated-account Box and Vercel Sandbox smokes each pass the shared mandatory provider surface and return to exact baseline; optional capability smoke runs only where advertised.
 8. The pinned certified `add-mcp` version generates correct `waterbox` configurations for representative clients in temporary homes; the unversioned user command is checked once as a release observation and its resolved version is recorded.
 9. npm account ownership, 2FA, trusted publisher, and package access are verified.
 10. Documentation describes actual released behavior only.
@@ -940,7 +1030,7 @@ The MCP process command requires a protocol-aware smoke harness; do not treat an
 
 Verify npm provenance, package files, README rendering, issue links, and deprecation status. Do not publish a replacement version merely to fix documentation that can be corrected before the initial release.
 
-### Phase 8: Registry Discovery
+### Phase 11: Registry Discovery
 
 Status: deferred; not required for npm launch
 
@@ -980,9 +1070,15 @@ packages/mcp/NOTICE
 packages/mcp/THIRD_PARTY_NOTICES.md
 packages/mcp/src/main.ts
 packages/mcp/src/config.ts
-packages/mcp/src/direct.ts
 packages/mcp/src/server.ts
 packages/mcp/test/*
+
+packages/client/src/*
+packages/client/test/*
+packages/control-plane-local/src/*
+packages/control-plane-local/test/*
+packages/sandbox-api/src/*
+packages/sandbox-api/test/*
 
 packages/sandbox-repository-sqlite/src/index.ts
 packages/sandbox-repository-sqlite/test/*
@@ -994,6 +1090,8 @@ packages/sandbox-core/test/*
 packages/sandbox-provider-box/src/index.ts
 packages/sandbox-provider-box/test/*
 packages/sandbox-provider-box/README.md
+packages/sandbox-provider-vercel/src/*
+packages/sandbox-provider-vercel/test/*
 
 packages/sandbox-cli/package.json
 packages/sandbox-cli/src/*
@@ -1008,13 +1106,18 @@ apps/api-local/src/app.ts
 apps/api-local/test/*
 apps/api-local/README.md
 
-scripts/direct-mcp-smoke.ts
+scripts/embedded-mcp-smoke.ts
+scripts/vercel-sandbox-capability-probe.ts
+scripts/vercel-sandbox-capability-probe.test.ts
 scripts/build-box-system-template.ts
 scripts/build-box-system-template.test.ts
 docs/box-system-template.md
+docs/research/vercel-sandbox-provider-port-audit.md
 ```
 
-Do not delete system-template machinery until the plain-Box bootstrap live gate passes. Removal is a late cleanup in Phase 5, not an assumption in earlier phases.
+The existing `scripts/direct-mcp-smoke.ts` name is pre-refactor terminology. Rename or replace it with the embedded-path smoke in Phase 8; do not retain a direct-core production path merely to preserve the script name.
+
+Do not delete system-template machinery until full Phase 4 live acceptance, including snapshot-sourced reinstall. Removal is a late cleanup in Phase 8, not an assumption in earlier phases.
 
 ## Verification Matrix
 
@@ -1022,13 +1125,15 @@ Do not delete system-template machinery until the plain-Box bootstrap live gate 
 
 | Area | Required proof |
 |---|---|
-| Configuration | Missing provider connects; malformed provider config is safe; Box is never selected implicitly |
+| Configuration | Missing provider connects; malformed provider config is safe; neither Box nor Vercel Sandbox is selected implicitly |
 | SQLite | Node API parity, durability, CAS, pagination, malformed rows, close behavior |
-| MCP | stdio handshake, tool listing, setup guidance, cancellation, diagnostics redaction |
-| Unconfigured safety | Absent/unknown/incomplete provider returns guidance before local file, SQLite, artifact, or provider I/O |
+| MCP | stdio handshake, tool listing, thin renderer dependency guard, setup guidance, cancellation, diagnostics redaction, and no listener |
+| API/client | embedded auth, body bounds, recovery-ID serialization/parsing, cancellation and embedded/network fake parity |
+| Unconfigured safety | All 14 MCP tools under absent, unknown, incomplete, and malformed provider configurations return guidance before local file, SQLite, artifact, or provider API I/O |
 | CLI | health, version, all tools, secure transfer, quick and dispatched Bash |
 | Core | preparing checkpoint, same-key preparation resume, readiness gating, concurrency, failure recovery |
 | Box adapter | exact request bodies, deterministic upload, idempotent install, ambiguity reconciliation |
+| Vercel adapter | audit verdict first; then mandatory-port mapping and only advertised optional capability conformance |
 | Packaging | clean tarball install, npm bin symlink, Node-only runtime, file allowlist |
 | Reproducibility | two clean packs have identical content hashes; the selected tested `.tgz` is the published artifact |
 | Legal | exact bundle closure has complete license and notice coverage |
@@ -1042,9 +1147,8 @@ Live tests require explicit isolated-account authorization and must prove:
 - Only run-owned resources are mutated.
 - Fresh plain Box bootstrap succeeds.
 - Snapshot-sourced bootstrap succeeds.
-- All canonical tools and secure transfer work.
-- Quick, dispatched, nonzero, and timed-out Bash behavior remains correct.
-- Stop/resume behavior preserves installed runtime where tested.
+- Box and Vercel Sandbox each pass the shared mandatory provider surface required for launch.
+- Secure transfer, quick/dispatched/nonzero/timed-out Bash, stop/resume, and snapshots are smoked only for providers that advertise each optional capability.
 - Permanent deletion is correlated and bounded.
 - Final visible set and active count equal baseline.
 - Unknown account differences are blockers, never cleanup targets.
@@ -1071,6 +1175,10 @@ Live tests require explicit isolated-account authorization and must prove:
 - [x] Fresh Box creation no longer uses a system snapshot.
 - [ ] Snapshot-sourced creation installs the current runtime.
 - [ ] Legacy system-template machinery removed after the snapshot/live gate.
+- [x] PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`.
+- [ ] PR #5 integrated into the checkout and post-merge embedded MCP Node-minimum, live, and release-path re-verification completed.
+- [ ] Vercel Sandbox provider-port audit has an approved verdict.
+- [ ] Vercel Sandbox provider implemented only after the approved audit verdict.
 - [ ] npm package renamed to `waterbox`.
 - [ ] Package is CLI-only.
 - [ ] Missing provider is a connected setup state.
@@ -1078,6 +1186,8 @@ Live tests require explicit isolated-account authorization and must prove:
 - [ ] Package-local legal files match canonical root files exactly.
 - [ ] npm metadata complete and factual.
 - [ ] Root and package docs match released behavior.
+- [ ] Box and Vercel Sandbox setup docs and isolated live gates pass.
+- [ ] Exact post-refactor bundle and legal closure verified.
 - [ ] Pull-request CI complete.
 - [ ] Trusted npm publish workflow protected.
 - [ ] Installed-tarball test passes with no Bun.
@@ -1094,3 +1204,4 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-08-31: Phase 3 credential-free implementation verified the existing create operation followed by a durable `preparing` checkpoint and mandatory provider preparation. No create replay, allocation/readiness split, or list-diff correlation was added.
 - 2026-08-31: Phase 4 fresh live flow passed: fresh create, initial incomplete verification, correlated upload, install, final verification, running probe, all tools, secure transfer, async Bash, concurrency, tracked cleanup, and exact baseline comparison. The verifier natural-EOF handling was corrected from this live observation.
 - 2026-08-31: Snapshot-sourced reinstall failed during install and remains pending. Stop/resume and snapshot overwrite are also pending, so Phase 0 and Phase 4 full live acceptance are not complete. Legacy template machinery deletion remains deferred until that gate passes.
+- 2026-09-01: PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`. The launch plan was realigned to its Fetch-backed product boundary and adds audit-before-implementation pressure for Vercel Sandbox. The local checkout integration, post-merge re-verification, Vercel probe, and Vercel adapter remain unclaimed.
