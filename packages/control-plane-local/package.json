@@ -1,0 +1,16 @@
+{
+  "name": "@waterbox/control-plane-local",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@waterbox/api": "workspace:*",
+    "@waterbox/client": "workspace:*",
+    "@waterbox/contracts": "workspace:*",
+    "@waterbox/core": "workspace:*",
+    "@waterbox/provider-box": "workspace:*",
+    "@waterbox/repository-sqlite": "workspace:*"
+  }
+}
