@@ -18,14 +18,12 @@ const EMBEDDED_ORIGIN = new URL("http://waterbox.local/")
 export interface LocalControlPlaneConfig {
   sqlitePath: string
   accountId: string
-  provider: "box"
-  box: BoxProviderConfig
-  runtimeArtifact: SandboxRuntimeArtifact
+  provider:
+    | { kind: "box"; config: BoxProviderConfig; runtimeArtifact: SandboxRuntimeArtifact }
+    | { kind: "injected"; implementation: SandboxProvider }
 }
 
 export interface LocalControlPlaneOverrides {
-  /** A test-only composition seam. Supplying a provider bypasses Box construction and artifact use. */
-  provider?: SandboxProvider
   clock?: Clock
   ids?: ReadableIdGenerator
   /** A test-only seam used to prove ownership when initialization fails after opening SQLite. */
@@ -65,10 +63,12 @@ export async function createLocalControlPlane(
 
   // Box validates its complete configuration and already-loaded artifact before any
   // filesystem or SQLite side effect. Test providers intentionally bypass Box.
-  const provider = overrides.provider ?? new BoxSandboxProvider(config.box, {
-    clock: new SystemBoxProviderClock(),
-    artifact: config.runtimeArtifact,
-  })
+  const provider = config.provider.kind === "injected"
+    ? config.provider.implementation
+    : new BoxSandboxProvider(config.provider.config, {
+        clock: new SystemBoxProviderClock(),
+        artifact: config.provider.runtimeArtifact,
+      })
   validateProvider(provider)
 
   if (config.sqlitePath !== ":memory:") await mkdir(dirname(config.sqlitePath), { recursive: true, mode: 0o700 })
@@ -87,7 +87,7 @@ export async function createLocalControlPlane(
     })
     const api = createWaterboxApi({ core, identityResolver })
     return {
-      fetch: request => api.fetch(request),
+      async fetch(request) { return api.fetch(request) },
       async close() {
         if (closed) return
         closed = true
@@ -124,7 +124,10 @@ export async function createEmbeddedApiBackend(
 }
 
 function validateBaseConfiguration(config: LocalControlPlaneConfig, identityResolver: IdentityResolver): void {
-  if (!config || typeof config !== "object" || config.provider !== "box") throw new TypeError("Local control-plane provider selection is invalid")
+  if (!config || typeof config !== "object" || !config.provider || typeof config.provider !== "object"
+    || (config.provider.kind !== "box" && config.provider.kind !== "injected")) {
+    throw new TypeError("Local control-plane provider selection is invalid")
+  }
   if (typeof config.sqlitePath !== "string" || config.sqlitePath.length === 0 || config.sqlitePath.includes("\0")) throw new TypeError("Local control-plane SQLite configuration is invalid")
   if (!AccountIdSchema.safeParse(config.accountId).success) throw new TypeError("Local control-plane account configuration is invalid")
   if (!identityResolver || typeof identityResolver.resolveBearer !== "function") throw new TypeError("Local control-plane identity resolver is invalid")
