@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createEmbeddedApiBackend, createLocalControlPlane } from "@waterbox/control-plane-local"
@@ -17,13 +18,28 @@ const snapshotId = "snap_silver-forest-2p9x"
 const secondSnapshotId = "snap_bright-river-4n8p"
 const signal = new AbortController().signal
 const ephemeralRecipient = "age1qckl3yp8ytpej8474nuvzzrg33jnakfyesj8fkyf329hjyn75sgqvxh2sv"
+const artifactBytes = new TextEncoder().encode("waterbox-conformance-runtime-artifact")
+const conformanceArtifact = {
+  bytes: artifactBytes,
+  sha256: createHash("sha256").update(artifactBytes).digest("hex"),
+  cliProtocolVersion: 2 as const,
+  artifactVersion: "conformance-runtime-v1",
+}
+type ConformanceArtifact = typeof conformanceArtifact
 const cleanup: Array<() => Promise<void>> = []
 
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!() })
 
+function requireConformanceArtifact(value: ConformanceArtifact): ConformanceArtifact {
+  if (!value || value.cliProtocolVersion !== 2 || value.artifactVersion !== "conformance-runtime-v1"
+    || !(value.bytes instanceof Uint8Array) || createHash("sha256").update(value.bytes).digest("hex") !== value.sha256) {
+    throw new TypeError("Conformance runtime artifact is invalid")
+  }
+  return value
+}
+
 class ConformanceProvider extends FakeSandboxProvider {
-  readonly runtimeArtifact = { sha256: "a".repeat(64), cliProtocolVersion: 2 as const, artifactVersion: "conformance" }
-  artifactPreparations = 0
+  readonly consumedArtifacts: Array<{ artifact: ConformanceArtifact; token: string }> = []
   readonly ciphertexts: string[] = []
   bashMode: "completed" | "dispatched" | "fallback" = "completed"
   bashOffsets: number[] = []
@@ -34,8 +50,12 @@ class ConformanceProvider extends FakeSandboxProvider {
   bashOutput = "observed"
   secureConsumeError?: unknown
   readonly #recipient: string
-  constructor(recipient: string) {
+  readonly #artifact: ConformanceArtifact
+  readonly #artifactToken: string
+  constructor(recipient: string, artifact: ConformanceArtifact) {
     super(); this.#recipient = recipient
+    this.#artifact = requireConformanceArtifact(artifact)
+    this.#artifactToken = `${artifact.sha256}:${artifact.cliProtocolVersion}:${artifact.artifactVersion}`
     this.bashJobs = { observe: input => this.observeBash(input), cleanup: input => this.cleanupBash(input) }
   }
   declare readonly bashJobs: {
@@ -44,8 +64,9 @@ class ConformanceProvider extends FakeSandboxProvider {
   }
 
   override async prepareSandbox(input: ProviderOperationInput) {
+    const artifact = requireConformanceArtifact(this.#artifact)
     const observation = await super.prepareSandbox(input)
-    this.artifactPreparations++
+    this.consumedArtifacts.push({ artifact, token: this.#artifactToken })
     return observation
   }
 
@@ -99,7 +120,7 @@ type Mode = "embedded" | "network"
 
 async function authenticationTransport(mode: Mode) {
   let release: (() => void) | undefined
-  const provider = new ConformanceProvider(ephemeralRecipient)
+  const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
   const plane = await createLocalControlPlane({ sqlitePath: ":memory:", accountId, provider: { kind: "injected", implementation: provider } }, {
     async resolveBearer(value, requestSignal) {
       if (value === "delayed") await new Promise<void>((resolve, reject) => {
@@ -111,7 +132,7 @@ async function authenticationTransport(mode: Mode) {
     },
   })
   if (mode === "embedded") {
-    const embedded = await createEmbeddedApiBackend({ sqlitePath: ":memory:", accountId, provider: { kind: "injected", implementation: new ConformanceProvider(ephemeralRecipient) } })
+    const embedded = await createEmbeddedApiBackend({ sqlitePath: ":memory:", accountId, provider: { kind: "injected", implementation: new ConformanceProvider(ephemeralRecipient, conformanceArtifact) } })
     cleanup.push(async () => { await embedded.close(); await plane.close() })
     return { rawFetch: (request: Request) => plane.fetch(request), authorizedFetch: (request: Request) => embedded.fetch(request), release: () => release?.() }
   }
@@ -122,7 +143,7 @@ async function authenticationTransport(mode: Mode) {
 }
 
 async function fixture(mode: Mode, options: { provider?: ConformanceProvider; decorate?: (response: Response, request: Request) => Response | Promise<Response>; sqlitePath?: string; ids?: SequenceIdGenerator } = {}) {
-  const provider = options.provider ?? new ConformanceProvider(ephemeralRecipient)
+  const provider = options.provider ?? new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
   const config = { sqlitePath: options.sqlitePath ?? ":memory:", accountId, provider: { kind: "injected" as const, implementation: provider } }
   const internals = { clock: new FixedClock(), ids: options.ids ?? new SequenceIdGenerator([sandboxId, secondSandboxId], [snapshotId, secondSnapshotId]) }
   let backend: ApiBackend
@@ -153,6 +174,18 @@ async function seedProvisioning(sqlitePath: string) {
 
 for (const mode of ["embedded", "network"] as const) {
   describe(`${mode} ApiBackend conformance`, () => {
+    test("requires, validates, propagates, and revalidates the injected runtime artifact", async () => {
+      expect(() => new ConformanceProvider(ephemeralRecipient, undefined as unknown as ConformanceArtifact)).toThrow("artifact")
+      expect(() => new ConformanceProvider(ephemeralRecipient, { ...conformanceArtifact, sha256: "0".repeat(64) })).toThrow("artifact")
+      const mutableBytes = conformanceArtifact.bytes.slice()
+      const mutableArtifact = { ...conformanceArtifact, bytes: mutableBytes }
+      const provider = new ConformanceProvider(ephemeralRecipient, mutableArtifact)
+      mutableBytes[0] = mutableBytes[0]! ^ 0xff
+      const { client } = await fixture(mode, { provider })
+      await expect(client.createSandbox({}, { idempotencyKey: "mutated-artifact", signal })).rejects.toMatchObject({ code: "provider_failure", recoverySandboxId: sandboxId })
+      expect(provider.consumedArtifacts).toEqual([])
+    })
+
     test("enforces missing/wrong bearer and aborts during asynchronous identity resolution", async () => {
       const transport = await authenticationTransport(mode)
       expect((await transport.rawFetch(new Request("http://waterbox.local/v1/sandboxes"))).status).toBe(401)
@@ -168,8 +201,9 @@ for (const mode of ["embedded", "network"] as const) {
       const { client, provider, backend } = await fixture(mode)
       const created = await client.createSandbox({}, { idempotencyKey: "conformance-create", signal })
       expect(created).toMatchObject({ sandboxId, state: "running" })
-      expect(provider.artifactPreparations).toBe(1)
-      expect(provider.runtimeArtifact).toMatchObject({ cliProtocolVersion: 2, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) })
+      expect(provider.consumedArtifacts).toHaveLength(1)
+      expect(provider.consumedArtifacts[0]?.artifact).toBe(conformanceArtifact)
+      expect(provider.consumedArtifacts[0]).toEqual({ artifact: conformanceArtifact, token: `${conformanceArtifact.sha256}:2:${conformanceArtifact.artifactVersion}` })
       expect(await client.probeSandbox({ sandboxId }, { signal })).toMatchObject({ sandboxId, state: "running" })
 
       expect((await client.read({ sandboxId, filePath: "/workspace/a" }, { signal })).output).toBe("alpha")
@@ -210,7 +244,7 @@ for (const mode of ["embedded", "network"] as const) {
     })
 
     test("preserves recovery errors and leaves same-key replay explicit", async () => {
-      const provider = new ConformanceProvider(ephemeralRecipient)
+      const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
       provider.prepareError = new ProviderError("ambiguous_execution", "private-provider-detail")
       const { client } = await fixture(mode, { provider })
       const error = await client.createSandbox({}, { idempotencyKey: "recover", signal }).catch(value => value)
@@ -227,7 +261,7 @@ for (const mode of ["embedded", "network"] as const) {
       expect((await client.deleteSandbox({ sandboxId }, { signal })).state).toBe("terminated")
       await expect(client.read({ sandboxId, filePath: "/workspace/a" }, { signal })).rejects.toMatchObject({ code: "invalid_state", requestId: expect.any(String) })
 
-      const definiteProvider = new ConformanceProvider(ephemeralRecipient)
+      const definiteProvider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
       definiteProvider.prepareError = new ProviderError("failure", "private-definite-detail")
       const definite = await fixture(mode, { provider: definiteProvider })
       const definiteError = await definite.client.createSandbox({}, { idempotencyKey: "definite", signal }).catch(value => value)
@@ -236,7 +270,7 @@ for (const mode of ["embedded", "network"] as const) {
     })
 
     test("does not invent a recovery ID when cancellation wins after the checkpoint and permits explicit replay", async () => {
-      const provider = new ConformanceProvider(ephemeralRecipient)
+      const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
       provider.prepareError = new ProviderError("ambiguous_execution", "private-cancelled-detail")
       const controller = new AbortController()
       const { client } = await fixture(mode, { provider, decorate(response, request) {
@@ -255,7 +289,7 @@ for (const mode of ["embedded", "network"] as const) {
       const directory = await mkdtemp(join(tmpdir(), `waterbox-${mode}-reconstruct-`))
       cleanup.push(() => rm(directory, { recursive: true, force: true }))
       const sqlitePath = join(directory, "state.sqlite")
-      const provider = new ConformanceProvider(ephemeralRecipient)
+      const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
       provider.prepareError = new ProviderError("ambiguous_execution", "private-preparation-detail")
       const first = await fixture(mode, { provider, sqlitePath, ids: new SequenceIdGenerator([sandboxId]) })
       await expect(first.client.createSandbox({}, { idempotencyKey: "durable-prepare", signal })).rejects.toMatchObject({ code: "ambiguous_execution", recoverySandboxId: sandboxId })
@@ -286,7 +320,7 @@ for (const mode of ["embedded", "network"] as const) {
         cleanup.push(() => rm(directory, { recursive: true, force: true }))
         const sqlitePath = join(directory, "state.sqlite")
         await seedProvisioning(sqlitePath)
-        const provider = new ConformanceProvider(ephemeralRecipient)
+        const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact)
         provider.sandboxStates.set(sandboxId, "running")
         if (failure) provider.prepareError = new ProviderError("failure", "private-probe-prepare-detail")
         const { client } = await fixture(mode, { provider, sqlitePath, ids: new SequenceIdGenerator([]) })
@@ -325,7 +359,7 @@ for (const mode of ["embedded", "network"] as const) {
     })
 
     test("observes dispatched Bash offsets/progress/cleanup and returns fallback receipts", async () => {
-      const provider = new ConformanceProvider(ephemeralRecipient); provider.bashMode = "dispatched"
+      const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact); provider.bashMode = "dispatched"
       const { client } = await fixture(mode, { provider })
       await client.createSandbox({}, { idempotencyKey: "bash-dispatched", signal })
       let progress = 0
@@ -362,7 +396,7 @@ for (const mode of ["embedded", "network"] as const) {
     })
 
     test("keeps secure plaintext local and preserves ambiguous consumption safely", async () => {
-      const provider = new ConformanceProvider(ephemeralRecipient); provider.secureConsumeError = new ProviderError("ambiguous_execution", "private-transfer-detail")
+      const provider = new ConformanceProvider(ephemeralRecipient, conformanceArtifact); provider.secureConsumeError = new ProviderError("ambiguous_execution", "private-transfer-detail")
       const { client } = await fixture(mode, { provider })
       await client.createSandbox({}, { idempotencyKey: "secure-ambiguous", signal })
       const plaintext = new TextEncoder().encode("never-on-wire")
