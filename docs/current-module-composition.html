@@ -111,6 +111,7 @@
 
     button:hover { color: var(--text); background: rgba(255,255,255,0.04); }
     button[aria-selected="true"] { color: #07120e; background: var(--domain); }
+    button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
     .view { display: none; }
     .view.active { display: block; }
@@ -138,6 +139,7 @@
     .badge { padding: 6px 9px; border-radius: 99px; background: rgba(132,215,176,0.1); color: var(--domain); font: 700 0.68rem/1 monospace; white-space: nowrap; }
     .diagram { overflow-x: auto; padding: 18px; }
     svg { display: block; width: 100%; min-width: 980px; height: auto; }
+    svg.wide { min-width: 1500px; }
 
     .node rect {
       stroke-width: 1.5;
@@ -154,7 +156,7 @@
     .node.sandbox rect { fill: var(--sandbox-soft); stroke: var(--sandbox); }
     .node:hover rect, .node:focus rect { stroke-width: 3; filter: brightness(1.25); }
 
-    .edge { fill: none; stroke: #75847f; stroke-width: 1.5; marker-end: url(#arrow); }
+    .edge { fill: none; stroke: #75847f; stroke-width: 1.5; }
     .edge.primary { stroke: var(--domain); stroke-width: 2.3; }
     .edge.http { stroke: var(--adapter); stroke-dasharray: 7 5; }
     .edge.command { stroke: var(--sandbox); }
@@ -217,7 +219,7 @@
     <div>
       <div class="eyebrow">Current repository architecture</div>
       <h1>Waterbox module map</h1>
-      <p class="intro">Contracts and core form the center. MCP and HTTP adapt callers into core; SQLite and Box satisfy core's ports; the one-shot CLI executes tools inside each sandbox.</p>
+      <p class="intro">MCP renders product commands through <code>@waterbox/client</code> into a process-private authenticated Fetch API. <code>@waterbox/control-plane-local</code> embeds the API, core, SQLite, and current Box adapter without opening a listener.</p>
     </div>
     <div class="legend" aria-label="Diagram legend">
       <span><i class="swatch" style="--color:var(--domain)"></i>Canonical domain</span>
@@ -233,112 +235,73 @@
       <button role="tab" aria-selected="true" aria-controls="overview" id="tab-overview">Module overview</button>
       <button role="tab" aria-selected="false" aria-controls="supported" id="tab-supported">Supported MCP path</button>
       <button role="tab" aria-selected="false" aria-controls="http" id="tab-http">HTTP experiment</button>
+      <button role="tab" aria-selected="false" aria-controls="preparation" id="tab-preparation">Preparation lifecycle</button>
       <button role="tab" aria-selected="false" aria-controls="bash" id="tab-bash">Bash lifecycle</button>
     </nav>
 
     <section class="view active" id="overview" role="tabpanel" aria-labelledby="tab-overview">
       <article class="panel">
         <div class="panel-head">
-          <div><h2>Composition and runtime boundaries</h2><p>Concrete repository and provider adapters are constructor-injected into core by each composition root. Their runtime resources are shown separately on the right.</p></div>
+          <div><h2>Composition and runtime boundaries</h2><p>The local control plane owns embedded composition and private authentication. The client owns the canonical API boundary; core reaches storage and the selected Box adapter only through ports.</p></div>
           <span class="badge">CURRENT RUNTIME VIEW</span>
         </div>
         <div class="diagram">
-          <svg viewBox="0 0 1240 720" role="img" aria-label="Waterbox composition and runtime boundary diagram">
+          <svg viewBox="0 0 1540 720" role="img" aria-label="Waterbox current embedded composition and Box runtime boundary diagram">
             <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker></defs>
-            <rect class="zone" x="20" y="70" width="285" height="580"/><text class="zone-label" x="38" y="98">COMPOSITION ROOTS</text>
-            <rect class="zone" x="335" y="70" width="530" height="580"/><text class="zone-label" x="353" y="98">IN-PROCESS MODULES</text>
-            <rect class="zone" x="895" y="70" width="325" height="580"/><text class="zone-label" x="913" y="98">RUNTIME RESOURCES</text>
-
-            <path class="edge primary" d="M275 190 C350 190 390 235 485 235"/>
-            <path class="edge http" d="M275 430 C320 430 325 390 370 390"/>
-            <path class="edge primary" d="M470 355 C470 315 510 300 535 275"/>
-            <path class="edge" d="M605 205 L605 165"/>
-            <path class="edge primary" d="M535 275 C490 335 480 470 480 505"/>
-            <path class="edge primary" d="M675 275 C720 335 735 470 735 505"/>
-            <path class="edge" d="M590 545 C760 545 785 590 930 590"/>
-            <path class="edge primary" d="M845 545 C900 545 905 205 945 205"/>
-            <path class="edge command" d="M1070 245 L1070 365"/>
-            <text class="edge-label" x="292" y="175">constructs</text>
-            <text class="edge-label" x="292" y="414">hosts</text>
-            <text class="edge-label" x="449" y="328">calls</text>
-            <text class="edge-label" x="421" y="454">repository port</text>
-            <text class="edge-label" x="722" y="454">provider port</text>
-            <text class="edge-label" x="760" y="574">reads / writes</text>
-            <text class="edge-label" x="866" y="346">HTTPS</text>
-            <text class="edge-label" x="1085" y="315">commands</text>
-
-            <g class="node adapter" tabindex="0" data-title="@waterbox/mcp" data-tip="Supported local stdio presentation. Renders client commands over the embedded authenticated API without a listener.">
-              <rect x="45" y="150" width="230" height="80"/><text class="name" x="69" y="183">@waterbox/mcp</text><text class="detail" x="69" y="206">stdio client renderer</text>
-            </g>
-            <g class="node infra" tabindex="0" data-title="@waterbox/api-local" data-tip="Local Bun development server. Composes the HTTP API, core, SQLite, and Box. apps/api-local/src/app.ts">
-              <rect x="45" y="390" width="230" height="80"/><text class="name" x="69" y="423">@waterbox/api-local</text><text class="detail" x="69" y="446">Bun trigger + local wiring</text>
-            </g>
-            <g class="node domain" tabindex="0" data-title="@waterbox/contracts" data-tip="Canonical Zod schemas and public DTOs for lifecycle, tools, Bash, and secure transfer. packages/sandbox-contracts">
-              <rect x="485" y="105" width="240" height="60"/><text class="name" x="509" y="132">@waterbox/contracts</text><text class="detail" x="509" y="151">shared schemas and DTOs</text>
-            </g>
-            <g class="node domain" tabindex="0" data-title="@waterbox/core" data-tip="Transport-neutral lifecycle, account ownership, idempotency, reconciliation, provider ports, and repository ports. packages/sandbox-core/src/service.ts">
-              <rect x="485" y="205" width="240" height="70"/><text class="name" x="509" y="235">@waterbox/core</text><text class="detail" x="509" y="256">service + abstract ports</text>
-            </g>
-            <g class="node adapter" tabindex="0" data-title="@waterbox/api" data-tip="Hono/OpenAPI HTTP adapter over core. It receives an injected identity resolver and domain service. packages/sandbox-api/src/app.ts">
-              <rect x="370" y="355" width="200" height="70"/><text class="name" x="394" y="385">@waterbox/api</text><text class="detail" x="394" y="406">HTTP application</text>
-            </g>
-            <g class="node infra" tabindex="0" data-title="@waterbox/repository-sqlite" data-tip="Sandbox, snapshot, and idempotency repository adapters using Node or Bun SQLite. packages/sandbox-repository-sqlite">
-              <rect x="370" y="505" width="220" height="80"/><text class="name" x="394" y="535">@waterbox/</text><text class="name" x="394" y="555">repository-sqlite</text><text class="detail" x="394" y="576">repository implementation</text>
-            </g>
-
-            <g class="node infra" tabindex="0" data-title="@waterbox/provider-box" data-tip="Implements core's provider port over the Box API. Owns lifecycle, preparation, command transport, snapshots, and Bash observation. packages/sandbox-provider-box/src/index.ts">
-              <rect x="625" y="505" width="220" height="80"/><text class="name" x="649" y="535">@waterbox/</text><text class="name" x="649" y="555">provider-box</text><text class="detail" x="649" y="576">provider implementation</text>
-            </g>
-            <g class="node infra" tabindex="0" data-title="SQLite database file" data-tip="The local runtime resource used by repository-sqlite. It is data, not an injected module.">
-              <rect x="930" y="550" width="250" height="80"/><text class="name" x="954" y="583">SQLite database file</text><text class="detail" x="954" y="606">local runtime resource</text>
-            </g>
-            <g class="node infra" tabindex="0" data-title="Box public API" data-tip="External provider service called by provider-box. It manages Boxes and transports one-shot commands.">
-              <rect x="945" y="165" width="250" height="80"/><text class="name" x="969" y="198">Box public API</text><text class="detail" x="969" y="221">external provider service</text>
-            </g>
-            <rect class="zone" x="925" y="325" width="270" height="200"/><text class="zone-label" x="943" y="350">RUNNING BOX SANDBOX</text>
-            <g class="node sandbox" tabindex="0" data-title="Waterbox sandbox endpoint" data-tip="The sandbox end of the Waterbox protocol: @waterbox/cli provides the one-shot protocol and process boundary, while @waterbox/runtime implements the tools. There is no resident Waterbox receiver in the supported path.">
-              <rect x="945" y="365" width="230" height="105"/><text class="name" x="969" y="397">@waterbox/cli +</text><text class="name" x="969" y="417">@waterbox/runtime</text><text class="detail" x="969" y="443">Waterbox sandbox endpoint</text>
-            </g>
+            <rect class="zone" x="20" y="70" width="300" height="580"/><text class="zone-label" x="38" y="98">CALLERS AND DEVELOPMENT LISTENER</text>
+            <rect class="zone" x="350" y="70" width="800" height="580"/><text class="zone-label" x="368" y="98">PROCESS-PRIVATE EMBEDDED COMPOSITION</text>
+            <rect class="zone" x="1180" y="70" width="340" height="580"/><text class="zone-label" x="1198" y="98">BOX RUNTIME RESOURCES</text>
+            <g style="marker-end:url(#arrow)"><path class="edge primary" d="M270 175 L370 175"/><path class="edge primary" d="M590 175 L650 175"/><path class="edge primary" d="M850 175 L900 175"/><path class="edge primary" d="M1000 230 L1000 385"/><path class="edge" d="M900 425 L770 500"/><path class="edge primary" d="M1100 425 L1250 425"/><path class="edge" d="M870 540 L950 560"/><path class="edge primary" d="M1360 385 L1360 215"/><path class="edge command" d="M1360 465 L1360 505"/><path class="edge http" d="M270 445 C400 445 480 260 650 215"/></g>
+            <text class="edge-label" x="285" y="160">product commands</text><text class="edge-label" x="600" y="160">private Fetch + bearer</text><text class="edge-label" x="855" y="160">raw API handler</text><text class="edge-label" x="1013" y="315">API call</text><text class="edge-label" x="780" y="480">repository port</text><text class="edge-label" x="1120" y="410">provider port</text><text class="edge-label" x="885" y="540">SQLite</text><text class="edge-label" x="1375" y="300">HTTPS</text><text class="edge-label" x="1375" y="490">one-shot transport</text><text class="edge-label" x="285" y="430">real listener only</text>
+            <g class="node adapter" tabindex="0" data-title="@waterbox/mcp" data-tip="Supported local Node stdio renderer. It calls product commands in @waterbox/client; it does not import core, repositories, or providers and opens no TCP listener."><rect x="45" y="135" width="225" height="80"/><text class="name" x="69" y="168">@waterbox/mcp</text><text class="detail" x="69" y="191">local Node stdio renderer</text></g>
+            <g class="node infra" tabindex="0" data-title="@waterbox/api-local" data-tip="Thin Bun development listener trigger over the control-plane-local raw API handler. It does not compose core, repositories, or providers, and never exposes private embedded authentication."><rect x="45" y="405" width="225" height="80"/><text class="name" x="69" y="438">@waterbox/api-local</text><text class="detail" x="69" y="461">thin Bun listener trigger</text></g>
+            <g class="node domain" tabindex="0" data-title="@waterbox/client" data-tip="Owns API paths and methods, response parsing, safe errors, secure-transfer orchestration after renderer file acquisition, and Bash observation polling."><rect x="370" y="135" width="220" height="80"/><text class="name" x="394" y="168">@waterbox/client</text><text class="detail" x="394" y="191">private product commands</text></g>
+            <g class="node domain" tabindex="0" data-title="@waterbox/control-plane-local" data-tip="Owns embedded composition: process-private bearer wrapper, API handler, core, SQLite repositories, selected provider registry entry, and cleanup. It opens no listener."><rect x="650" y="135" width="200" height="80"/><text class="name" x="674" y="164">@waterbox/control-</text><text class="name" x="674" y="184">plane-local</text><text class="detail" x="674" y="202">composition + private auth</text></g>
+            <g class="node adapter" tabindex="0" data-title="@waterbox/api" data-tip="Canonical raw API handler injected by control-plane-local. It receives authenticated identity through the private wrapper and delegates to core."><rect x="900" y="135" width="200" height="80"/><text class="name" x="924" y="168">@waterbox/api</text><text class="detail" x="924" y="191">authenticated API handler</text></g>
+            <g class="node domain" tabindex="0" data-title="@waterbox/core" data-tip="Provider-neutral lifecycle and reconciliation service. It knows repository and provider ports, not Box or a transport."><rect x="900" y="385" width="200" height="80"/><text class="name" x="924" y="418">@waterbox/core</text><text class="detail" x="924" y="441">service + abstract ports</text></g>
+            <g class="node infra" tabindex="0" data-title="@waterbox/repository-sqlite" data-tip="Injected SQLite repository adapter for Waterbox records, snapshots, and idempotency."><rect x="650" y="500" width="220" height="80"/><text class="name" x="674" y="530">@waterbox/</text><text class="name" x="674" y="550">repository-sqlite</text><text class="detail" x="674" y="570">selected repository entry</text></g>
+            <g class="node infra" tabindex="0" data-title="@waterbox/provider-box" data-tip="Selected provider registry entry. Owns mandatory create, prepare, inspect, delete, and tool transport, plus exposed optional capability groups; receives the packaged CLI artifact by injection."><rect x="1250" y="385" width="220" height="80"/><text class="name" x="1274" y="415">@waterbox/</text><text class="name" x="1274" y="435">provider-box</text><text class="detail" x="1274" y="454">current provider adapter</text></g>
+            <g class="node infra" tabindex="0" data-title="SQLite database file" data-tip="Local data resource used by the injected repository adapter."><rect x="950" y="525" width="200" height="70"/><text class="name" x="974" y="555">SQLite database</text><text class="detail" x="974" y="577">local runtime data</text></g>
+            <g class="node infra" tabindex="0" data-title="Box public API" data-tip="External service used by provider-box for Box lifecycle and command transport."><rect x="1250" y="135" width="220" height="80"/><text class="name" x="1274" y="168">Box public API</text><text class="detail" x="1274" y="191">external provider service</text></g>
+            <g class="node sandbox" tabindex="0" data-title="Packaged one-shot CLI and runtime" data-tip="Injected packaged artifact invoked inside the Box sandbox for each tool operation. There is no resident Waterbox receiver."><rect x="1250" y="505" width="220" height="80"/><text class="name" x="1274" y="535">@waterbox/cli +</text><text class="name" x="1274" y="555">@waterbox/runtime</text><text class="detail" x="1274" y="575">one-shot sandbox runtime</text></g>
           </svg>
         </div>
       </article>
       <article class="panel secondary">
         <div class="panel-head">
-          <div><h2>Secondary HTTP-backed MCP experiment</h2><p>This private research fixture validates MCP consumption through the local HTTP control plane. It remains visible here for provenance, but it is not part of the supported product composition and is planned for later removal.</p></div>
+          <div><h2>Secondary HTTP-backed MCP experiment</h2><p>This private research fixture reaches the real local listener. The listener delegates to the same raw API handler and embedded composition; it is not a second composition root.</p></div>
           <span class="badge" style="color:var(--experimental);background:rgba(197,154,240,0.1)">RESEARCH ARTIFACT</span>
         </div>
         <div class="diagram">
-          <svg viewBox="0 0 1240 360" role="img" aria-label="Secondary experimental HTTP-backed MCP flow">
+            <svg viewBox="0 0 1240 360" role="img" aria-label="Secondary experimental MCP flow through the thin local HTTP listener">
             <defs><marker id="arrow-exp" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker></defs>
             <rect class="zone" x="25" y="45" width="1190" height="260"/><text class="zone-label" x="43" y="73">ISOLATED EXPERIMENTAL FLOW</text>
             <g style="marker-end:url(#arrow-exp)">
-              <path class="edge" d="M245 175 L330 175"/>
-              <path class="edge http" d="M570 175 L655 175"/>
-              <path class="edge" d="M895 175 L980 175"/>
+               <path class="edge" d="M245 175 L330 175"/><path class="edge http" d="M570 175 L655 175"/><path class="edge" d="M895 175 L980 175"/>
             </g>
             <text class="edge-label" x="263" y="158">stdio MCP</text>
             <text class="edge-label" x="588" y="158">Bearer HTTP</text>
-            <text class="edge-label" x="913" y="158">in-process</text>
+            <text class="edge-label" x="913" y="158">raw handler</text>
             <g class="node adapter" tabindex="0" data-title="Agent harness" data-tip="The experiment was driven through an ordinary local stdio MCP connection.">
               <rect x="45" y="135" width="200" height="80"/><text class="name" x="69" y="169">Agent harness</text><text class="detail" x="69" y="192">experimental caller</text>
             </g>
             <g class="node experimental" tabindex="0" data-title="Experimental control-plane MCP" data-tip="Private HTTP-backed stdio MCP with selected-sandbox state and duplicated Bash observation. packages/experimental-control-plane-mcp/src/server.ts">
               <rect x="330" y="135" width="240" height="80"/><text class="name" x="354" y="166">@waterbox/experimental-</text><text class="name" x="354" y="186">control-plane-mcp</text><text class="detail" x="354" y="207">private research adapter</text>
             </g>
-            <g class="node infra" tabindex="0" data-title="@waterbox/api-local" data-tip="Local deployment composition providing a live HTTP endpoint for the experiment. apps/api-local">
-              <rect x="655" y="135" width="240" height="80"/><text class="name" x="679" y="169">@waterbox/api-local</text><text class="detail" x="679" y="192">local HTTP deployment</text>
+            <g class="node infra" tabindex="0" data-title="@waterbox/api-local" data-tip="Thin Bun real-listener trigger. Bearer HTTP ends here; it delegates to the control-plane-local raw API handler.">
+               <rect x="655" y="135" width="240" height="80"/><text class="name" x="679" y="169">@waterbox/api-local</text><text class="detail" x="679" y="192">thin real listener</text>
             </g>
-            <g class="node adapter" tabindex="0" data-title="@waterbox/api" data-tip="The reusable HTTP application instantiated inside api-local. packages/sandbox-api">
-              <rect x="980" y="135" width="215" height="80"/><text class="name" x="1004" y="169">@waterbox/api</text><text class="detail" x="1004" y="192">reusable HTTP app</text>
+            <g class="node domain" tabindex="0" data-title="@waterbox/control-plane-local" data-tip="Owns the raw API handler and embedded private composition behind the listener.">
+               <rect x="980" y="135" width="215" height="80"/><text class="name" x="1004" y="169">@waterbox/control-</text><text class="name" x="1004" y="189">plane-local</text><text class="detail" x="1004" y="207">raw handler + composition</text>
             </g>
           </svg>
         </div>
       </article>
       <div class="cards">
-        <div class="card"><span class="number">01</span><h3>Core knows no transport</h3><p>MCP and HTTP both adapt requests into the same domain service.</p></div>
-        <div class="card"><span class="number">02</span><h3>Core knows no Box</h3><p>The Box package implements the provider port exposed by core.</p></div>
-        <div class="card"><span class="number">03</span><h3>Runtime lives remotely</h3><p>The filesystem and command implementations execute inside the sandbox.</p></div>
-        <div class="card"><span class="number">04</span><h3>No daemon in the main path</h3><p>Box invokes a packaged one-shot CLI for each operation.</p></div>
+        <div class="card"><span class="number">01</span><h3>Private embedded boundary</h3><p>Client Fetch carries a process-private bearer through composition that opens no listener.</p></div>
+        <div class="card"><span class="number">02</span><h3>Provider-neutral core</h3><p>Core uses ports; the selected Box registry entry owns provider-specific work.</p></div>
+        <div class="card"><span class="number">03</span><h3>Preparation is mandatory</h3><p>Every creation, including from a snapshot, prepares and verifies the current runtime.</p></div>
+        <div class="card"><span class="number">04</span><h3>One-shot sandbox runtime</h3><p>Box transports each tool request to the injected packaged CLI and runtime.</p></div>
       </div>
     </section>
 
@@ -346,19 +309,14 @@
       <article class="panel">
         <div class="panel-head"><div><h2>Supported local MCP runtime</h2><p>The npm-installed MCP uses the reusable client and authenticated API in-process. Embedded Fetch opens no listener.</p></div><span class="badge">CURRENT SUPPORTED PATH</span></div>
         <div class="diagram">
-          <svg viewBox="0 0 1240 500" role="img" aria-label="Supported local MCP runtime flow">
+          <svg class="wide" viewBox="0 0 1880 500" role="img" aria-label="Supported local MCP path through client, private authenticated API, core, Box API, and one-shot runtime">
             <defs><marker id="arrow2" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker></defs>
             <g style="marker-end:url(#arrow2)">
-              <path class="edge primary" d="M210 230 L285 230"/><path class="edge primary" d="M485 230 L560 230"/><path class="edge primary" d="M760 230 L835 230"/><path class="edge command" d="M1035 230 L1090 230"/>
-              <path class="edge" d="M660 270 L660 355"/>
+              <path class="edge primary" d="M195 230 L245 230"/><path class="edge primary" d="M445 230 L495 230"/><path class="edge primary" d="M695 230 L745 230"/><path class="edge primary" d="M945 230 L995 230"/><path class="edge primary" d="M1195 230 L1245 230"/><path class="edge" d="M1095 270 L1095 355"/><path class="edge primary" d="M1345 270 L1345 355"/><path class="edge http" d="M1445 392 L1480 392"/><path class="edge command" d="M1680 392 L1720 392"/>
             </g>
-            <text class="edge-label" x="220" y="214">stdio MCP</text><text class="edge-label" x="500" y="214">client command</text><text class="edge-label" x="770" y="214">in-process Fetch</text><text class="edge-label" x="1039" y="214">provider path</text>
-            <g class="node adapter"><rect x="30" y="190" width="180" height="80"/><text class="name" x="53" y="224">Agent harness</text><text class="detail" x="53" y="247">OpenCode, Claude, etc.</text></g>
-            <g class="node adapter"><rect x="285" y="190" width="200" height="80"/><text class="name" x="309" y="224">@waterbox/mcp</text><text class="detail" x="309" y="247">Node stdio process</text></g>
-            <g class="node domain"><rect x="560" y="190" width="200" height="80"/><text class="name" x="584" y="224">@waterbox/client</text><text class="detail" x="584" y="247">product commands</text></g>
-            <g class="node infra"><rect x="560" y="355" width="200" height="75"/><text class="name" x="584" y="384">@waterbox/</text><text class="name" x="584" y="404">repository-sqlite</text><text class="detail" x="584" y="423">local metadata adapter</text></g>
-            <g class="node infra"><rect x="835" y="190" width="200" height="80"/><text class="name" x="859" y="221">@waterbox/api</text><text class="detail" x="859" y="247">authenticated boundary</text></g>
-            <g class="node sandbox"><rect x="1090" y="190" width="120" height="80"/><text class="name" x="1108" y="219">@waterbox/cli</text><text class="detail" x="1108" y="241">+ runtime</text><text class="detail" x="1108" y="258">sandbox endpoint</text></g>
+            <text class="edge-label" x="200" y="214">stdio</text><text class="edge-label" x="450" y="214">commands</text><text class="edge-label" x="700" y="214">private Fetch + bearer</text><text class="edge-label" x="950" y="214">raw API</text><text class="edge-label" x="1200" y="214">domain/service call</text><text class="edge-label" x="1355" y="330">provider port</text><text class="edge-label" x="1450" y="375">HTTPS</text><text class="edge-label" x="1685" y="375">one-shot command</text><text class="edge-label" x="1110" y="330">repository port</text>
+            <g class="node adapter"><rect x="20" y="190" width="175" height="80"/><text class="name" x="44" y="224">Agent harness</text><text class="detail" x="44" y="247">local stdio caller</text></g><g class="node adapter"><rect x="245" y="190" width="200" height="80"/><text class="name" x="269" y="224">@waterbox/mcp</text><text class="detail" x="269" y="247">Node renderer, no listener</text></g><g class="node domain"><rect x="495" y="190" width="200" height="80"/><text class="name" x="519" y="224">@waterbox/client</text><text class="detail" x="519" y="247">product commands</text></g><g class="node domain"><rect x="745" y="180" width="200" height="100"/><text class="name" x="769" y="210">@waterbox/control-</text><text class="name" x="769" y="230">plane-local</text><text class="detail" x="769" y="252">private bearer, no listener</text></g><g class="node adapter"><rect x="995" y="190" width="200" height="80"/><text class="name" x="1019" y="224">@waterbox/api</text><text class="detail" x="1019" y="247">authenticated API</text></g><g class="node domain"><rect x="1245" y="190" width="200" height="80"/><text class="name" x="1269" y="224">@waterbox/core</text><text class="detail" x="1269" y="247">provider-neutral service</text></g><g class="node infra"><rect x="995" y="355" width="200" height="75"/><text class="name" x="1019" y="384">repository-sqlite</text><text class="detail" x="1019" y="407">SQLite adapter</text></g>
+            <g class="node infra"><rect x="1245" y="355" width="200" height="75"/><text class="name" x="1269" y="384">provider-box</text><text class="detail" x="1269" y="407">Box tool transport</text></g><g class="node infra"><rect x="1480" y="355" width="200" height="75"/><text class="name" x="1504" y="384">Box public API</text><text class="detail" x="1504" y="407">provider service</text></g><g class="node sandbox"><rect x="1720" y="355" width="140" height="75"/><text class="name" x="1744" y="384">CLI + runtime</text><text class="detail" x="1744" y="407">one-shot sandbox</text></g>
           </svg>
         </div>
       </article>
@@ -366,18 +324,30 @@
 
     <section class="view" id="http" role="tabpanel" aria-labelledby="tab-http">
       <article class="panel">
-        <div class="panel-head"><div><h2>Local HTTP development listener</h2><p>The thin api-local trigger hosts the same raw authenticated API; only the separate HTTP-backed MCP remains experimental.</p></div><span class="badge">DEVELOPMENT PATH</span></div>
+          <div class="panel-head"><div><h2>Local HTTP development listener</h2><p>The experimental HTTP MCP uses bearer HTTP at the real Bun listener. <code>api-local</code> delegates to the control-plane-local raw handler; its embedded private bearer wrapper is never exposed.</p></div><span class="badge">DEVELOPMENT PATH</span></div>
         <div class="diagram">
-          <svg viewBox="0 0 1240 500" role="img" aria-label="Experimental HTTP-backed MCP flow">
+          <svg class="wide" viewBox="0 0 1880 500" role="img" aria-label="Experimental HTTP MCP path through the thin local listener, core, Box API, and one-shot runtime">
             <defs><marker id="arrow3" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker></defs>
-            <g style="marker-end:url(#arrow3)"><path class="edge" d="M205 230 L250 230"/><path class="edge http" d="M470 230 L515 230"/><path class="edge" d="M715 230 L770 230"/><path class="edge" d="M970 230 L1025 230"/><path class="edge command" d="M1135 270 L1135 345"/></g>
-            <text class="edge-label" x="466" y="214">Bearer HTTP</text>
-            <g class="node adapter"><rect x="25" y="190" width="180" height="80"/><text class="name" x="48" y="224">Agent harness</text><text class="detail" x="48" y="247">stdio caller</text></g>
-            <g class="node experimental"><rect x="250" y="180" width="220" height="100"/><text class="name" x="274" y="207">@waterbox/</text><text class="name" x="274" y="227">experimental-control-</text><text class="name" x="274" y="247">plane-mcp</text><text class="detail" x="274" y="269">HTTP research facade</text></g>
-            <g class="node adapter"><rect x="515" y="190" width="200" height="80"/><text class="name" x="539" y="221">@waterbox/</text><text class="name" x="539" y="241">api-local</text><text class="detail" x="539" y="260">hosts @waterbox/api</text></g>
-            <g class="node domain"><rect x="770" y="190" width="200" height="80"/><text class="name" x="794" y="224">@waterbox/core</text><text class="detail" x="794" y="247">SandboxService</text></g>
-            <g class="node infra"><rect x="1025" y="190" width="190" height="80"/><text class="name" x="1049" y="221">@waterbox/</text><text class="name" x="1049" y="241">provider-box</text><text class="detail" x="1049" y="260">provider adapter</text></g>
-            <g class="node sandbox"><rect x="1025" y="345" width="190" height="75"/><text class="name" x="1049" y="374">@waterbox/cli +</text><text class="name" x="1049" y="394">@waterbox/runtime</text><text class="detail" x="1049" y="413">sandbox endpoint</text></g>
+            <g style="marker-end:url(#arrow3)"><path class="edge" d="M195 230 L235 230"/><path class="edge http" d="M455 230 L495 230"/><path class="edge" d="M695 230 L735 230"/><path class="edge" d="M935 230 L975 230"/><path class="edge" d="M1175 230 L1215 230"/><path class="edge primary" d="M1315 270 L1315 355"/><path class="edge http" d="M1415 392 L1480 392"/><path class="edge command" d="M1680 392 L1720 392"/></g>
+            <text class="edge-label" x="455" y="214">Bearer HTTP</text><text class="edge-label" x="700" y="214">raw handler</text><text class="edge-label" x="940" y="214">API</text><text class="edge-label" x="1180" y="214">domain/service call</text><text class="edge-label" x="1325" y="330">provider port</text><text class="edge-label" x="1425" y="375">HTTPS</text><text class="edge-label" x="1685" y="375">one-shot command</text>
+            <g class="node adapter"><rect x="20" y="190" width="175" height="80"/><text class="name" x="44" y="224">Agent harness</text><text class="detail" x="44" y="247">stdio caller</text></g><g class="node experimental"><rect x="235" y="180" width="220" height="100"/><text class="name" x="259" y="210">experimental HTTP</text><text class="name" x="259" y="230">control-plane MCP</text><text class="detail" x="259" y="252">research facade</text></g><g class="node infra"><rect x="495" y="190" width="200" height="80"/><text class="name" x="519" y="224">@waterbox/api-local</text><text class="detail" x="519" y="247">thin Bun real listener</text></g><g class="node domain"><rect x="735" y="180" width="200" height="100"/><text class="name" x="759" y="210">control-plane-local</text><text class="detail" x="759" y="232">raw handler + composition</text><text class="detail" x="759" y="252">private bearer not exposed</text></g><g class="node adapter"><rect x="975" y="190" width="200" height="80"/><text class="name" x="999" y="224">@waterbox/api</text><text class="detail" x="999" y="247">canonical API</text></g><g class="node domain"><rect x="1215" y="190" width="200" height="80"/><text class="name" x="1239" y="224">@waterbox/core</text><text class="detail" x="1239" y="247">service</text></g><g class="node infra"><rect x="1215" y="355" width="200" height="75"/><text class="name" x="1239" y="384">provider-box</text><text class="detail" x="1239" y="407">Box adapter</text></g><g class="node infra"><rect x="1480" y="355" width="200" height="75"/><text class="name" x="1504" y="384">Box public API</text><text class="detail" x="1504" y="407">provider service</text></g><g class="node sandbox"><rect x="1720" y="355" width="140" height="75"/><text class="name" x="1744" y="384">CLI + runtime</text><text class="detail" x="1744" y="407">one-shot sandbox</text></g>
+          </svg>
+        </div>
+      </article>
+    </section>
+
+    <section class="view" id="preparation" role="tabpanel" aria-labelledby="tab-preparation">
+      <article class="panel">
+        <div class="panel-head"><div><h2>Durable preparation lifecycle</h2><p>Creation checkpoints preserve a recoverable public ID and opaque provider reference. Snapshot-sourced creation always refreshes Waterbox-owned runtime paths before it can run.</p></div><span class="badge">CURRENT LIFECYCLE</span></div>
+        <div class="diagram">
+          <svg viewBox="0 0 1440 520" role="img" aria-label="Waterbox durable provisioning and preparation lifecycle">
+            <defs><marker id="arrow5" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker></defs>
+            <rect class="zone" x="25" y="65" width="1390" height="350"/><text class="zone-label" x="43" y="93">CREATE OR SNAPSHOT-SOURCED CREATE</text>
+            <g style="marker-end:url(#arrow5)"><path class="edge primary" d="M230 215 L285 215"/><path class="edge primary" d="M495 215 L550 215"/><path class="edge primary" d="M760 215 L815 215"/><path class="edge primary" d="M1025 215 L1080 215"/><path class="edge primary" d="M1290 215 L1340 215"/><path class="edge" d="M920 255 L920 340"/><path class="edge" d="M1285 340 C1200 460 920 460 920 255"/></g>
+            <text class="edge-label" x="240" y="198">reserve public ID</text><text class="edge-label" x="505" y="198">provider create</text><text class="edge-label" x="770" y="198">persist opaque providerRef</text><text class="edge-label" x="1035" y="198">prepareSandbox</text><text class="edge-label" x="1295" y="198">health + version</text><text class="edge-label" x="935" y="320">failure/cancel checkpoint</text><text class="edge-label" x="925" y="465">same-key replay resumes preparation only</text>
+            <g class="node domain"><rect x="30" y="175" width="200" height="80"/><text class="name" x="54" y="209">Create request</text><text class="detail" x="54" y="232">new or snapshot source</text></g><g class="node domain"><rect x="285" y="175" width="210" height="80"/><text class="name" x="309" y="209">provisioning</text><text class="detail" x="309" y="232">Waterbox record reserved</text></g><g class="node infra"><rect x="550" y="175" width="210" height="80"/><text class="name" x="574" y="209">provider-box create</text><text class="detail" x="574" y="232">creates Box sandbox</text></g><g class="node domain"><rect x="815" y="175" width="210" height="80"/><text class="name" x="839" y="209">preparing</text><text class="detail" x="839" y="232">providerRef checkpointed</text></g><g class="node infra"><rect x="1080" y="155" width="210" height="120"/><text class="name" x="1104" y="187">prepareSandbox</text><text class="detail" x="1104" y="210">verify current artifact</text><text class="detail" x="1104" y="230">atomic upload/install</text><text class="detail" x="1104" y="250">manifest written last</text></g><g class="node domain"><rect x="1340" y="175" width="75" height="80"/><text class="detail" x="1348" y="209">running</text><text class="detail" x="1348" y="232">verified</text></g>
+            <g class="node infra"><rect x="815" y="340" width="470" height="55"/><text class="name" x="839" y="373">Recoverable checkpoint: public ID + opaque providerRef</text></g>
+            <text class="edge-label" x="80" y="450">Snapshot source: user data is preserved; inherited Waterbox-owned runtime paths are always refreshed during preparation.</text>
           </svg>
         </div>
       </article>
@@ -385,24 +355,22 @@
 
     <section class="view" id="bash" role="tabpanel" aria-labelledby="tab-bash">
       <article class="panel">
-        <div class="panel-head"><div><h2>Current detached Bash lifecycle</h2><p>The worker and files live in the sandbox. The reusable client owns repeated authenticated API observation and returns one final result to its renderer.</p></div><span class="badge">CURRENT BEHAVIOR</span></div>
+          <div class="panel-head"><div><h2>Current detached Bash lifecycle</h2><p>The worker and files live in the sandbox. The reusable client polls through the authenticated API; provider-box performs every observation request and the client returns one final result to its renderer.</p></div><span class="badge">CURRENT BEHAVIOR</span></div>
         <div class="diagram">
-          <svg viewBox="0 0 1240 650" role="img" aria-label="Current asynchronous Bash observation lifecycle">
+          <svg viewBox="0 0 1400 650" role="img" aria-label="Current asynchronous Bash lifecycle through authenticated API, core, and Box observations">
             <defs><marker id="arrow4" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="context-stroke"/></marker></defs>
-            <rect class="zone" x="25" y="65" width="470" height="500"/><text class="zone-label" x="43" y="93">LOCAL MACHINE</text>
-            <rect class="zone" x="525" y="65" width="690" height="500"/><text class="zone-label" x="543" y="93">REMOTE SANDBOX</text>
+            <rect class="zone" x="25" y="65" width="1030" height="500"/><text class="zone-label" x="43" y="93">LOCAL PROCESS</text>
+            <rect class="zone" x="1085" y="65" width="290" height="500"/><text class="zone-label" x="1103" y="93">BOX SANDBOX</text>
             <g style="marker-end:url(#arrow4)">
-              <path class="edge primary" d="M210 175 L300 175"/><path class="edge command" d="M480 175 L590 175"/><path class="edge command" d="M790 175 L880 175"/><path class="edge" d="M980 215 L980 315"/>
-              <path class="edge" d="M880 355 C740 355 680 460 480 460"/><path class="edge" d="M300 460 L210 460"/>
+               <path class="edge primary" d="M210 175 L250 175"/><path class="edge primary" d="M430 175 L470 175"/><path class="edge primary" d="M650 175 L690 175"/><path class="edge primary" d="M870 175 L910 175"/><path class="edge command" d="M1090 175 L1130 175"/><path class="edge" d="M1230 215 L1230 315"/>
+               <path class="edge" d="M1130 355 C860 355 650 460 430 460"/><path class="edge" d="M250 460 L210 460"/>
             </g>
-            <path d="M390 420 C390 365 650 365 650 225" fill="none" stroke="var(--domain)" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow4)"/>
-            <text class="edge-label" x="225" y="159">one bash call</text><text class="edge-label" x="498" y="159">dispatch</text><text class="edge-label" x="803" y="159">spawn</text><text class="edge-label" x="500" y="393">repeat observe(offset)</text><text class="edge-label" x="218" y="444">one final result</text>
+             <path d="M340 420 C340 365 560 365 560 225" fill="none" stroke="var(--domain)" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#arrow4)"/>
+             <text class="edge-label" x="215" y="159">one Bash call</text><text class="edge-label" x="435" y="159">authenticated API</text><text class="edge-label" x="655" y="159">domain/service call</text><text class="edge-label" x="875" y="159">optional bashJobs</text><text class="edge-label" x="1095" y="159">each observation request</text><text class="edge-label" x="460" y="393">client polls through authenticated API</text><text class="edge-label" x="218" y="444">one final aggregate result</text>
             <g class="node adapter"><rect x="30" y="135" width="180" height="80"/><text class="name" x="54" y="169">Agent harness</text><text class="detail" x="54" y="192">model waits once</text></g>
-            <g class="node adapter"><rect x="300" y="135" width="180" height="80"/><text class="name" x="324" y="169">@waterbox/client</text><text class="detail" x="324" y="192">owns polling loop</text></g>
-            <g class="node infra"><rect x="590" y="135" width="200" height="80"/><text class="name" x="614" y="166">@waterbox/</text><text class="name" x="614" y="186">provider-box</text><text class="detail" x="614" y="207">one request per sample</text></g>
-            <g class="node sandbox"><rect x="880" y="135" width="200" height="80"/><text class="name" x="904" y="169">@waterbox/runtime</text><text class="detail" x="904" y="192">detached Bash worker</text></g>
-            <g class="node sandbox"><rect x="880" y="315" width="200" height="80"/><text class="name" x="904" y="349">Job files</text><text class="detail" x="904" y="372">status.json + output.log</text></g>
-            <g class="node domain"><rect x="300" y="420" width="180" height="80"/><text class="name" x="324" y="454">Aggregator</text><text class="detail" x="324" y="477">up to 1 MiB output</text></g>
+            <g class="node adapter"><rect x="250" y="135" width="180" height="80"/><text class="name" x="274" y="169">@waterbox/client</text><text class="detail" x="274" y="192">owns polling loop</text></g>
+             <g class="node adapter"><rect x="470" y="135" width="180" height="80"/><text class="name" x="494" y="169">@waterbox/api</text><text class="detail" x="494" y="192">authenticated API</text></g><g class="node domain"><rect x="690" y="135" width="180" height="80"/><text class="name" x="714" y="169">@waterbox/core</text><text class="detail" x="714" y="192">dispatches bashJobs</text></g><g class="node infra"><rect x="910" y="135" width="180" height="80"/><text class="name" x="934" y="166">provider-box</text><text class="detail" x="934" y="192">each observation request</text></g><g class="node sandbox"><rect x="1130" y="135" width="200" height="80"/><text class="name" x="1154" y="169">@waterbox/runtime</text><text class="detail" x="1154" y="192">detached Bash worker</text></g><g class="node sandbox"><rect x="1130" y="315" width="200" height="80"/><text class="name" x="1154" y="349">Job files</text><text class="detail" x="1154" y="372">status.json + output.log</text></g>
+            <g class="node domain"><rect x="250" y="420" width="180" height="80"/><text class="name" x="274" y="454">Aggregator</text><text class="detail" x="274" y="477">up to 1 MiB output</text></g>
             <g class="node domain"><rect x="30" y="420" width="180" height="80"/><text class="name" x="54" y="454">Completed result</text><text class="detail" x="54" y="477">or recovery receipt</text></g>
           </svg>
         </div>
@@ -410,18 +378,39 @@
     </section>
   </main>
 
-  <footer>Generated from the repository's current composition entrypoints. Legacy <code>plugin</code>, <code>receiver</code>, <code>protocol</code>, and <code>pi-mcp</code> packages are intentionally omitted because they form a separate historical stack.</footer>
-  <div class="tooltip" role="tooltip"></div>
+  <footer>This map reflects the merged Fetch-backed composition and current Box adapter. Vercel research is intentionally absent until implementation. Legacy <code>plugin</code>, <code>receiver</code>, <code>protocol</code>, and <code>pi-mcp</code> packages remain omitted as a separate historical stack.</footer>
+  <div class="tooltip" id="diagram-tooltip" role="tooltip" aria-hidden="true"></div>
 
   <script>
     const tabs = [...document.querySelectorAll('[role="tab"]')]
     const views = [...document.querySelectorAll('.view')]
-    for (const tab of tabs) {
-      tab.addEventListener('click', () => {
-        for (const item of tabs) item.setAttribute('aria-selected', String(item === tab))
-        for (const view of views) view.classList.toggle('active', view.id === tab.getAttribute('aria-controls'))
+    const selectTab = (tab) => {
+      for (const item of tabs) {
+        const selected = item === tab
+        item.setAttribute('aria-selected', String(selected))
+        item.tabIndex = selected ? 0 : -1
+      }
+      for (const view of views) {
+        const active = view.id === tab.getAttribute('aria-controls')
+        view.classList.toggle('active', active)
+        view.hidden = !active
+      }
+    }
+    for (const [index, tab] of tabs.entries()) {
+      tab.addEventListener('click', () => selectTab(tab))
+      tab.addEventListener('keydown', (event) => {
+        const target = event.key === 'Home' ? tabs[0]
+          : event.key === 'End' ? tabs.at(-1)
+          : event.key === 'ArrowRight' ? tabs[(index + 1) % tabs.length]
+          : event.key === 'ArrowLeft' ? tabs[(index - 1 + tabs.length) % tabs.length]
+          : undefined
+        if (target === undefined) return
+        event.preventDefault()
+        selectTab(target)
+        target.focus()
       })
     }
+    selectTab(tabs.find(tab => tab.getAttribute('aria-selected') === 'true') ?? tabs[0])
 
     const tooltip = document.querySelector('.tooltip')
     const showTooltip = (event) => {
@@ -429,14 +418,19 @@
       if (!node.dataset.tip) return
       tooltip.innerHTML = `<strong>${node.dataset.title}</strong>${node.dataset.tip}`
       tooltip.style.display = 'block'
+      tooltip.setAttribute('aria-hidden', 'false')
       const box = node.getBoundingClientRect()
       const left = Math.min(window.innerWidth - tooltip.offsetWidth - 12, Math.max(12, box.left + box.width / 2 - tooltip.offsetWidth / 2))
       const top = Math.max(12, box.top - tooltip.offsetHeight - 10)
       tooltip.style.left = `${left}px`
       tooltip.style.top = `${top}px`
     }
-    const hideTooltip = () => { tooltip.style.display = 'none' }
+    const hideTooltip = () => {
+      tooltip.style.display = 'none'
+      tooltip.setAttribute('aria-hidden', 'true')
+    }
     for (const node of document.querySelectorAll('.node[data-tip]')) {
+      node.setAttribute('aria-label', `${node.dataset.title}: ${node.dataset.tip}`)
       node.addEventListener('mouseenter', showTooltip)
       node.addEventListener('mouseleave', hideTooltip)
       node.addEventListener('focus', showTooltip)
