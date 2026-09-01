@@ -27,7 +27,7 @@ The live run used one source sandbox and one snapshot-derived sandbox. Every cre
 - No `@vercel/sandbox` package is installed. It is absent from `package.json` and `bun.lock`, so there is no installed SDK version to report or trust. The probe deliberately did not change that fact.
 - The official JS reference recommends `@vercel/sandbox` but does not state a package version on the reference page. It describes the current named-sandbox API, persistent-by-default behavior, commands, files, snapshots, and `AbortSignal` support [1].
 - Official authentication guidance recommends `VERCEL_OIDC_TOKEN` for Vercel-hosted and linked local development. For external or non-Vercel hosting it documents `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID` [2]. The authorized probe used the access-token form because this process runs outside Vercel.
-- Production configuration should remain unsettled until Phase 7 decides whether to use the SDK or the demonstrated direct-REST client. The audit establishes the official mechanisms; it does not select or wire one.
+- The subsequent Phase 7 architecture decision selected native `fetch` against the demonstrated REST surface for production. No `@vercel/sandbox` dependency is planned; exact endpoint versions, bounds, cancellation, and mutation retry policy remain explicit adapter contracts.
 
 The live REST surface is version-split: creation succeeded at `POST /v4/sandboxes`, manual snapshot at `POST /v3/sandboxes/sessions/{sessionId}/snapshot` with `201`, and the remaining demonstrated list, inspect, command, log, file, stop, snapshot-read/delete, and sandbox-delete operations used `/v2`. The current REST reference instead documents manual snapshot as `POST /v2/sandboxes/sessions/{sessionId}/snapshot` [4]. Phase 7 must pin and test the selected client contract rather than normalize these paths in core or assume documentation and live routing are identical.
 
@@ -154,7 +154,7 @@ The provider-specific layer should own:
 
 - Authentication and project/team scoping.
 - Durable-name and replaceable-session reconciliation.
-- REST/SDK version differences and strict response validation.
+- REST endpoint-version differences and strict response validation.
 - Mutation ambiguity handling, polling, limits, and state mapping.
 - Runtime artifact upload/install/verification.
 - Command/log conversion and all optional capability implementations.

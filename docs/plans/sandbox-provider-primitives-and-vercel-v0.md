@@ -137,7 +137,7 @@ This diagnosis supersedes the Phase 6 report's shorthand â€œadapter-local shimâ€
 - Vercel's durable reference is the project-scoped persistent sandbox name. Session IDs are resolved and validated inside each session-scoped primitive operation.
 - Non-resuming lookup is used for inspection. Only explicit resume may request a new session.
 - Create ambiguity is reconciled by one exact non-resuming lookup using deterministic identity and ownership tags. List differences never establish ownership.
-- The production client choice, direct REST or pinned official SDK, must be settled and recorded before Vercel adapter implementation. The choice must account for the live `/v4` create, `/v3` snapshot, and `/v2` remaining endpoint split, package/bundle closure, cancellation, response bounds, retries, and secret-safe errors.
+- The production Vercel adapter uses native `fetch` against the REST API and does not add `@vercel/sandbox`. Exact versioned paths, including the live `/v4` create, `/v3` snapshot, and `/v2` remaining endpoint split, stay adapter-local and are pinned by fake-server contracts. Reconsider this only after a concrete REST insufficiency and a durable-plan amendment.
 - The settled local configuration is explicit access-token mode: `WATERBOX_PROVIDER=vercel`, `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. The typed provider config also contains the fixed HTTPS API origin and bounded polling settings. OIDC support is deferred unless this plan is amended with tested local composition and refresh behavior.
 - Automatic Vercel stop snapshots are provider persistence artifacts, not public Waterbox snapshot records. Vercel create configures one-snapshot retention with immediate eviction and a finite expiration. Its bounded provider reference may carry the last automatic snapshot ID returned by a successfully persisted stop action, but cleanup never depends on reference-only updates from stable inspection. Before sandbox deletion, the adapter independently resolves and verifies the current snapshot, deletes it only when its creation method and source identity prove it is automatic and owned, then deletes the sandbox. Explicit Waterbox snapshots are never placed in or deleted through this slot.
 
@@ -412,11 +412,11 @@ Status: pending; depends on Phase 4
 
 Scope:
 
-- Settle and record the production Vercel client choice and exact pinned dependency/version if an SDK is selected.
 - Add `packages/sandbox-provider-vercel` implementing only the primitive port.
+- Implement the Vercel transport with injected native `fetch`; do not add the Vercel SDK or inherit hidden SDK retries.
 - Implement strict typed adapter configuration and dependency validation before any Vercel request. Composition-level ordering before artifact, filesystem, and SQLite effects remains Phase 6 work.
 - Implement persistent named create, exact non-resuming inspect, terminal command execution, file write, stop/resume, delete, snapshots, source-snapshot create, and inventory.
-- Hide Vercel session replacement and REST/SDK version details below the primitive boundary.
+- Hide Vercel session replacement and REST endpoint-version details below the primitive boundary.
 - Reuse completed probe facts for validated paths and states, but implement production-quality bounds, error mapping, diagnostics, and ownership.
 - Add credential-free fake-server tests for every mutation ambiguity and cleanup case.
 
@@ -559,4 +559,4 @@ Also run the focused provider, local composition, API, client, MCP, and separate
 
 ## Implementation Log
 
-- 2026-09-01: Plan created after the completed Vercel capability probe and follow-up provider-neutrality review. The review found a direct shared infrastructure intersection across Box and Vercel, while the current provider interface mixed native lifecycle/transport with shared Waterbox runtime behavior. The approved sequence is primitive contract, shared runtime extraction, Box migration, Box live regression, Vercel primitive implementation, configured composition, and two-provider live closure. No production code or live provider operation occurred while writing this plan.
+- 2026-09-01: Plan created after the completed Vercel capability probe and follow-up provider-neutrality review. The review found a direct shared infrastructure intersection across Box and Vercel, while the current provider interface mixed native lifecycle/transport with shared Waterbox runtime behavior. The approved sequence is primitive contract, shared runtime extraction, Box migration, Box live regression, Vercel primitive implementation, configured composition, and two-provider live closure. Native `fetch` against the validated REST surface is the settled Vercel production transport; no Vercel SDK dependency is planned. No production code or live provider operation occurred while writing this plan.
