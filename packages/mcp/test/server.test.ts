@@ -12,6 +12,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createStartupClient } from "../src/main.ts"
 import { createWaterboxMcpServer } from "../src/server.ts"
+import { readLocalFile } from "../src/secure-transfer.ts"
 
 const sandbox: Sandbox = { sandboxId: "sbx_calm-forest-abc1", provider: "box", state: "running", version: 1, createdAt: "2026-08-27T00:00:00.000Z", updatedAt: "2026-08-27T00:00:00.000Z" }
 
@@ -43,6 +44,31 @@ describe("Waterbox MCP client renderer", () => {
     const connection = await connected(commands)
     try { const result = await connection.client.callTool({ name: "send_file_securely", arguments: { sandboxId: sandbox.sandboxId, sourcePath, targetPath: "/root/secret" } }); expect(JSON.stringify(result)).not.toContain(secret); expect(supplied && Array.from(supplied).every(byte => byte === 0)).toBeTrue() }
     finally { await connection.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
+  test("clears an owned host buffer when a partial read aborts before transfer", async () => {
+    const controller = new AbortController()
+    let allocated: Uint8Array | undefined
+    let reads = 0
+    const regular = { isFile: () => true, size: 3 }
+    const handle = {
+      async stat() { return regular },
+      async read(buffer: Uint8Array) {
+        reads += 1
+        buffer.set([1, 2, 3])
+        controller.abort(new DOMException("test abort", "AbortError"))
+        return { bytesRead: 3, buffer }
+      },
+      async close() {},
+    }
+    await expect(readLocalFile("ignored", controller.signal, {
+      stat: (async () => regular) as any,
+      open: (async () => handle) as any,
+      allocate(size) { allocated = new Uint8Array(size); return allocated },
+    })).rejects.toThrow("test abort")
+    expect(reads).toBe(1)
+    expect(allocated).toBeDefined()
+    expect(allocated && allocated.every(byte => byte === 0)).toBeTrue()
   })
 
   test("maps client Bash progress and completed failures", async () => {
