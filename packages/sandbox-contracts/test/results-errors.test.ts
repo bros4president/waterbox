@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  BashJobObservationSchema,
   BashToolEventSchema,
   BashToolResultSchema,
   EditToolEventSchema,
@@ -83,6 +84,13 @@ describe("tool results and events", () => {
         statusPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
       },
     }).success).toBe(true)
+  })
+
+  test("validates canonical Bash job observations without provider detail", () => {
+    const observation = { jobId: "job_0123456789abcdef0123456789abcdef", state: "completed", chunkBase64: "b2s=", nextOffset: 2, outputSize: 2, exitCode: 0, signal: null, timedOut: false, durationMs: 12 }
+    expect(BashJobObservationSchema.safeParse(observation).success).toBe(true)
+    expect(BashJobObservationSchema.safeParse({ ...observation, providerRef: { secret: true } }).success).toBe(false)
+    expect(BashJobObservationSchema.safeParse({ ...observation, state: "unknown" }).success).toBe(false)
   })
 
   test("rejects malformed event variants and unknown fields", () => {

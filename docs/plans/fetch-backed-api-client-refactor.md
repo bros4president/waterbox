@@ -1,6 +1,6 @@
 # Fetch-Backed Waterbox Client Refactor
 
-Status: in progress; Phase 0 baseline and contract lock complete; Phases 1-6 pending
+Status: in progress; Phases 0-1 complete; Phases 2-6 pending
 
 This is the standalone implementation plan for making the Waterbox HTTP API the canonical product boundary in both local and cloud-shaped compositions. It replaces the supported MCP's direct calls into core with a reusable `@waterbox/client`, while preserving a fully embedded local backend through an injected Fetch implementation rather than requiring a localhost server.
 
@@ -596,7 +596,7 @@ git diff --check
 
 ### Phase 1: Canonical API Contract Closure
 
-Status: pending; depends on Phase 0
+Status: complete
 
 Scope:
 
@@ -1118,3 +1118,4 @@ At that point implementation stops. OAuth, cloud deployment, hosted MCP, WebMCP 
 - 2026-08-31: Standalone plan created. It records the existing MCP-to-core shadow contract, makes `@waterbox/api` canonical for embedded and remote-shaped consumers, introduces reusable client commands over an injected `ApiBackend`, keeps MCP as a presentation renderer, separates local file acquisition from secure-transfer orchestration, moves Bash observation policy into the client, and explicitly defers cloud, OAuth, WebMCP, MCP Tasks, lifecycle-job, daemon, and release-plan work. No implementation, provider credential access, live provider operation, or change to another plan occurred.
 - 2026-08-31: Baseline amended after concurrent lifecycle and Box preparation work. The plan now preserves canonical `preparing`, mandatory provider preparation, same-key preparation resume, exact `error.sandboxId` recovery, artifact-backed plain-Box bootstrap, removed system-template configuration, current get/probe distinctions, artifact-before-SQLite initialization, and expanded embedded/network parity. No Fetch-backed implementation or edit to another durable plan occurred.
 - 2026-09-01: Phase 0 completed. `docs/fetch-backed-client-phase-0-contract.md` records the current MCP-to-client/API parity matrix, complete API and MCP inventories, missing probe route, composite secure-transfer and Bash workflows, MCP-owned file acquisition, preparation/recovery/cancellation/reconstruction/deletion behavior, get/probe distinctions, runtime-artifact lookup and initialization ordering, direct MCP dependencies, and API-local extraction scope. No credential values were read and no live provider request occurred. Baseline verification found an incomplete dependency installation: the focused run passed all 14 sandbox API tests but could not load MCP/API-local suites; the repository-wide run passed 218 tests and reported 11 load failures; typecheck and MCP build also failed on unresolved workspace/external packages. `git diff --check` passed.
+- 2026-09-01: Phase 1 completed. The authenticated API now exposes canonical provider probe plus schema-validated, OpenAPI-documented Bash observation and cleanup primitives; hidden `/v1/internal` Bash routes were replaced. Tool argument/event maps and Bash observation request/result contracts now live in `@waterbox/contracts`, with supported MCP changes limited to type-only import relocation. Request aborts remain aborts before routing, during asynchronous bearer resolution and bounded body reads, from core/provider execution and stream setup, and through the global error boundary. Focused contract/core/API verification passed 130 tests, repository typecheck passed, and `git diff --check` passed. No credential value was read and no live provider request occurred.

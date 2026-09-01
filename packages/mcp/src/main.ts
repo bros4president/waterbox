@@ -1,6 +1,5 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import type { SandboxId, ToolName } from "@waterbox/contracts"
-import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
+import type { SandboxId, ToolArgumentsByName, ToolEventByName, ToolName } from "@waterbox/contracts"
 import type { McpBackend } from "./backend.ts"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
 import { createMcpBackend } from "./direct.ts"

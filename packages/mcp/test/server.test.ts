@@ -12,6 +12,8 @@ import type {
   SnapshotId,
   SecureTransferConsumeRequest,
   SecureTransferId,
+  ToolArgumentsByName,
+  ToolEventByName,
   ToolName,
 } from "@waterbox/contracts"
 import { Decrypter, generateX25519Identity, identityToRecipient } from "age-encryption"
@@ -21,8 +23,6 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type {
   ProviderExecuteInput,
-  ToolArgumentsByName,
-  ToolEventByName,
 } from "@waterbox/core/provider"
 import { ProviderError } from "@waterbox/core/provider"
 import { FakeSandboxProvider, FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"

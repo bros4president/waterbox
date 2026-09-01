@@ -6,6 +6,7 @@ import type {
   SecureTransferDelivered,
   SecureTransferInitiated,
   ToolName,
+  ToolEventByName,
 } from "@waterbox/contracts"
 import type {
   IdempotencyKey,
@@ -25,7 +26,6 @@ import type {
   ProviderSnapshotObservation,
   ProviderSnapshotOperationInput,
   SandboxProvider,
-  ToolEventByName,
 } from "./provider.ts"
 import type { IdempotencyRecord, JsonValue, SandboxRecord, SnapshotRecord } from "./records.ts"
 

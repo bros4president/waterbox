@@ -18,6 +18,9 @@ import {
   type SnapshotPage,
   type SnapshotState,
   type ToolName,
+  type BashJobObservation,
+  type ToolArgumentsByName,
+  type ToolEventByName,
 } from "@waterbox/contracts"
 import { DomainError, SandboxRecoveryError, errorRecord, mapProviderError } from "./errors.ts"
 import { ProviderError } from "./provider.ts"
@@ -28,12 +31,7 @@ import type {
   SandboxRepository,
   SnapshotRepository,
 } from "./ports.ts"
-import type {
-  BashJobObservation,
-  SandboxProvider,
-  ToolArgumentsByName,
-  ToolEventByName,
-} from "./provider.ts"
+import type { SandboxProvider } from "./provider.ts"
 import type {
   IdempotencyRecord,
   JsonValue,
