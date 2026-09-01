@@ -112,7 +112,7 @@ export function createRemoteApiBackend(origin: string | URL, authenticatedFetch:
   const parsed = validateOrigin(origin)
   let closed = false
   return {
-    origin: parsed,
+    get origin() { return new URL(parsed) },
     fetch(request) {
       if (closed) return Promise.reject(new WaterboxClientError("The Waterbox API backend is closed"))
       return authenticatedFetch(request)
@@ -128,13 +128,14 @@ export interface WaterboxClientOptions {
 
 export class WaterboxClient {
   readonly #backend: ApiBackend
+  readonly #origin: URL
   readonly #observationIntervalMs: number
   readonly #cleanupDeadlineMs: number
   #closePromise?: Promise<void>
 
   constructor(backend: ApiBackend, options: WaterboxClientOptions = {}) {
     this.#backend = backend
-    validateOrigin(backend.origin)
+    this.#origin = validateOrigin(backend.origin)
     this.#observationIntervalMs = nonnegativeDuration(options.bashObservationIntervalMs, BASH_OBSERVATION_INTERVAL_MS)
     this.#cleanupDeadlineMs = nonnegativeDuration(options.bashCleanupDeadlineMs, BASH_CLEANUP_DEADLINE_MS)
   }
@@ -146,15 +147,15 @@ export class WaterboxClient {
   async createSandbox(input: CreateSandboxRequest, context: CreateSandboxContext): Promise<Sandbox> {
     const body = CreateSandboxRequestSchema.parse(input)
     const key = IdempotencyKeySchema.parse(context.idempotencyKey)
-    return this.#json("POST", "/v1/sandboxes", SandboxSchema, context.signal, body, { "Idempotency-Key": key })
+    return this.#json("POST", "/v1/sandboxes", 201, SandboxSchema, context.signal, body, { "Idempotency-Key": key })
   }
 
   probeSandbox(input: { sandboxId: SandboxId }, context: CommandContext): Promise<Sandbox> {
-    return this.#json("POST", `/v1/sandboxes/${sandboxPath(input.sandboxId)}/probe`, SandboxSchema, context.signal)
+    return this.#json("POST", `/v1/sandboxes/${sandboxPath(input.sandboxId)}/probe`, 200, SandboxSchema, context.signal)
   }
 
   deleteSandbox(input: { sandboxId: SandboxId }, context: CommandContext): Promise<Sandbox> {
-    return this.#json("DELETE", `/v1/sandboxes/${sandboxPath(input.sandboxId)}`, SandboxSchema, context.signal)
+    return this.#json("DELETE", `/v1/sandboxes/${sandboxPath(input.sandboxId)}`, 200, SandboxSchema, context.signal)
   }
 
   listSnapshots(input: CursorPaginationRequest, context: CommandContext): Promise<SnapshotPage> {
@@ -163,16 +164,16 @@ export class WaterboxClient {
     if (query.cursor !== undefined) parameters.set("cursor", query.cursor)
     if (query.limit !== undefined) parameters.set("limit", String(query.limit))
     const suffix = parameters.size === 0 ? "" : `?${parameters}`
-    return this.#json("GET", `/v1/snapshots${suffix}`, SnapshotPageSchema, context.signal)
+    return this.#json("GET", `/v1/snapshots${suffix}`, 200, SnapshotPageSchema, context.signal)
   }
 
   createSnapshot(input: CreateSnapshotRequest & { sandboxId: SandboxId }, context: CommandContext): Promise<Snapshot> {
     const { sandboxId, ...request } = input
-    return this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/snapshots`, SnapshotSchema, context.signal, CreateSnapshotRequestSchema.parse(request))
+    return this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/snapshots`, 201, SnapshotSchema, context.signal, CreateSnapshotRequestSchema.parse(request))
   }
 
   deleteSnapshot(input: { snapshotId: SnapshotId }, context: CommandContext): Promise<Snapshot> {
-    return this.#json("DELETE", `/v1/snapshots/${encodeURIComponent(SnapshotIdSchema.parse(input.snapshotId))}`, SnapshotSchema, context.signal)
+    return this.#json("DELETE", `/v1/snapshots/${encodeURIComponent(SnapshotIdSchema.parse(input.snapshotId))}`, 200, SnapshotSchema, context.signal)
   }
 
   read(input: ReadToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<ReadToolResult> {
@@ -216,7 +217,7 @@ export class WaterboxClient {
     const plaintext = input.plaintext.slice()
     let ciphertext: Uint8Array | undefined
     try {
-      const initiated = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers`, SecureTransferInitiatedSchema, context.signal)
+      const initiated = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers`, 201, SecureTransferInitiatedSchema, context.signal)
       if (Date.parse(initiated.expiresAt) <= Date.now()) throw new WaterboxClientError("Secure transfer expired before encryption")
       const encrypter = new Encrypter()
       encrypter.addRecipient(initiated.publicKey)
@@ -227,7 +228,7 @@ export class WaterboxClient {
         targetPath: input.targetPath,
         ciphertext: bytesToBase64(ciphertext),
       })
-      return await this.#json("PUT", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers/${encodeURIComponent(initiated.transferId)}`, SecureTransferDeliveredSchema, context.signal, consumption)
+      return await this.#json("PUT", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers/${encodeURIComponent(initiated.transferId)}`, 200, SecureTransferDeliveredSchema, context.signal, consumption)
     } finally {
       plaintext.fill(0)
       ciphertext?.fill(0)
@@ -238,10 +239,10 @@ export class WaterboxClient {
     name: N, sandboxId: SandboxId, input: unknown, schema: S, context: CommandContext,
   ): Promise<Omit<Extract<z.output<S>, { type: "result" }>, "type">> {
     const response = await this.#request("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/tools/${name}`, context.signal, input)
-    if (!response.ok) throw await apiError(response)
+    await requireStatus(response, 200, context.signal)
     if (!hasMediaType(response, "application/x-ndjson")) { await cancelBody(response); throw protocolError() }
     let terminal: Extract<z.output<S>, { type: "result" }> | undefined
-    for await (const raw of parseNdjson(response)) {
+    for await (const raw of parseNdjson(response, context.signal)) {
       const event = schema.safeParse(raw)
       if (!event.success) { await cancelBody(response); throw protocolError() }
       if (terminal !== undefined) { await cancelBody(response); throw protocolError() }
@@ -262,7 +263,7 @@ export class WaterboxClient {
     try {
       while (true) {
         context.signal.throwIfAborted()
-        const sample = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}/observations`, BashJobObservationSchema, context.signal, { offset, maxBytes: BASH_CHUNK_BYTES })
+        const sample = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}/observations`, 200, BashJobObservationSchema, context.signal, { offset, maxBytes: BASH_CHUNK_BYTES })
         validateObservation(sample, receipt.metadata.jobId, offset)
         const chunk = base64ToBytes(sample.chunkBase64)
         offset = sample.nextOffset
@@ -290,16 +291,16 @@ export class WaterboxClient {
     timer.unref?.()
     try {
       void this.#request("DELETE", `/v1/sandboxes/${sandboxPath(sandboxId)}/bash-jobs/${encodeURIComponent(jobId)}`, controller.signal)
-        .then(async response => { if (!response.ok) await cancelBody(response) })
+        .then(async response => { await requireStatus(response, 204, controller.signal); await cancelBody(response) })
         .catch(() => undefined).finally(() => clearTimeout(timer))
     } catch { clearTimeout(timer) }
   }
 
-  async #json<T>(method: string, path: string, schema: z.ZodType<T>, signal: AbortSignal, body?: unknown, headers?: HeadersInit): Promise<T> {
+  async #json<T>(method: string, path: string, expectedStatus: number, schema: z.ZodType<T>, signal: AbortSignal, body?: unknown, headers?: HeadersInit): Promise<T> {
     const response = await this.#request(method, path, signal, body, headers)
-    if (!response.ok) throw await apiError(response)
+    await requireStatus(response, expectedStatus, signal)
     if (!hasMediaType(response, "application/json")) { await cancelBody(response); throw protocolError() }
-    const value = await parseJson(response, MAX_API_JSON_RESPONSE_BYTES)
+    const value = await parseJson(response, MAX_API_JSON_RESPONSE_BYTES, signal)
     const parsed = schema.safeParse(value)
     if (!parsed.success) throw protocolError()
     return parsed.data
@@ -310,7 +311,7 @@ export class WaterboxClient {
     const requestHeaders = new Headers(headers)
     let serialized: string | undefined
     if (body !== undefined) { requestHeaders.set("Content-Type", "application/json"); serialized = JSON.stringify(body) }
-    const request = new Request(new URL(path, this.#backend.origin), { method, headers: requestHeaders, body: serialized, signal })
+    const request = new Request(new URL(path, this.#origin), { method, headers: requestHeaders, body: serialized, signal })
     try { return await this.#backend.fetch(request) }
     catch (error) {
       if (signal.aborted) throw signal.reason ?? error
@@ -334,11 +335,21 @@ function nonnegativeDuration(value: number | undefined, fallback: number): numbe
   return value
 }
 
-async function apiError(response: Response): Promise<WaterboxClientError> {
+async function requireStatus(response: Response, expected: number, signal: AbortSignal): Promise<void> {
+  if (response.status === expected) return
+  if (!response.ok) throw await apiError(response, signal)
+  await cancelBody(response)
+  throw protocolError()
+}
+
+async function apiError(response: Response, signal: AbortSignal): Promise<WaterboxClientError> {
   if (!hasMediaType(response, "application/json")) { await cancelBody(response); return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status }) }
   let value: unknown
-  try { value = await parseJson(response, MAX_API_ERROR_RESPONSE_BYTES) }
-  catch { return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status }) }
+  try { value = await parseJson(response, MAX_API_ERROR_RESPONSE_BYTES, signal) }
+  catch (error) {
+    if (signal.aborted) throw signal.reason ?? error
+    return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status })
+  }
   const parsed = ErrorEnvelopeSchema.safeParse(value)
   if (!parsed.success) return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status })
   return new WaterboxClientError(parsed.data.error.message, {
@@ -349,20 +360,24 @@ async function apiError(response: Response): Promise<WaterboxClientError> {
   })
 }
 
-async function parseJson(response: Response, limit: number): Promise<unknown> {
-  const bytes = await readBounded(response, limit)
+async function parseJson(response: Response, limit: number, signal: AbortSignal): Promise<unknown> {
+  const bytes = await readBounded(response, limit, signal)
   try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
   catch { throw protocolError() }
 }
 
-async function readBounded(response: Response, limit: number): Promise<Uint8Array> {
+async function readBounded(response: Response, limit: number, signal: AbortSignal): Promise<Uint8Array> {
   if (response.body === null) throw protocolError()
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
   let total = 0
+  const abort = () => { void reader.cancel(signal.reason).catch(() => undefined) }
+  signal.addEventListener("abort", abort, { once: true })
   try {
     while (true) {
+      signal.throwIfAborted()
       const item = await reader.read()
+      signal.throwIfAborted()
       if (item.done) break
       total += item.value.byteLength
       if (total > limit) { await reader.cancel(); throw protocolError() }
@@ -371,21 +386,26 @@ async function readBounded(response: Response, limit: number): Promise<Uint8Arra
   } catch (error) {
     await reader.cancel().catch(() => undefined)
     throw error
-  } finally { reader.releaseLock() }
+  } finally { signal.removeEventListener("abort", abort); reader.releaseLock() }
   const result = new Uint8Array(total)
   let offset = 0
   for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
   return result
 }
 
-async function* parseNdjson(response: Response): AsyncGenerator<unknown> {
+async function* parseNdjson(response: Response, signal: AbortSignal): AsyncGenerator<unknown> {
   if (response.body === null) throw protocolError()
   const reader = response.body.getReader()
   let pending = new Uint8Array()
   let total = 0
+  let complete = false
+  const abort = () => { void reader.cancel(signal.reason).catch(() => undefined) }
+  signal.addEventListener("abort", abort, { once: true })
   try {
     while (true) {
+      signal.throwIfAborted()
       const item = await reader.read()
+      signal.throwIfAborted()
       if (item.done) break
       total += item.value.byteLength
       if (total > MAX_API_NDJSON_TOTAL_BYTES) { await reader.cancel(); throw protocolError() }
@@ -402,11 +422,17 @@ async function* parseNdjson(response: Response): AsyncGenerator<unknown> {
       pending = joined.slice(start)
       if (pending.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
     }
+    signal.throwIfAborted()
     if (pending.byteLength !== 0) yield decodeJsonLine(pending)
+    complete = true
   } catch (error) {
     await reader.cancel().catch(() => undefined)
     throw error
-  } finally { reader.releaseLock() }
+  } finally {
+    signal.removeEventListener("abort", abort)
+    if (!complete) await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
 }
 
 function decodeJsonLine(line: Uint8Array): unknown {
