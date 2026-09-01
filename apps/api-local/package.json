@@ -7,14 +7,14 @@
     "test:integration": "bun test test/integration.test.ts"
   },
   "dependencies": {
-    "@waterbox/api": "workspace:*",
     "@waterbox/contracts": "workspace:*",
-    "@waterbox/core": "workspace:*",
+    "@waterbox/control-plane-local": "workspace:*",
     "@waterbox/provider-box": "workspace:*",
-    "@waterbox/repository-sqlite": "workspace:*",
     "zod": "^4.1.5"
   },
   "devDependencies": {
+    "@waterbox/api": "workspace:*",
+    "@waterbox/core": "workspace:*",
     "@waterbox/daemon": "workspace:*"
   }
 }

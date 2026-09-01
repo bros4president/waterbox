@@ -1,4 +1,4 @@
-import { createLocalControlPlane } from "../apps/api-local/src/app.ts"
+import { createDevelopmentControlPlane, loadDevelopmentRuntimeArtifact } from "../apps/api-local/src/app.ts"
 import { startLocalServer } from "../apps/api-local/src/server.ts"
 import type { LocalApiConfig } from "../apps/api-local/src/config.ts"
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
@@ -220,7 +220,8 @@ async function main(): Promise<void> {
     host: "127.0.0.1", port: 1, sqlitePath, developmentApiKey, accountId,
     box: { apiBaseUrl: baseUrl, apiKey: boxApiKey, polling: { intervalMs: 1_000, timeoutMs: 30_000 } },
   }
-  const local = startLocalServer(createLocalControlPlane(config), { host: "127.0.0.1", port: 0, idleTimeoutSeconds: 60 })
+  const runtimeArtifact = await loadDevelopmentRuntimeArtifact()
+  const local = await startLocalServer(await createDevelopmentControlPlane(config, runtimeArtifact), { host: "127.0.0.1", port: 0, idleTimeoutSeconds: 60 })
   const apiUrl = `http://127.0.0.1:${local.server.port}`
   const openCodePassword = crypto.randomUUID()
   let sandboxId: string | undefined, primaryFailure: unknown, cleanupBlocker: string | undefined
