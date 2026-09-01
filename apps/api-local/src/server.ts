@@ -6,7 +6,13 @@ export async function startLocalServer(controlPlane: LocalControlPlane, options:
   let server: Bun.Server<undefined>
   try { server = Bun.serve({ hostname: options.host, port: options.port, fetch: controlPlane.fetch, ...(options.idleTimeoutSeconds === undefined ? {} : { idleTimeout: options.idleTimeoutSeconds }) }) }
   catch (error) { await controlPlane.close(); throw error }
-  options.log?.(`Waterbox local API listening on ${server.hostname}:${server.port}`)
+  try {
+    options.log?.(`Waterbox local API listening on ${server.hostname}:${server.port}`)
+  } catch (error) {
+    try { await server.stop() } catch {}
+    try { await controlPlane.close() } catch {}
+    throw error
+  }
   let closed = false
   return {
     server,
