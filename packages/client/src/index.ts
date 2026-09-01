@@ -1,0 +1,491 @@
+import {
+  BashJobObservationSchema,
+  BashToolArgumentsSchema,
+  BashToolEventSchema,
+  BashToolResultSchema,
+  CreateSandboxRequestSchema,
+  CreateSnapshotRequestSchema,
+  CursorPaginationRequestSchema,
+  EditToolArgumentsSchema,
+  EditToolEventSchema,
+  ErrorEnvelopeSchema,
+  GlobToolArgumentsSchema,
+  GlobToolEventSchema,
+  GrepToolArgumentsSchema,
+  GrepToolEventSchema,
+  IdempotencyKeySchema,
+  MAX_SECURE_CIPHERTEXT_BYTES,
+  MAX_SECURE_FILE_BYTES,
+  PatchToolArgumentsSchema,
+  PatchToolEventSchema,
+  ReadToolArgumentsSchema,
+  ReadToolEventSchema,
+  SandboxIdSchema,
+  SandboxSchema,
+  SnapshotIdSchema,
+  SnapshotPageSchema,
+  SnapshotSchema,
+  SecureTransferDeliveredSchema,
+  SecureTransferInitiatedSchema,
+  SecureTransferConsumeRequestSchema,
+  WriteToolArgumentsSchema,
+  WriteToolEventSchema,
+  type BashJobObservation,
+  type BashToolArguments,
+  type BashToolResult,
+  type CompletedBashToolResult,
+  type CreateSandboxRequest,
+  type CreateSnapshotRequest,
+  type CursorPaginationRequest,
+  type DispatchedBashToolResult,
+  type EditToolArguments,
+  type EditToolResult,
+  type ErrorCode,
+  type GlobToolArguments,
+  type GlobToolResult,
+  type GrepToolArguments,
+  type GrepToolResult,
+  type PatchToolArguments,
+  type PatchToolResult,
+  type ReadToolArguments,
+  type ReadToolResult,
+  type Sandbox,
+  type SandboxId,
+  type Snapshot,
+  type SnapshotId,
+  type SnapshotPage,
+  type ToolEventByName,
+  type ToolName,
+  type WriteToolArguments,
+  type WriteToolResult,
+} from "@waterbox/contracts"
+import { Encrypter } from "age-encryption"
+import type { z } from "zod"
+
+export const MAX_API_ERROR_RESPONSE_BYTES = 65_536
+export const MAX_API_JSON_RESPONSE_BYTES = 1_048_576
+export const MAX_API_NDJSON_LINE_BYTES = 8_388_608
+export const MAX_API_NDJSON_TOTAL_BYTES = 16_777_216
+
+const BASH_CHUNK_BYTES = 65_536
+const MAX_BASH_OUTPUT_BYTES = 1_048_576
+const BASH_OBSERVATION_INTERVAL_MS = 1_000
+const BASH_CLEANUP_DEADLINE_MS = 5_000
+
+export interface ApiBackend {
+  readonly origin: URL
+  fetch(request: Request): Promise<Response>
+  close(): Promise<void>
+}
+
+export interface WaterboxCommandProgress {
+  readonly kind: "heartbeat"
+  readonly sequence: number
+}
+
+export interface CommandContext {
+  readonly signal: AbortSignal
+  readonly onProgress?: (progress: WaterboxCommandProgress) => void | Promise<void>
+}
+
+export interface CreateSandboxContext extends CommandContext {
+  readonly idempotencyKey: string
+}
+
+export class WaterboxClientError extends Error {
+  readonly status?: number
+  readonly code?: ErrorCode
+  readonly requestId?: string
+  readonly recoverySandboxId?: SandboxId
+
+  constructor(message: string, options: { status?: number; code?: ErrorCode; requestId?: string; recoverySandboxId?: SandboxId } = {}) {
+    super(message)
+    this.name = "WaterboxClientError"
+    this.status = options.status
+    this.code = options.code
+    this.requestId = options.requestId
+    this.recoverySandboxId = options.recoverySandboxId
+  }
+}
+
+export function createRemoteApiBackend(origin: string | URL, authenticatedFetch: (request: Request) => Promise<Response>): ApiBackend {
+  const parsed = validateOrigin(origin)
+  let closed = false
+  return {
+    origin: parsed,
+    fetch(request) {
+      if (closed) return Promise.reject(new WaterboxClientError("The Waterbox API backend is closed"))
+      return authenticatedFetch(request)
+    },
+    async close() { closed = true },
+  }
+}
+
+export interface WaterboxClientOptions {
+  bashObservationIntervalMs?: number
+  bashCleanupDeadlineMs?: number
+}
+
+export class WaterboxClient {
+  readonly #backend: ApiBackend
+  readonly #observationIntervalMs: number
+  readonly #cleanupDeadlineMs: number
+  #closePromise?: Promise<void>
+
+  constructor(backend: ApiBackend, options: WaterboxClientOptions = {}) {
+    this.#backend = backend
+    validateOrigin(backend.origin)
+    this.#observationIntervalMs = nonnegativeDuration(options.bashObservationIntervalMs, BASH_OBSERVATION_INTERVAL_MS)
+    this.#cleanupDeadlineMs = nonnegativeDuration(options.bashCleanupDeadlineMs, BASH_CLEANUP_DEADLINE_MS)
+  }
+
+  close(): Promise<void> {
+    return this.#closePromise ??= Promise.resolve().then(() => this.#backend.close())
+  }
+
+  async createSandbox(input: CreateSandboxRequest, context: CreateSandboxContext): Promise<Sandbox> {
+    const body = CreateSandboxRequestSchema.parse(input)
+    const key = IdempotencyKeySchema.parse(context.idempotencyKey)
+    return this.#json("POST", "/v1/sandboxes", SandboxSchema, context.signal, body, { "Idempotency-Key": key })
+  }
+
+  probeSandbox(input: { sandboxId: SandboxId }, context: CommandContext): Promise<Sandbox> {
+    return this.#json("POST", `/v1/sandboxes/${sandboxPath(input.sandboxId)}/probe`, SandboxSchema, context.signal)
+  }
+
+  deleteSandbox(input: { sandboxId: SandboxId }, context: CommandContext): Promise<Sandbox> {
+    return this.#json("DELETE", `/v1/sandboxes/${sandboxPath(input.sandboxId)}`, SandboxSchema, context.signal)
+  }
+
+  listSnapshots(input: CursorPaginationRequest, context: CommandContext): Promise<SnapshotPage> {
+    const query = CursorPaginationRequestSchema.parse(input)
+    const parameters = new URLSearchParams()
+    if (query.cursor !== undefined) parameters.set("cursor", query.cursor)
+    if (query.limit !== undefined) parameters.set("limit", String(query.limit))
+    const suffix = parameters.size === 0 ? "" : `?${parameters}`
+    return this.#json("GET", `/v1/snapshots${suffix}`, SnapshotPageSchema, context.signal)
+  }
+
+  createSnapshot(input: CreateSnapshotRequest & { sandboxId: SandboxId }, context: CommandContext): Promise<Snapshot> {
+    const { sandboxId, ...request } = input
+    return this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/snapshots`, SnapshotSchema, context.signal, CreateSnapshotRequestSchema.parse(request))
+  }
+
+  deleteSnapshot(input: { snapshotId: SnapshotId }, context: CommandContext): Promise<Snapshot> {
+    return this.#json("DELETE", `/v1/snapshots/${encodeURIComponent(SnapshotIdSchema.parse(input.snapshotId))}`, SnapshotSchema, context.signal)
+  }
+
+  read(input: ReadToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<ReadToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    return this.#tool("read", sandboxId, ReadToolArgumentsSchema.parse(arguments_), ReadToolEventSchema, context)
+  }
+  write(input: WriteToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<WriteToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    return this.#tool("write", sandboxId, WriteToolArgumentsSchema.parse(arguments_), WriteToolEventSchema, context)
+  }
+  edit(input: EditToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<EditToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    return this.#tool("edit", sandboxId, EditToolArgumentsSchema.parse(arguments_), EditToolEventSchema, context)
+  }
+  patch(input: PatchToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<PatchToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    return this.#tool("patch", sandboxId, PatchToolArgumentsSchema.parse(arguments_), PatchToolEventSchema, context)
+  }
+  glob(input: GlobToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<GlobToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    return this.#tool("glob", sandboxId, GlobToolArgumentsSchema.parse(arguments_), GlobToolEventSchema, context)
+  }
+  grep(input: GrepToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<GrepToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    return this.#tool("grep", sandboxId, GrepToolArgumentsSchema.parse(arguments_), GrepToolEventSchema, context)
+  }
+
+  async bash(input: BashToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<BashToolResult> {
+    const { sandboxId, ...arguments_ } = input
+    const receipt = await this.#tool("bash", sandboxId, BashToolArgumentsSchema.parse(arguments_), BashToolEventSchema, context) as BashToolResult
+    if (receipt.outcome === "completed") return receipt
+    return this.#observeBash(sandboxId, receipt, context)
+  }
+
+  async sendFileSecurely(input: { sandboxId: SandboxId; plaintext: Uint8Array; targetPath: string }, context: CommandContext) {
+    context.signal.throwIfAborted()
+    const sandboxId = SandboxIdSchema.parse(input.sandboxId)
+    if (!(input.plaintext instanceof Uint8Array) || input.plaintext.byteLength > MAX_SECURE_FILE_BYTES) {
+      throw new WaterboxClientError("Secure transfer plaintext is too large")
+    }
+    const plaintext = input.plaintext.slice()
+    let ciphertext: Uint8Array | undefined
+    try {
+      const initiated = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers`, SecureTransferInitiatedSchema, context.signal)
+      if (Date.parse(initiated.expiresAt) <= Date.now()) throw new WaterboxClientError("Secure transfer expired before encryption")
+      const encrypter = new Encrypter()
+      encrypter.addRecipient(initiated.publicKey)
+      ciphertext = await encrypter.encrypt(plaintext)
+      context.signal.throwIfAborted()
+      if (ciphertext.byteLength > MAX_SECURE_CIPHERTEXT_BYTES) throw new WaterboxClientError("Encrypted file is too large")
+      const consumption = SecureTransferConsumeRequestSchema.parse({
+        targetPath: input.targetPath,
+        ciphertext: bytesToBase64(ciphertext),
+      })
+      return await this.#json("PUT", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers/${encodeURIComponent(initiated.transferId)}`, SecureTransferDeliveredSchema, context.signal, consumption)
+    } finally {
+      plaintext.fill(0)
+      ciphertext?.fill(0)
+    }
+  }
+
+  async #tool<N extends ToolName, S extends z.ZodType<Extract<ToolEventByName[N], { type: "result" }> | ToolEventByName[N]>>(
+    name: N, sandboxId: SandboxId, input: unknown, schema: S, context: CommandContext,
+  ): Promise<Omit<Extract<z.output<S>, { type: "result" }>, "type">> {
+    const response = await this.#request("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/tools/${name}`, context.signal, input)
+    if (!response.ok) throw await apiError(response)
+    if (!hasMediaType(response, "application/x-ndjson")) { await cancelBody(response); throw protocolError() }
+    let terminal: Extract<z.output<S>, { type: "result" }> | undefined
+    for await (const raw of parseNdjson(response)) {
+      const event = schema.safeParse(raw)
+      if (!event.success) { await cancelBody(response); throw protocolError() }
+      if (terminal !== undefined) { await cancelBody(response); throw protocolError() }
+      if (event.data.type === "result") terminal = event.data as Extract<z.output<S>, { type: "result" }>
+    }
+    if (terminal === undefined) throw protocolError()
+    const { type: _, ...result } = terminal
+    return result
+  }
+
+  async #observeBash(sandboxId: SandboxId, receipt: DispatchedBashToolResult, context: CommandContext): Promise<BashToolResult> {
+    let offset = 0
+    let output = ""
+    let outputBytes = 0
+    let truncated = false
+    const decoder = new TextDecoder("utf-8")
+    const stopProgress = startProgress(context, this.#observationIntervalMs)
+    try {
+      while (true) {
+        context.signal.throwIfAborted()
+        const sample = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/bash-jobs/${encodeURIComponent(receipt.metadata.jobId)}/observations`, BashJobObservationSchema, context.signal, { offset, maxBytes: BASH_CHUNK_BYTES })
+        validateObservation(sample, receipt.metadata.jobId, offset)
+        const chunk = base64ToBytes(sample.chunkBase64)
+        offset = sample.nextOffset
+        const drained = (sample.state === "completed" || sample.state === "failed") && offset === sample.outputSize
+        const retained = retainUtf8(output, outputBytes, truncated, decoder.decode(chunk, { stream: !drained }))
+        output = retained.output; outputBytes = retained.bytes; truncated = retained.truncated
+        if (drained) {
+          if (sample.error !== undefined || sample.exitCode === undefined || sample.timedOut === undefined || sample.durationMs === undefined) throw protocolError()
+          const result = completedBash(receipt, sample, output, truncated)
+          this.#cleanupDetached(sandboxId, receipt.metadata.jobId)
+          return result
+        }
+        if (chunk.byteLength === 0) await sleep(this.#observationIntervalMs, context.signal)
+      }
+    } catch {
+      return receiptFallback(receipt)
+    } finally {
+      stopProgress()
+    }
+  }
+
+  #cleanupDetached(sandboxId: SandboxId, jobId: string): void {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new DOMException("Bash cleanup timed out", "TimeoutError")), this.#cleanupDeadlineMs)
+    timer.unref?.()
+    try {
+      void this.#request("DELETE", `/v1/sandboxes/${sandboxPath(sandboxId)}/bash-jobs/${encodeURIComponent(jobId)}`, controller.signal)
+        .then(async response => { if (!response.ok) await cancelBody(response) })
+        .catch(() => undefined).finally(() => clearTimeout(timer))
+    } catch { clearTimeout(timer) }
+  }
+
+  async #json<T>(method: string, path: string, schema: z.ZodType<T>, signal: AbortSignal, body?: unknown, headers?: HeadersInit): Promise<T> {
+    const response = await this.#request(method, path, signal, body, headers)
+    if (!response.ok) throw await apiError(response)
+    if (!hasMediaType(response, "application/json")) { await cancelBody(response); throw protocolError() }
+    const value = await parseJson(response, MAX_API_JSON_RESPONSE_BYTES)
+    const parsed = schema.safeParse(value)
+    if (!parsed.success) throw protocolError()
+    return parsed.data
+  }
+
+  async #request(method: string, path: string, signal: AbortSignal, body?: unknown, headers?: HeadersInit): Promise<Response> {
+    signal.throwIfAborted()
+    const requestHeaders = new Headers(headers)
+    let serialized: string | undefined
+    if (body !== undefined) { requestHeaders.set("Content-Type", "application/json"); serialized = JSON.stringify(body) }
+    const request = new Request(new URL(path, this.#backend.origin), { method, headers: requestHeaders, body: serialized, signal })
+    try { return await this.#backend.fetch(request) }
+    catch (error) {
+      if (signal.aborted) throw signal.reason ?? error
+      if (error instanceof WaterboxClientError) throw error
+      throw new WaterboxClientError("The Waterbox API request failed")
+    }
+  }
+}
+
+function validateOrigin(origin: string | URL): URL {
+  const value = new URL(origin.toString())
+  if ((value.protocol !== "http:" && value.protocol !== "https:") || value.username !== "" || value.password !== ""
+    || value.search !== "" || value.hash !== "" || value.pathname !== "/") throw new TypeError("Waterbox API origin must be an absolute root HTTP(S) URL without credentials, query, or fragment")
+  return value
+}
+
+function sandboxPath(value: SandboxId): string { return encodeURIComponent(SandboxIdSchema.parse(value)) }
+function nonnegativeDuration(value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback
+  if (!Number.isFinite(value) || value < 0) throw new TypeError("Duration must be nonnegative")
+  return value
+}
+
+async function apiError(response: Response): Promise<WaterboxClientError> {
+  if (!hasMediaType(response, "application/json")) { await cancelBody(response); return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status }) }
+  let value: unknown
+  try { value = await parseJson(response, MAX_API_ERROR_RESPONSE_BYTES) }
+  catch { return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status }) }
+  const parsed = ErrorEnvelopeSchema.safeParse(value)
+  if (!parsed.success) return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status })
+  return new WaterboxClientError(parsed.data.error.message, {
+    status: response.status,
+    code: parsed.data.error.code,
+    requestId: parsed.data.error.requestId,
+    ...(parsed.data.error.sandboxId === undefined ? {} : { recoverySandboxId: parsed.data.error.sandboxId }),
+  })
+}
+
+async function parseJson(response: Response, limit: number): Promise<unknown> {
+  const bytes = await readBounded(response, limit)
+  try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
+  catch { throw protocolError() }
+}
+
+async function readBounded(response: Response, limit: number): Promise<Uint8Array> {
+  if (response.body === null) throw protocolError()
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const item = await reader.read()
+      if (item.done) break
+      total += item.value.byteLength
+      if (total > limit) { await reader.cancel(); throw protocolError() }
+      chunks.push(item.value)
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    throw error
+  } finally { reader.releaseLock() }
+  const result = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength }
+  return result
+}
+
+async function* parseNdjson(response: Response): AsyncGenerator<unknown> {
+  if (response.body === null) throw protocolError()
+  const reader = response.body.getReader()
+  let pending = new Uint8Array()
+  let total = 0
+  try {
+    while (true) {
+      const item = await reader.read()
+      if (item.done) break
+      total += item.value.byteLength
+      if (total > MAX_API_NDJSON_TOTAL_BYTES) { await reader.cancel(); throw protocolError() }
+      const joined = new Uint8Array(pending.byteLength + item.value.byteLength)
+      joined.set(pending); joined.set(item.value, pending.byteLength)
+      let start = 0
+      for (let index = 0; index < joined.byteLength; index += 1) {
+        if (joined[index] !== 10) continue
+        const line = joined.subarray(start, index)
+        if (line.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
+        if (line.byteLength !== 0) yield decodeJsonLine(line)
+        start = index + 1
+      }
+      pending = joined.slice(start)
+      if (pending.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
+    }
+    if (pending.byteLength !== 0) yield decodeJsonLine(pending)
+  } catch (error) {
+    await reader.cancel().catch(() => undefined)
+    throw error
+  } finally { reader.releaseLock() }
+}
+
+function decodeJsonLine(line: Uint8Array): unknown {
+  try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(line)) }
+  catch { throw protocolError() }
+}
+async function cancelBody(response: Response): Promise<void> { await response.body?.cancel().catch(() => undefined) }
+function protocolError(): WaterboxClientError { return new WaterboxClientError("The Waterbox API returned an invalid response") }
+function hasMediaType(response: Response, expected: string): boolean {
+  return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === expected
+}
+
+function validateObservation(sample: BashJobObservation, jobId: string, offset: number): void {
+  const chunk = base64ToBytes(sample.chunkBase64)
+  if (sample.jobId !== jobId || sample.nextOffset < offset || sample.nextOffset > offset + BASH_CHUNK_BYTES
+    || chunk.byteLength !== sample.nextOffset - offset || bytesToBase64(chunk) !== sample.chunkBase64) throw protocolError()
+}
+
+function retainUtf8(output: string, bytes: number, truncated: boolean, decoded: string): { output: string; bytes: number; truncated: boolean } {
+  if (truncated) return { output, bytes, truncated }
+  let append = ""
+  for (const character of decoded) {
+    const size = new TextEncoder().encode(character).byteLength
+    if (bytes + size > MAX_BASH_OUTPUT_BYTES) return { output: output + append, bytes, truncated: true }
+    append += character; bytes += size
+  }
+  return { output: output + append, bytes, truncated: false }
+}
+
+function completedBash(receipt: DispatchedBashToolResult, sample: BashJobObservation, output: string, truncated: boolean): CompletedBashToolResult {
+  return BashToolResultSchema.parse({
+    title: receipt.metadata.description ?? "Bash command",
+    outcome: "completed",
+    output: output || (sample.timedOut ? "Command timed out" : "Command completed without output"),
+    metadata: {
+      command: receipt.metadata.command,
+      ...(receipt.metadata.description === undefined ? {} : { description: receipt.metadata.description }),
+      workdir: receipt.metadata.workdir,
+      exitCode: sample.exitCode!, signal: sample.signal ?? null, timedOut: sample.timedOut!, aborted: false,
+      durationMs: sample.durationMs!, outputTruncated: truncated,
+    },
+  }) as CompletedBashToolResult
+}
+
+function receiptFallback(receipt: DispatchedBashToolResult): DispatchedBashToolResult {
+  const output = `Observation stopped before completion. Job ${receipt.metadata.jobId} may still be running. Recovery statusPath: ${receipt.metadata.statusPath}\nRecovery outputPath: ${receipt.metadata.outputPath}`
+  return BashToolResultSchema.parse({ title: receipt.title, outcome: "dispatched", output, metadata: receipt.metadata }) as DispatchedBashToolResult
+}
+
+function startProgress(context: CommandContext, interval: number): () => void {
+  if (context.onProgress === undefined) return () => undefined
+  let stopped = false
+  let sequence = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const tick = async () => {
+    sequence += 1
+    try { await context.onProgress?.({ kind: "heartbeat", sequence }) } catch {}
+    if (!stopped) timer = setTimeout(() => void tick(), interval)
+  }
+  void tick()
+  return () => { stopped = true; if (timer !== undefined) clearTimeout(timer) }
+}
+
+function sleep(milliseconds: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted()
+    const timer = setTimeout(done, milliseconds)
+    function done() { signal.removeEventListener("abort", abort); resolve() }
+    function abort() { clearTimeout(timer); reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError")) }
+    signal.addEventListener("abort", abort, { once: true })
+  })
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ""
+  for (let index = 0; index < bytes.byteLength; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000))
+  return btoa(binary)
+}
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value)
+  return Uint8Array.from(binary, character => character.charCodeAt(0))
+}
