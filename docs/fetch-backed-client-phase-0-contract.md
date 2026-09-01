@@ -122,6 +122,7 @@ Phase 0 inspected source and variable names only. It did not read credential val
 The required commands were run before Phase 0 edits. The checkout's dependency installation was incomplete, so failures are recorded as baseline environment failures:
 
 - `bun test packages/sandbox-api/test packages/mcp/test apps/api-local/test`: failed overall. All 14 sandbox API tests passed. MCP/API-local suites failed to load because workspace packages (`@waterbox/cli/protocol`, `@waterbox/contracts`) and `zod` were unresolved.
+- `bun test`: failed overall with 218 passing tests and 11 load failures across 229 tests in 31 files. The failures were unresolved workspace/external imports (`@waterbox/contracts`, `@waterbox/cli/protocol`, `zod`, and `age-encryption`) plus empty unhandled-load failures in sandbox-daemon and sandbox-runtime suites; no assertion failure was reported in a loaded suite.
 - `bun run typecheck`: failed with unresolved workspace/external modules (`@waterbox/contracts`, core/provider packages, `zod`, `age-encryption`) and cascading type errors.
 - `bun run build:mcp`: failed because `esbuild` was unresolved.
 - `git diff --check`: recorded after the documentation edit in the Phase 0 implementation log.
