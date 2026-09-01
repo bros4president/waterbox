@@ -371,6 +371,48 @@ describe("Waterbox API", () => {
     expect(abortedCancelled).toBeTrue()
   })
 
+  test("bounds every authenticated JSON body without cloning its stream", async () => {
+    const { app } = api()
+    const url = "http://localhost/v1/sandboxes"
+    const request = (body: ReadableStream<Uint8Array>, extra: RequestInit = {}) => new Request(url, {
+      method: "POST", headers: jsonHeaders, body, duplex: "half", ...extra,
+    } as RequestInit & { duplex: "half" })
+
+    const declared = await app.fetch(request(new ReadableStream({ start(controller) { controller.close() } }), { headers: { ...jsonHeaders, "content-length": "1048577" } }))
+    expect(declared.status).toBe(413)
+
+    let overflowCancelled = false
+    const overflow = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(1_048_576)); controller.enqueue(new Uint8Array(1)) },
+      cancel() { overflowCancelled = true },
+    })
+    expect((await app.fetch(request(overflow))).status).toBe(413)
+    expect(overflowCancelled).toBeTrue()
+
+    expect((await app.fetch(request(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("{")); controller.close() } })))).status).toBe(400)
+    expect((await app.fetch(request(new ReadableStream({ start(controller) { controller.error(new Error("reader failed")) } })))).status).toBe(400)
+
+    let abortedCancelled = false
+    const controller = new AbortController()
+    const reason = new DOMException("caller left", "AbortError")
+    const stalled = new ReadableStream<Uint8Array>({ cancel() { abortedCancelled = true } })
+    const pending = app.fetch(request(stalled, { signal: controller.signal }))
+    await Promise.resolve()
+    controller.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+    expect(abortedCancelled).toBeTrue()
+  })
+
+  test("keeps the tighter observation and secure-transfer JSON limits", async () => {
+    const { app } = api()
+    const jobId = `job_${"a".repeat(32)}`
+    const observation = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}/observations`, { method: "POST", headers: jsonHeaders, body: " ".repeat(8_193) })
+    expect(observation.status).toBe(413)
+    const transferBody = JSON.stringify({ targetPath: "secret", ciphertext: "A".repeat(MAX_SECURE_CIPHERTEXT_BASE64_LENGTH + 9_000) })
+    const secureTransfer = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/secure-file-transfers/${transfer.transferId}`, { method: "PUT", headers: jsonHeaders, body: transferBody })
+    expect(secureTransfer.status).toBe(413)
+  })
+
   test("maps domain errors to stable, secret-safe envelopes", async () => {
     const secret = "protected.example/_token=never-leak"
     const { app } = api({ getSandbox: async () => { throw new DomainError("not_found", secret) } })
@@ -419,18 +461,26 @@ describe("Waterbox API", () => {
   })
 
   test("streams NDJSON incrementally and cancellation reaches core", async () => {
-    let release!: () => void
     let signal!: AbortSignal
-    const gate = new Promise<void>((resolve) => { release = resolve })
     let returns = 0
-    const events = async function* () {
-      yield { type: "stdout", data: "first" }
-      try {
-        await gate
-        yield { type: "result", outcome: "completed", title: "bash", output: "", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
-      } finally { returns += 1 }
+    const events = {
+      [Symbol.asyncIterator]() {
+        let nexts = 0
+        return {
+          async next() {
+            nexts += 1
+            if (nexts === 1) return { done: false, value: { type: "stdout", data: "first" } }
+            return await new Promise<IteratorResult<unknown>>(() => {})
+          },
+          return() {
+            returns += 1
+            expect(signal.aborted).toBeTrue()
+            return new Promise<IteratorResult<unknown>>(() => {})
+          },
+        }
+      },
     }
-    const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events() } })
+    const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events as never } })
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
     expect(response.headers.get("content-type")).toContain("application/x-ndjson")
     const reader = response.body!.getReader()
@@ -439,16 +489,18 @@ describe("Waterbox API", () => {
     expect(signal.aborted).toBeFalse()
     const cancelling = reader.cancel("client gone")
     expect(signal.aborted).toBeTrue()
-    release()
-    await cancelling
+    expect(await Promise.race([cancelling.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 50))])).toBeTrue()
     expect(returns).toBe(1)
   })
 
-  test("aborts and returns provider iterators when streamed output is malformed or fails", async () => {
-    for (const [name, second] of [
-      ["malformed output", async () => ({ done: false, value: { invalid: "provider output secret" } })],
-      ["iterator failure", async () => { throw new Error("provider iterator secret") }],
-    ] as const) {
+  test("delivers provider stream failures without waiting for iterator cleanup", async () => {
+    const cases = [
+      ["failure before first event", "resolve", async (next: number) => { if (next === 1) throw new Error("provider setup secret"); return { done: true, value: undefined } }, 500],
+      ["empty iteration", "reject", async () => ({ done: true, value: undefined }), 502],
+      ["malformed output", "throw", async (next: number) => next === 1 ? { done: false, value: { type: "stdout", data: "first" } } : { done: false, value: { invalid: "provider output secret" } }, 200],
+      ["iterator failure", "never", async (next: number) => { if (next === 1) return { done: false, value: { type: "stdout", data: "first" } }; throw new Error("provider iterator secret") }, 200],
+    ] as const
+    for (const [name, cleanup, next, status] of cases) {
       let signal!: AbortSignal
       let returns = 0
       let nexts = 0
@@ -457,17 +509,24 @@ describe("Waterbox API", () => {
           return {
             async next() {
               nexts += 1
-              if (nexts === 1) return { done: false, value: { type: "stdout", data: "first" } }
-              return second()
+              return next(nexts)
             },
-            async return() { returns += 1; return { done: true, value: undefined } },
+            return() {
+              returns += 1
+              expect(signal.aborted, name).toBeTrue()
+              if (cleanup === "throw") throw new Error("cleanup failed")
+              if (cleanup === "reject") return Promise.reject(new Error("cleanup failed"))
+              if (cleanup === "never") return new Promise(() => {})
+              return Promise.resolve({ done: true, value: undefined })
+            },
           }
         },
       }
       const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events as never } })
       const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
-      await expect(response.text()).rejects.toBeDefined()
-      expect(nexts, name).toBe(2)
+      expect(response.status, name).toBe(status)
+      if (status === 200) await expect(response.text()).rejects.toBeDefined()
+      expect(nexts, name).toBe(status === 200 ? 2 : 1)
       expect(signal.aborted).toBeTrue()
       expect(returns).toBe(1)
     }
