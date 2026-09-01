@@ -91,6 +91,8 @@ describe("tool results and events", () => {
     expect(BashJobObservationSchema.safeParse(observation).success).toBe(true)
     expect(BashJobObservationSchema.safeParse({ ...observation, providerRef: { secret: true } }).success).toBe(false)
     expect(BashJobObservationSchema.safeParse({ ...observation, state: "unknown" }).success).toBe(false)
+    expect(BashJobObservationSchema.safeParse({ ...observation, nextOffset: Number.MAX_SAFE_INTEGER + 1, outputSize: Number.MAX_SAFE_INTEGER + 1 }).success).toBe(false)
+    expect(BashJobObservationSchema.safeParse({ ...observation, outputSize: Number.MAX_SAFE_INTEGER + 1 }).success).toBe(false)
   })
 
   test("rejects malformed event variants and unknown fields", () => {

@@ -146,7 +146,7 @@ const cases: RequestCase[] = [
     name: "Bash job observation",
     schema: BashJobObservationRequestSchema,
     valid: [{ offset: 0, maxBytes: 1 }, { offset: 1_048_576, maxBytes: 65_536 }],
-    invalid: [{ offset: -1, maxBytes: 1 }, { offset: 0, maxBytes: 0 }, { offset: 0, maxBytes: 65_537 }, { offset: 0, maxBytes: 1, extra: true }],
+    invalid: [{ offset: -1, maxBytes: 1 }, { offset: Number.MAX_SAFE_INTEGER + 1, maxBytes: 1 }, { offset: 0, maxBytes: 0 }, { offset: 0, maxBytes: 65_537 }, { offset: 0, maxBytes: 1, extra: true }],
   },
 ]
 
