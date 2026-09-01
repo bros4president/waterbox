@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test"
 import type { ToolName } from "@waterbox/contracts"
 import { ProviderError } from "@waterbox/core/provider"
 import { decodeInvocation, decodeSecureTransferInput } from "@waterbox/cli/protocol"
-import { BoxSandboxProvider, __testing, type BoxProviderClock } from "../src/index.ts"
+import { BoxSandboxProvider, __testing, loadSandboxRuntimeArtifact, type BoxProviderClock, type BoxProviderDiagnostic } from "../src/index.ts"
+import { createHash } from "node:crypto"
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 class FakeClock implements BoxProviderClock {
   time = 0
@@ -12,7 +16,9 @@ class FakeClock implements BoxProviderClock {
 }
 
 interface Seen { url: string; method: string; headers: Headers; body?: unknown; signal: AbortSignal | null }
-function harness(handler?: (request: Request, seen: Seen[]) => Response | Promise<Response>) {
+const artifactBytes = new TextEncoder().encode('#!/usr/bin/env node\nconsole.log("waterbox")\n')
+const artifact = { bytes: artifactBytes, sha256: createHash("sha256").update(artifactBytes).digest("hex"), cliProtocolVersion: 2 as const, artifactVersion: "0.1.0" }
+function harness(handler?: (request: Request, seen: Seen[]) => Response | Promise<Response>, polling = { intervalMs: 10, timeoutMs: 100 }, diagnostic?: (event: BoxProviderDiagnostic) => void) {
   const seen: Seen[] = []
   const clock = new FakeClock()
   const fakeFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -39,9 +45,8 @@ function harness(handler?: (request: Request, seen: Seen[]) => Response | Promis
   const provider = new BoxSandboxProvider({
     apiBaseUrl: "https://api.box.test/api/box/v1",
     apiKey: "box-secret-key",
-    systemTemplateRef: "template-secret-ref",
-    polling: { intervalMs: 10, timeoutMs: 100 },
-  }, { fetch: fakeFetch, clock })
+    polling,
+  }, { fetch: fakeFetch, clock, artifact, ...(diagnostic ? { diagnostic } : {}) })
   return { provider, seen, clock }
 }
 
@@ -57,7 +62,7 @@ const commandInvocation = (body: unknown) => {
 }
 
 describe("Box provider HTTP contract", () => {
-  test("create disables inherited environment, preserves template and idempotency, and returns a command-backed reference", async () => {
+  test("fresh create omits from, disables inherited environment, preserves idempotency, and returns a ready reference", async () => {
     let inspection = 0
     const { provider, seen, clock } = harness((request) => {
       if (request.url.endsWith("/api/box/v1/boxes") && request.method === "POST") return Response.json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 3600, box: { id: "bx_23456789", state: "provisioning" } })
@@ -66,7 +71,7 @@ describe("Box provider HTTP contract", () => {
     })
     const result = await provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "stable-key", signal: signal() })
     expect(result).toEqual({ state: "running", providerRef: { kind: "box-sandbox-v2", boxId: "bx_23456789" } })
-    expect(seen[0]?.body).toEqual({ from: "template-secret-ref", noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" } })
+    expect(seen[0]?.body).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" } })
     expect(seen[0]?.headers.get("idempotency-key")).toBe("stable-key")
     expect(seen[0]?.headers.get("authorization")).toBe("Bearer box-secret-key")
     expect(seen.some(item => item.url.endsWith("/commands"))).toBe(false)
@@ -77,7 +82,7 @@ describe("Box provider HTTP contract", () => {
     const { provider, seen } = harness(() => Response.json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 3600, box: { id: "bx_abcdefgh", state: "ready" } }))
     await provider.createSandbox({ accountId: "acct-a", sandboxId: "sbx_calm-cactus-7k3m", sourceSnapshotRef: snapshotRef, idempotencyKey: "fork-key", signal: signal() })
     expect(seen[0]?.body).toEqual({ from: "waterbox-user-snapshot", noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" } })
-    expect(JSON.stringify(seen[0]?.body)).not.toContain("template-secret-ref")
+    expect(Object.keys(seen[0]?.body as object)).toEqual(["from", "noEnv", "env"])
     expect(seen[0]?.headers.get("idempotency-key")).toBe("fork-key")
   })
 
@@ -295,6 +300,373 @@ describe("Box provider HTTP contract", () => {
   })
 })
 
+describe("Box runtime bootstrap", () => {
+  const uploadResponse = (body: unknown) => {
+    const value = body as { path: string; content: string }
+    return Response.json({ ok: true, type: "file.written", success: true, path: value.path, encoding: "base64", size: Buffer.from(value.content, "base64").byteLength })
+  }
+  const prepare = (provider: BoxSandboxProvider, abortSignal = signal()) => provider.prepareSandbox({ accountId: "acct-a", providerRef: sandboxRef, signal: abortSignal })
+
+  async function installerFixture() {
+    const root = await mkdtemp(join(tmpdir(), "waterbox-bootstrap-command-"))
+    const fakeBin = join(root, "fake-bin"), libraryDirectory = join(root, "usr-local-lib"), binaryDirectory = join(root, "usr-local-bin")
+    const uploadPath = join(root, "upload.js"), workspaceDirectory = join(root, "workspace"), jobsDirectory = join(root, "run", "waterbox", "bash-jobs")
+    const cliPath = join(libraryDirectory, "waterbox-cli.js"), launcherPath = join(binaryDirectory, "waterbox"), manifestPath = join(libraryDirectory, "waterbox-bootstrap.json")
+    const logPath = join(root, "sudo.log")
+    await mkdir(fakeBin)
+    const sudoPath = join(fakeBin, "sudo")
+    await writeFile(sudoPath, `#!/bin/sh
+set -eu
+test "$1" = -n
+shift
+last=
+for argument in "$@"; do last=$argument; done
+printf '%s\t%s\n' "$1" "$last" >> "$WB_SUDO_LOG"
+if test "$1" = mktemp && test -n "\${WB_FAIL_MKTEMP_PATTERN:-}"; then case "$last" in *"$WB_FAIL_MKTEMP_PATTERN"*) exit 90;; esac; fi
+if test "$1" = mv && test -n "\${WB_FAIL_DEST:-}" && test "$last" = "$WB_FAIL_DEST"; then exit 91; fi
+exec "$@"
+`)
+    await chmod(sudoPath, 0o755)
+    const layout = { uploadPath, libraryDirectory, binaryDirectory, workspaceDirectory, jobsDirectory, cliPath, launcherPath, manifestPath, nodePath: Bun.which("node") ?? "/usr/local/bin/node" }
+    const command = __testing.installCommand(artifact, layout)
+    const environment = { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, WB_SUDO_LOG: logPath }
+    const run = async (extra: Record<string, string> = {}) => {
+      const child = Bun.spawn(["/bin/sh", "-c", command], { env: { ...environment, ...extra }, stdout: "pipe", stderr: "pipe" })
+      const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+      return { exitCode, stdout, stderr }
+    }
+    const temporaryFiles = async () => (await Promise.all([readdir(libraryDirectory).catch(() => []), readdir(binaryDirectory).catch(() => [])])).flat().filter(name => name.startsWith(".waterbox"))
+    return { root, layout, command, logPath, run, temporaryFiles }
+  }
+
+  async function verifierFixture() {
+    const root = await mkdtemp(join(tmpdir(), "waterbox-verify-command-")), fakeBin = join(root, "fake-bin")
+    const manifestPath = join(root, "waterbox-bootstrap.json"), cliPath = join(root, "waterbox-cli.js"), invocationLog = join(root, "invocations.log")
+    const sudoPath = join(fakeBin, "sudo"), waterboxPath = join(fakeBin, "waterbox"), nodePath = join(fakeBin, "node"), rgPath = join(fakeBin, "rg")
+    await mkdir(fakeBin)
+    await writeFile(sudoPath, '#!/bin/sh\nset -eu\ntest "$1" = -n\nshift\nexec "$@"\n')
+    await writeFile(waterboxPath, `#!/bin/sh
+set -eu
+printf '%s\n' "$1" >> "$WB_INVOCATION_LOG"
+case "$1" in
+  health) if test "\${WB_FAIL_FACT:-}" = health; then printf '%s\n' wrong; else printf '%s\n' '${JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })}'; fi;;
+  version) if test "\${WB_FAIL_FACT:-}" = version; then printf '%s\n' wrong; else printf '%s\n' '${JSON.stringify({ protocolVersion: 2 })}'; fi;;
+  *) exit 2;;
+esac
+`)
+    const realNode = Bun.which("node") ?? "/usr/local/bin/node"
+    await writeFile(nodePath, `#!/bin/sh
+set -eu
+if test "$1" = --version; then if test "\${WB_FAIL_FACT:-}" = node; then printf '%s\n' v25.0.0; else printf '%s\n' v24.15.0; fi; else exec ${JSON.stringify(realNode)} "$@"; fi
+`)
+    await writeFile(rgPath, '#!/bin/sh\nset -eu\nif test "${WB_FAIL_FACT:-}" = rg; then printf "%s\\n" wrong; else printf "%s\\n" "ripgrep 14.1.0"; fi\n')
+    await Promise.all([sudoPath, waterboxPath, nodePath, rgPath].map(path => chmod(path, 0o755)))
+    const layout = { manifestPath, cliPath, waterboxPath, nodePath, rgPath }
+    const command = __testing.verifyCommand(artifact, layout)
+    const run = async (extra: Record<string, string> = {}) => {
+      const child = Bun.spawn(["/bin/sh", "-c", command], { env: { ...process.env, PATH: `${fakeBin}:${process.env.PATH ?? ""}`, WB_INVOCATION_LOG: invocationLog, ...extra }, stdout: "pipe", stderr: "pipe" })
+      const [exitCode, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()])
+      return { exitCode, stdout, stderr }
+    }
+    const invocations = async () => (await readFile(invocationLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean)
+    return { root, layout, command, run, invocations }
+  }
+
+  test("uploads the injected immutable artifact deterministically, installs atomically, and verifies all runtime facts", async () => {
+    let verifies = 0
+    const { provider, seen } = harness((request, requests) => {
+      const body = requests.at(-1)?.body
+      if (request.url.endsWith("/files")) return uploadResponse(body)
+      const command = (body as { command: string }).command
+      if (command === __testing.verifyCommand(artifact)) return commandResponse(`${++verifies === 1 ? "waterbox-bootstrap-incomplete" : "waterbox-bootstrap-ok"}\n`)
+      expect(command).toBe(__testing.installCommand(artifact))
+      return commandResponse("waterbox-bootstrap-installed\n")
+    })
+
+    expect(await prepare(provider)).toEqual({ state: "running", providerRef: sandboxRef })
+    const upload = seen.find(item => item.url.endsWith("/files"))!
+    expect(upload.method).toBe("PUT")
+    expect(upload.body).toEqual({ path: __testing.artifactPath(artifact.sha256), content: Buffer.from(artifact.bytes).toString("base64"), encoding: "base64" })
+    const commands = seen.filter(item => item.url.endsWith("/commands")).map(item => item.body as { command: string; timeoutSeconds: number })
+    expect(commands.map(item => item.command)).toEqual([__testing.verifyCommand(artifact), __testing.installCommand(artifact), __testing.verifyCommand(artifact)])
+    expect(commands.every(item => item.timeoutSeconds === 120)).toBe(true)
+    const installer = commands[1]!.command
+    expect(installer).toContain(`install -m 0600 '${__testing.artifactPath(artifact.sha256)}' "$cli"`)
+    expect(installer).toContain(__testing.nodeSha256("$cli", true))
+    expect(installer.indexOf("install -m 0600")).toBeLessThan(installer.indexOf(__testing.nodeSha256("$cli", true)))
+    expect(installer.indexOf(__testing.nodeSha256("$cli", true))).toBeLessThan(installer.indexOf('mv -f "$cli"'))
+    expect(installer).toContain("mv -f \"$manifest\" '/usr/local/lib/waterbox-bootstrap.json'")
+    expect(installer.indexOf('mv -f "$launcher"')).toBeLessThan(installer.indexOf('mv -f "$cli"'))
+    expect(installer.indexOf("/usr/local/lib/waterbox-cli.js")).toBeLessThan(installer.indexOf("/usr/local/lib/waterbox-bootstrap.json"))
+    expect(installer).toContain("install -d -m 0755 -o \"$uid\" -g \"$gid\" '/workspace'")
+    expect(installer).toContain("install -d -m 0700 '/run/waterbox/bash-jobs'")
+    expect(installer).not.toMatch(/apt|get install|bun/i)
+    const verification = commands[0]!.command
+    const checks = __testing.verificationChecks(artifact)
+    for (const fact of [checks.installedDigest, checks.health, checks.version, checks.node, checks.rg, "/usr/local/lib/waterbox-bootstrap.json"]) expect(verification).toContain(fact)
+    expect(__testing.manifest(artifact)).toBe('{"schemaVersion":1,"artifactSha256":"' + artifact.sha256 + '","artifactVersion":"0.1.0","cliProtocolVersion":2,"nodeMajor":24,"bootstrapVersion":1}')
+  })
+
+  test("emits only sanitized preparation stage and outcome enums", async () => {
+    let verifies = 0
+    const diagnostics: BoxProviderDiagnostic[] = []
+    const { provider } = harness((request, requests) => {
+      if (request.url.endsWith("/files")) return uploadResponse(requests.at(-1)?.body)
+      const command = (requests.at(-1)?.body as { command: string }).command
+      if (command === __testing.verifyCommand(artifact)) return commandResponse(`${++verifies === 1 ? "waterbox-bootstrap-incomplete" : "waterbox-bootstrap-ok"}\n`)
+      return commandResponse("waterbox-bootstrap-installed\n")
+    }, undefined, (event) => diagnostics.push(event))
+
+    await prepare(provider)
+    expect(diagnostics).toEqual([
+      { type: "preparation", stage: "verify", outcome: "incomplete" },
+      { type: "preparation", stage: "upload", outcome: "complete" },
+      { type: "preparation", stage: "install", outcome: "complete" },
+      { type: "preparation", stage: "final-verify", outcome: "complete" },
+    ])
+    const serialized = JSON.stringify(diagnostics)
+    for (const sensitive of ["box-secret-key", "bx_23456789", "/usr/local", "/tmp/", artifact.sha256, Buffer.from(artifact.bytes).toString("base64"), "command"]) expect(serialized).not.toContain(sensitive)
+  })
+
+  test("executes verifier incomplete, fact-failure, and complete branches at natural EOF", async () => {
+    const fixture = await verifierFixture()
+    try {
+      expect(await fixture.run()).toEqual({ exitCode: 0, stdout: "waterbox-bootstrap-incomplete\n", stderr: "" })
+      expect(await fixture.invocations()).toEqual([])
+
+      await writeFile(fixture.layout.manifestPath, __testing.manifest(artifact))
+      await writeFile(fixture.layout.cliPath, "wrong bytes")
+      expect(await fixture.run()).toEqual({ exitCode: 0, stdout: "waterbox-bootstrap-incomplete\n", stderr: "" })
+      expect(await fixture.invocations()).toEqual([])
+
+      await writeFile(fixture.layout.cliPath, artifact.bytes)
+      for (const fact of ["health", "version", "node", "rg"]) {
+        const result = await fixture.run({ WB_FAIL_FACT: fact })
+        expect(result).toEqual({ exitCode: 0, stdout: `waterbox-bootstrap-failed-${fact}\n`, stderr: "" })
+      }
+      expect(await fixture.run()).toEqual({ exitCode: 0, stdout: "waterbox-bootstrap-ok\n", stderr: "" })
+    } finally { await rm(fixture.root, { recursive: true, force: true }) }
+  })
+
+  test("executes the generated installer safely across success, interruption, corruption, allocation failure, and concurrency", async () => {
+    const fixtures: Array<Awaited<ReturnType<typeof installerFixture>>> = []
+    try {
+      const successful = await installerFixture(); fixtures.push(successful)
+      await writeFile(successful.layout.uploadPath, artifact.bytes)
+      const result = await successful.run()
+      expect(result).toEqual({ exitCode: 0, stdout: "waterbox-bootstrap-installed\n", stderr: "" })
+      expect(createHash("sha256").update(await readFile(successful.layout.cliPath)).digest("hex")).toBe(artifact.sha256)
+      expect(await readFile(successful.layout.launcherPath, "utf8")).toBe(__testing.LAUNCHER)
+      expect(await readFile(successful.layout.manifestPath, "utf8")).toBe(__testing.manifest(artifact))
+      expect((await stat(successful.layout.cliPath)).mode & 0o777).toBe(0o644)
+      expect((await stat(successful.layout.launcherPath)).mode & 0o777).toBe(0o755)
+      expect((await stat(successful.layout.manifestPath)).mode & 0o777).toBe(0o644)
+      expect((await stat(successful.layout.workspaceDirectory)).mode & 0o777).toBe(0o755)
+      expect((await stat(successful.layout.jobsDirectory)).mode & 0o777).toBe(0o700)
+      if (typeof process.getuid === "function") expect((await stat(successful.layout.workspaceDirectory)).uid).toBe(process.getuid())
+      expect(await successful.temporaryFiles()).toEqual([])
+      expect(await successful.run()).toEqual({ exitCode: 0, stdout: "waterbox-bootstrap-installed\n", stderr: "" })
+
+      const interrupted = await installerFixture(); fixtures.push(interrupted)
+      await writeFile(interrupted.layout.uploadPath, artifact.bytes)
+      const interruptedResult = await interrupted.run({ WB_FAIL_DEST: interrupted.layout.manifestPath })
+      expect(interruptedResult.exitCode).not.toBe(0)
+      expect(await readFile(interrupted.layout.launcherPath, "utf8")).toBe(__testing.LAUNCHER)
+      expect(createHash("sha256").update(await readFile(interrupted.layout.cliPath)).digest("hex")).toBe(artifact.sha256)
+      await expect(readFile(interrupted.layout.manifestPath)).rejects.toBeDefined()
+      const moveDestinations = (await readFile(interrupted.logPath, "utf8")).split("\n").filter(line => line.startsWith("mv\t")).map(line => line.slice(3))
+      expect(moveDestinations).toEqual([interrupted.layout.launcherPath, interrupted.layout.cliPath, interrupted.layout.manifestPath])
+      expect(await interrupted.temporaryFiles()).toEqual([])
+
+      const corrupted = await installerFixture(); fixtures.push(corrupted)
+      await writeFile(corrupted.layout.uploadPath, Buffer.from("wrong staged bytes"))
+      const corruptedResult = await corrupted.run()
+      expect(corruptedResult.exitCode).not.toBe(0)
+      await expect(readFile(corrupted.layout.cliPath)).rejects.toBeDefined()
+      await expect(readFile(corrupted.layout.manifestPath)).rejects.toBeDefined()
+      expect(await corrupted.temporaryFiles()).toEqual([])
+
+      const allocation = await installerFixture(); fixtures.push(allocation)
+      await writeFile(allocation.layout.uploadPath, artifact.bytes)
+      const allocationResult = await allocation.run({ WB_FAIL_MKTEMP_PATTERN: "/.waterbox.XXXXXX" })
+      expect(allocationResult.exitCode).not.toBe(0)
+      expect(await allocation.temporaryFiles()).toEqual([])
+
+      const concurrent = await installerFixture(); fixtures.push(concurrent)
+      await writeFile(concurrent.layout.uploadPath, artifact.bytes)
+      await Promise.all([
+        mkdir(concurrent.layout.libraryDirectory, { recursive: true }), mkdir(concurrent.layout.binaryDirectory, { recursive: true }),
+        mkdir(concurrent.layout.workspaceDirectory, { recursive: true }), mkdir(concurrent.layout.jobsDirectory, { recursive: true }),
+      ])
+      const concurrentResults = await Promise.all([concurrent.run(), concurrent.run()])
+      expect(concurrentResults.map(item => ({ exitCode: item.exitCode, stderr: item.stderr }))).toEqual([{ exitCode: 0, stderr: "" }, { exitCode: 0, stderr: "" }])
+      expect(createHash("sha256").update(await readFile(concurrent.layout.cliPath)).digest("hex")).toBe(artifact.sha256)
+      expect(await readFile(concurrent.layout.launcherPath, "utf8")).toBe(__testing.LAUNCHER)
+      expect(await readFile(concurrent.layout.manifestPath, "utf8")).toBe(__testing.manifest(artifact))
+      expect(await concurrent.temporaryFiles()).toEqual([])
+    } finally {
+      await Promise.all(fixtures.map(fixture => rm(fixture.root, { recursive: true, force: true })))
+    }
+  })
+
+  test("restart after a completed or response-lost preparation verifies first and performs no upload or install", async () => {
+    const { provider, seen } = harness(() => commandResponse("waterbox-bootstrap-ok\n"))
+    await prepare(provider)
+    await prepare(provider)
+    expect(seen.filter(item => item.url.endsWith("/files"))).toHaveLength(0)
+    expect(seen.filter(item => item.url.endsWith("/commands"))).toHaveLength(2)
+    expect(seen.some(item => (item.body as any)?.command === __testing.installCommand(artifact))).toBe(false)
+  })
+
+  test("leaves a lost upload or install response ambiguous and lets a replay begin with verification", async () => {
+    let phase: "upload" | "install" = "upload"; let installed = false; let uploads = 0; let installs = 0
+    const { provider, seen } = harness((request, requests) => {
+      if (request.url.endsWith("/files")) { uploads++; if (phase === "upload") throw new TypeError("lost response"); return uploadResponse(requests.at(-1)?.body) }
+      const command = (requests.at(-1)?.body as { command: string }).command
+      if (command === __testing.verifyCommand(artifact)) return commandResponse(`${installed ? "waterbox-bootstrap-ok" : "waterbox-bootstrap-incomplete"}\n`)
+      installs++; if (phase === "install") throw new TypeError("lost response"); installed = true; return commandResponse("waterbox-bootstrap-installed\n")
+    })
+    await expect(prepare(provider)).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(uploads).toBe(1)
+    phase = "install"
+    await expect(prepare(provider)).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(installs).toBe(1)
+    installed = true
+    await expect(prepare(provider)).resolves.toEqual({ state: "running", providerRef: sandboxRef })
+    expect(seen.filter(item => item.url.endsWith("/files"))).toHaveLength(2)
+  })
+
+  test("concurrent preparations converge through identical atomic installers", async () => {
+    let installed = false; let installs = 0; let releaseInstalls!: () => void
+    const bothStaged = new Promise<void>(resolve => { releaseInstalls = resolve })
+    const { provider } = harness(async (request, requests) => {
+      if (request.url.endsWith("/files")) return uploadResponse(requests.at(-1)?.body)
+      const command = (requests.at(-1)?.body as { command: string }).command
+      if (command === __testing.verifyCommand(artifact)) return commandResponse(`${installed ? "waterbox-bootstrap-ok" : "waterbox-bootstrap-incomplete"}\n`)
+      if (++installs === 2) releaseInstalls()
+      await bothStaged
+      installed = true
+      return commandResponse("waterbox-bootstrap-installed\n")
+    })
+    await expect(Promise.all([prepare(provider), prepare(provider)])).resolves.toHaveLength(2)
+    expect(installs).toBe(2)
+    const installer = __testing.installCommand(artifact)
+    expect(installer).toContain("mktemp '/usr/local/lib/.waterbox-cli.")
+    expect(installer.indexOf(__testing.nodeSha256("$cli", true))).toBeLessThan(installer.indexOf('mv -f "$cli"'))
+    expect(installer.indexOf('mv -f "$cli"')).toBeLessThan(installer.indexOf('mv -f "$manifest"'))
+  })
+
+  test("rejects wrong upload path, size, and encoding before installation", async () => {
+    for (const override of [{ path: "/tmp/wrong" }, { size: artifact.bytes.byteLength + 1 }, { encoding: "utf8" }]) {
+      let uploads = 0
+      const { provider, seen } = harness((request, requests) => {
+        if (!request.url.endsWith("/files")) return commandResponse("waterbox-bootstrap-incomplete\n")
+        uploads++
+        const body = requests.at(-1)?.body as { path: string }
+        return Response.json({ ok: true, type: "file.written", success: true, path: body.path, encoding: "base64", size: artifact.bytes.byteLength, ...override })
+      })
+      await expect(prepare(provider)).rejects.toMatchObject({ kind: "failure" })
+      expect(uploads).toBe(1)
+      expect(seen.filter(item => (item.body as any)?.command === __testing.installCommand(artifact))).toHaveLength(0)
+    }
+  })
+
+  test("keeps a lost upload response ambiguous without retrying", async () => {
+    const { provider, seen } = harness((request) => request.url.endsWith("/files") ? Promise.reject(new TypeError("box-secret-key bx_23456789 /tmp/private")) : commandResponse("waterbox-bootstrap-incomplete\n"))
+    let error: unknown
+    try { await prepare(provider) } catch (caught) { error = caught }
+    expect(error).toMatchObject({ kind: "ambiguous_execution" })
+    const uploads = seen.filter(item => item.url.endsWith("/files"))
+    expect(uploads).toHaveLength(1)
+    const serialized = JSON.stringify(error) + String(error)
+    for (const secret of ["box-secret-key", "bx_23456789", "/tmp/", Buffer.from(artifact.bytes).toString("base64")]) expect(serialized).not.toContain(secret)
+  })
+
+  test("classifies malformed verification, command timeout metadata, and cancellation safely without mutation", async () => {
+    for (const response of [Response.json({ private: "raw-response" }), commandResponse("waterbox-bootstrap-ok\n", { timedOut: true })]) {
+      const { provider, seen } = harness(() => response)
+      let error: unknown
+      try { await prepare(provider) } catch (caught) { error = caught }
+      expect(error).toMatchObject({ kind: "ambiguous_execution" })
+      expect(seen).toHaveLength(1)
+      const serialized = JSON.stringify(error) + String(error)
+      expect(serialized).not.toContain("raw-response")
+    }
+
+    const controller = new AbortController()
+    const reason = new DOMException("cancelled", "AbortError")
+    const pending = prepare(harness((request, requests) => {
+      if (request.url.endsWith("/files")) return uploadResponse(requests.at(-1)?.body)
+      return new Promise<Response>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }))
+    }).provider, controller.signal)
+    await new Promise(resolve => setTimeout(resolve, 1)); controller.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+  })
+
+  test("actual verification request timeout aborts transport and remains mutation-free", async () => {
+    let aborted = false
+    const { provider, seen } = harness(request => new Promise<Response>((_resolve, reject) => request.signal.addEventListener("abort", () => { aborted = true; reject(request.signal.reason) }, { once: true })), { intervalMs: 1, timeoutMs: 5 })
+    await expect(prepare(provider)).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(aborted).toBe(true)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.url.endsWith("/commands")).toBe(true)
+  })
+
+  test("independently rejects health, version, Node 24, and ripgrep verification failures", async () => {
+    for (const fact of ["health", "version", "node", "rg"]) {
+      const { provider, seen } = harness(() => commandResponse(`waterbox-bootstrap-failed-${fact}\n`))
+      await expect(prepare(provider), fact).rejects.toMatchObject({ kind: "failure", message: "Box runtime preparation failed" })
+      expect(seen).toHaveLength(1)
+      const verification = (seen.at(-1)?.body as { command: string }).command
+      expect(verification).toBe(__testing.verifyCommand(artifact))
+      expect(verification).toContain(__testing.verificationChecks(artifact)[fact as "health" | "version" | "node" | "rg"])
+    }
+  })
+
+  test("repairs an installed digest mismatch and rejects a staged digest mismatch before publishing", async () => {
+    let verification = 0
+    const repaired = harness((request, requests) => {
+      if (request.url.endsWith("/files")) return uploadResponse(requests.at(-1)?.body)
+      const command = (requests.at(-1)?.body as { command: string }).command
+      if (command === __testing.verifyCommand(artifact)) return commandResponse(`${++verification === 1 ? "waterbox-bootstrap-incomplete" : "waterbox-bootstrap-ok"}\n`)
+      return commandResponse("waterbox-bootstrap-installed\n")
+    })
+    await prepare(repaired.provider)
+    expect(repaired.seen.some(item => item.url.endsWith("/files"))).toBe(true)
+    expect(__testing.verifyCommand(artifact)).toContain(__testing.verificationChecks(artifact).installedDigest)
+
+    const staged = harness((request, requests) => {
+      if (request.url.endsWith("/files")) return uploadResponse(requests.at(-1)?.body)
+      const command = (requests.at(-1)?.body as { command: string }).command
+      return command === __testing.verifyCommand(artifact) ? commandResponse("waterbox-bootstrap-incomplete\n") : commandResponse("", { success: false, exitCode: 1 })
+    })
+    await expect(prepare(staged.provider)).rejects.toMatchObject({ kind: "failure" })
+    const installer = __testing.installCommand(artifact)
+    expect(installer.indexOf(__testing.nodeSha256("$cli", true))).toBeLessThan(installer.indexOf('mv -f "$cli"'))
+    expect(staged.seen.filter(item => (item.body as any)?.command === __testing.verifyCommand(artifact))).toHaveLength(1)
+  })
+
+  test("requires exact final reconciliation after interrupted installation", async () => {
+    let verifies = 0
+    const { provider } = harness((request, requests) => {
+      if (request.url.endsWith("/files")) return uploadResponse(requests.at(-1)?.body)
+      const command = (requests.at(-1)?.body as { command: string }).command
+      if (command === __testing.verifyCommand(artifact)) return commandResponse(++verifies === 1 ? "waterbox-bootstrap-incomplete\n" : "waterbox-bootstrap-ok-extra\n")
+      return commandResponse("waterbox-bootstrap-installed\n")
+    })
+    await expect(prepare(provider)).rejects.toMatchObject({ kind: "ambiguous_execution" })
+  })
+
+  test("rejects altered artifact metadata, bytes, protocol, and ambient non-file locations", async () => {
+    const base = { apiBaseUrl: "https://api.box.test", apiKey: "key", polling: { intervalMs: 1, timeoutMs: 2 } }
+    const clock = new FakeClock()
+    for (const invalid of [
+      { ...artifact, sha256: "0".repeat(64) }, { ...artifact, bytes: new Uint8Array() }, { ...artifact, cliProtocolVersion: 1 }, { ...artifact, artifactVersion: " " }, { ...artifact, extra: true },
+    ]) expect(() => new BoxSandboxProvider(base, { clock, artifact: invalid as never })).toThrow("Box runtime artifact is invalid")
+    await expect(loadSandboxRuntimeArtifact(new URL("https://example.test/private-cli.js"), "0.1.0")).rejects.toThrow("Box runtime artifact location is invalid")
+  })
+})
+
 describe("Box provider canonical daemon transport and conformance", () => {
   const resultByTool: Record<Exclude<ToolName, "bash">, unknown> = {
     read: { type: "result", title: "Read", output: "x", metadata: { filePath: "x", offset: 1 } },
@@ -500,20 +872,20 @@ describe("Phase E guardian corrections", () => {
   })
 
   test("strictly rejects hostile configuration, DTOs, identities, URLs, and opaque references with safe errors", async () => {
-    const base = { apiBaseUrl: "https://api.box.test", apiKey: "box-secret-key", systemTemplateRef: "template-secret-ref", polling: { intervalMs: 10, timeoutMs: 100 } }
+    const base = { apiBaseUrl: "https://api.box.test", apiKey: "box-secret-key", polling: { intervalMs: 10, timeoutMs: 100 } }
     const clock = new FakeClock()
     const invalid = [
       { ...base, apiBaseUrl: "ftp://box-secret-key@example.test" }, { ...base, apiBaseUrl: "http://example.test" }, { ...base, apiBaseUrl: "https://user:pass@example.test" },
       { ...base, apiBaseUrl: "https://example.test?token=box-secret-key" }, { ...base, apiBaseUrl: " https://example.test" },
-      { ...base, apiKey: " " }, { ...base, systemTemplateRef: " template " },
+      { ...base, apiKey: " " },
       { ...base, polling: { intervalMs: 0, timeoutMs: 100 } }, { ...base, polling: { intervalMs: 100, timeoutMs: 10 } },
       { ...base, extra: true }, { ...base, polling: { intervalMs: 10, timeoutMs: 100, extra: true } },
     ]
-    for (const config of invalid) expect(() => new BoxSandboxProvider(config, { clock })).toThrow("Box provider configuration is invalid")
-    expect(() => new BoxSandboxProvider(base, { clock, fetch: 1 as never })).toThrow("Box provider dependencies are invalid")
-    expect(() => new BoxSandboxProvider(base, { clock, extra: true } as never)).toThrow("Box provider dependencies are invalid")
+    for (const config of invalid) expect(() => new BoxSandboxProvider(config, { clock, artifact })).toThrow("Box provider configuration is invalid")
+    expect(() => new BoxSandboxProvider(base, { clock, artifact, fetch: 1 as never })).toThrow("Box provider dependencies are invalid")
+    expect(() => new BoxSandboxProvider(base, { clock, artifact, extra: true } as never)).toThrow("Box provider dependencies are invalid")
     const serialized: string[] = []
-    for (const config of invalid) { try { new BoxSandboxProvider(config, { clock }) } catch (error) { serialized.push(JSON.stringify(error) + String(error)) } }
+    for (const config of invalid) { try { new BoxSandboxProvider(config, { clock, artifact }) } catch (error) { serialized.push(JSON.stringify(error) + String(error)) } }
     expect(serialized.join(" ")).not.toContain("box-secret-key")
 
     const invalidRefs: import("@waterbox/core/records").JsonValue[] = [
@@ -536,7 +908,7 @@ describe("Phase E guardian corrections", () => {
     const changingClock = new FakeClock()
     let clockCalls = 0
     const badClock = { now: () => ++clockCalls === 1 ? new Date(0) : new Date(Number.NaN), sleep: changingClock.sleep.bind(changingClock) }
-    const invalidRuntimeClock = new BoxSandboxProvider(base, { clock: badClock, fetch: async () => Response.json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 3600, box: { id: "bx_23456789", state: "provisioning" } }, { status: 202 }) })
+    const invalidRuntimeClock = new BoxSandboxProvider(base, { clock: badClock, artifact, fetch: async () => Response.json({ ok: true, type: "box.created", status: "provisioning", ttlSeconds: 3600, box: { id: "bx_23456789", state: "provisioning" } }, { status: 202 }) })
     await expect(invalidRuntimeClock.createSandbox({ accountId: "a", sandboxId: "sbx_calm-cactus-7k3m", idempotencyKey: "key", signal: signal() })).rejects.toMatchObject({ kind: "failure", message: "Box provider clock is invalid" })
   })
 

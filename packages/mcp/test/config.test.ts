@@ -9,7 +9,6 @@ describe("Waterbox MCP configuration", () => {
         config: {
           apiBaseUrl: "https://ascii.dev/api/box/v1",
           apiKey: "secret",
-          systemTemplateRef: "waterbox-system-v6",
           polling: { intervalMs: 1_000, timeoutMs: 120_000 },
         },
       },

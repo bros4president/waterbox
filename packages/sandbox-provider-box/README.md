@@ -5,9 +5,14 @@ Lifecycle and snapshots use first-class Box endpoints. Tool execution invokes th
 one-shot Waterbox CLI through `POST /boxes/{id}/commands`; no hosted daemon or protected
 URL is used or persisted.
 
-Configuration supplies the API base URL, API key, V2 system-template reference, polling
-policy, clock, and `fetch`. User Boxes are `noEnv` and receive only a non-secret sandbox
-tag. Opaque V2 references contain the Box ID only; legacy daemon references are rejected.
+Configuration supplies the API base URL, API key, polling policy, clock, and an immutable
+Node CLI artifact. Fresh Boxes are `noEnv` and omit `from`; snapshot-sourced Boxes use only
+the user snapshot reference. After readiness, preparation verifies an existing manifest,
+installed artifact digest, CLI health/version, Node 24, and ripgrep before mutating anything.
+An incomplete runtime receives a deterministic artifact upload and a root-owned staged,
+digest-checked atomic installation. The launcher and CLI are published before the manifest,
+which is always the final completion marker. Opaque V2 references contain the Box ID only;
+legacy daemon references are rejected.
 
 Canonical tool arguments are encoded as a bounded, versioned base64url envelope and sent
 as one `waterbox run` argument. Commands are never retried. Lost responses, Box 5xx,

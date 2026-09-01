@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress; Phases 1 and 2 implemented and locally verified, with Node 24.15.0 verification pending
+Status: implementation in progress; Node 24.15.0, Phase 3, and the fresh Phase 4 flow are verified. Snapshot-sourced reinstall and remaining Phase 0 live prerequisites are pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -61,19 +61,19 @@ The launch command installs configuration. It does not silently choose a provide
 - The local MCP runtime is Node.js 24.
 - The in-sandbox one-shot CLI runtime is Node.js 24.
 - The minimum supported Node version is `24.15.0`, where `node:sqlite` is release-candidate quality.
-- CI and release builds test the latest available Node 24 LTS patch in addition to the declared minimum where practical.
+- CI and release builds should test a current Node 24 patch in addition to the declared minimum where practical.
 - Bun may remain repository-only build or test tooling temporarily. Bun is not required by npm consumers or created Boxes.
 - The local repository uses `node:sqlite`; no native npm SQLite addon is introduced.
 - The Box base image's documented Node 24 and ripgrep installations are used instead of downloading Bun or installing packages with apt.
 
 ### Sandbox Provisioning
 
-- One public `create_sandbox` action covers provider allocation and Waterbox runtime bootstrap.
-- The public sandbox remains `provisioning` until allocation, bootstrap, and health verification complete.
+- One public `create_sandbox` action covers the existing provider create operation followed by Waterbox runtime preparation.
+- The public sandbox is `provisioning` while provider creation runs, `preparing` after the provider resource is known while Waterbox installs, and `running` only after health verification succeeds.
 - Fresh Box creation omits `from` and does not require a named system snapshot.
 - Creation from a Waterbox user snapshot uses that snapshot as the Box source, then installs the current Waterbox runtime over any inherited version.
 - Stop and resume preserve the installed runtime according to Box's documented filesystem behavior. Resume does not automatically upgrade an existing sandbox in V0.
-- A future provider may use a different bootstrap mechanism, but core must preserve the same accepted-resource durability boundary.
+- Every supported provider implements preparation. A future provider may use a different preparation mechanism, but provider readiness alone must never make a sandbox usable.
 
 ### Safety And Release
 
@@ -123,8 +123,8 @@ waterbox Node 24 bundle
             +-- provider-neutral core
             +-- selected provider
                     |
-                    +-- allocate provider sandbox
-                    +-- persist provider reference
+                    +-- create provider sandbox normally
+                    +-- persist returned provider reference as preparing
                     +-- install current one-shot CLI
                     +-- verify runtime
                     +-- expose canonical tools
@@ -324,9 +324,9 @@ Release CI must not silently advance the declared major. A future Node-major cha
 ```text
 reserve idempotency key
 create Waterbox provisioning record
-allocate provider resource
-persist provider reference
-prepare provider resource
+run the existing provider create operation
+persist its returned provider reference as preparing
+run mandatory provider preparation
 verify Waterbox runtime
 mark running
 complete idempotency record
@@ -337,11 +337,11 @@ The caller does not see a separate bootstrap resource or action.
 
 ### Provider Contract
 
-The provider contract must expose the allocation persistence boundary explicitly. The intended shape is conceptually:
+The existing provider create operation remains the creation reliability boundary. Every supported provider exposes a cohesive preparation operation:
 
 ```ts
 interface SandboxProvider {
-  allocateSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation>
+  createSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation>
   prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
@@ -351,13 +351,12 @@ interface SandboxProvider {
 
 Exact names may follow repository conventions, but these semantics are mandatory:
 
-- Allocation returns a valid opaque provider reference as soon as the provider accepts ownership of a resource.
-- Core persists that reference before provider preparation begins.
+- `createSandbox` retains its current provider-specific behavior and reliability. This phase does not split allocation from readiness or add create replay, list-diff reconciliation, or stronger provider acceptance guarantees.
+- When `createSandbox` returns, core persists its opaque provider reference and transitions the Waterbox record to `preparing` before calling preparation.
 - Preparation is safe to call again for the same resource and desired artifact version.
-- A provider that needs no preparation implements a no-op or immediately verified preparation step.
+- A provider without preparation is not supported; core has no compatibility branch that bypasses `preparing`.
 - Core remains independent of Box artifact paths and installation commands.
-
-Do not hide allocation and bootstrap inside one provider promise that returns the provider reference only after installation. That reintroduces untracked-resource failure.
+- Provider live status cannot promote a `preparing` Waterbox record to `running`; only successful preparation and Waterbox health verification can do that.
 
 ### Core Durability
 
@@ -365,31 +364,30 @@ Core must support these records during creation:
 
 ```text
 providerRef = null, state = provisioning
-providerRef = <opaque>, state = provisioning
+providerRef = <opaque>, state = preparing
 providerRef = <opaque>, state = running
 providerRef = <opaque>, state = failed
 ```
 
 Rules:
 
+- Existing provider-create failure and ambiguity behavior remains unchanged, including the interval before its result is persisted.
 - A provider reference is never cleared after it has been persisted.
-- Cancellation before provider acceptance may fail the operation normally.
-- Cancellation after provider acceptance preserves the provisioning record and in-progress idempotency reservation.
-- Reusing the same public idempotency key resumes allocation or preparation against the same Waterbox sandbox ID.
-- If `providerRef` is null, allocation may use the same deterministic provider idempotency key and exact request to reconcile acceptance.
-- If `providerRef` is present, allocation is not repeated; preparation resumes from that resource.
+- Cancellation or process loss after the `preparing` checkpoint preserves the record and in-progress idempotency reservation.
+- Reusing the same public idempotency key resumes only a `preparing` record with a persisted provider reference; it does not introduce a new provider-create retry path.
 - A definite preparation failure stores a failed sandbox with its provider reference and a safe public error.
-- A failed or provisioning sandbox with a provider reference remains deletable.
-- Ordinary post-acceptance failure must surface the public sandbox record or a stable public sandbox ID so the caller can recover or delete it.
-- A transport cancellation can prevent a response; same-key replay is the recovery path.
+- A failed or preparing sandbox with a provider reference remains deletable.
+- Ordinary post-checkpoint failure must surface the public sandbox record or stable public sandbox ID so the caller can recover or delete it.
+- A transport cancellation after the checkpoint can prevent a response; same-key replay is the preparation recovery path.
+- Tool execution, secure transfer, and snapshot creation require `running`; lifecycle actions retain their existing state guards, and `preparing` is observable and deletable but not otherwise usable.
+- `probe_sandbox` may inspect the provider while the record is `preparing`, but a provider-ready observation leaves the public state `preparing` until preparation succeeds.
 
-The existing behavior that returns `idempotency_in_progress` forever for every provisioning record must change. Same-key replay must actively resume recoverable creation while preventing duplicate concurrent work.
+The existing behavior that returns `idempotency_in_progress` forever for every in-progress record changes only for `preparing`: same-key replay resumes preparation. A `provisioning` record with no provider reference keeps the existing create semantics and is not automatically replayed by this launch work.
 
 ### Concurrency
 
 V0 Direct MCP is one local process, but correctness must not rely only on a process-local flag:
 
-- Exact provider allocation replay must preserve one provider resource.
 - Preparation must be intrinsically idempotent for the same artifact digest.
 - Compare-and-swap updates preserve one authoritative Waterbox record.
 - A process-local single-flight may reduce duplicate preparation but is not the correctness boundary.
@@ -435,7 +433,7 @@ Snapshot-sourced Box request:
 }
 ```
 
-Both requests use the existing deterministic provider idempotency key. The Box account API key is never injected into the Box.
+The request retains the existing Box create behavior. This plan does not depend on provider-side idempotency, automatic create replay, or before/after list correlation. The Box account API key is never injected into the Box.
 
 ### Artifact
 
@@ -461,8 +459,8 @@ After Box readiness:
 1. Upload the bundle as Base64 to a deterministic path under `/tmp` containing or associated with the expected digest.
 2. Validate the correlated Box `file.written` response and exact byte count.
 3. Run an idempotent installation command with a bounded timeout.
-4. Check the uploaded SHA-256 before installation.
-5. Install the bundle atomically as `/usr/local/lib/waterbox-cli.js`.
+4. Copy the upload into a root-owned mode-`0600` staging file and check that exact staged file's SHA-256 with the documented Node runtime.
+5. Publish the verified staged bundle atomically as `/usr/local/lib/waterbox-cli.js`.
 6. Install the launcher atomically as `/usr/local/bin/waterbox` with mode `0755`.
 7. Create `/workspace` with the intended user ownership.
 8. Create `/run/waterbox/bash-jobs` with mode `0700`.
@@ -497,18 +495,18 @@ The bootstrap manifest contains only non-secret compatibility facts:
 }
 ```
 
-The manifest is the read-only reconciliation signal after an ambiguous installation response. It is not a provider credential or Waterbox repository record.
+The manifest is the read-only completion signal after an ambiguous installation response. Reconciliation also hashes `/usr/local/lib/waterbox-cli.js` and requires the installed bytes to match `artifactSha256`; the manifest alone is not an integrity proof. It is not a provider credential or Waterbox repository record.
 
 ### Ambiguity
 
 Bootstrap has a distinct retry policy from user commands:
 
-- Lost keyed Box allocation is reconciled by exact same-key, same-body replay.
+- Provider-create ambiguity retains the current behavior and is not retried or reconciled by bootstrap logic.
 - Lost artifact upload may repeat the exact write to the same deterministic temporary path or verify the path before repeating.
 - Lost installation response triggers read-only manifest and health verification first.
 - If verification proves the desired digest and protocol, preparation succeeds.
 - If verification proves an incomplete installation, the explicitly idempotent installer may run again.
-- If verification remains uncertain, the sandbox remains provisioning with its provider reference.
+- If verification remains uncertain, the sandbox remains `preparing` with its provider reference.
 - User tool commands remain one-shot and are never retried by this bootstrap policy.
 
 ### Forks, Snapshots, And Resume
@@ -523,26 +521,26 @@ Bootstrap has a distinct retry policy from user commands:
 
 ## Error, Cancellation, And Cleanup Semantics
 
-### Before Provider Acceptance
+### Before Provider Create Returns
 
 - Validation, provider selection, credential, ownership, limit, and definite create rejection errors may fail normally.
-- No provider reference is persisted unless a provider resource identity was positively correlated.
-- Exact keyed create replay remains allowed only for documented ambiguous acceptance cases.
+- No new create retry or list-reconciliation behavior is introduced.
+- Provider-create rejection, ambiguity, cancellation, and result-persistence gaps retain the current semantics.
 
-### After Provider Acceptance
+### After The Preparing Checkpoint
 
-- Persist the provider reference before waiting for readiness or installing files.
-- Never convert an accepted resource back to `providerRef: null`.
-- Cancellation preserves recoverable provisioning state.
+- The provider create operation has returned, and core has persisted its provider reference before uploading or installing files.
+- Never convert a preparing resource back to `providerRef: null`.
+- Cancellation preserves recoverable `preparing` state.
 - Definite bootstrap failure stores failed state and a safe error while preserving deletion capability.
-- Unresolved bootstrap ambiguity preserves provisioning state and in-progress idempotency.
+- Unresolved bootstrap ambiguity preserves `preparing` state and in-progress idempotency.
 - A failed response must not expose Box IDs, API keys, commands, response bodies, request IDs, or temporary paths.
 
 ### Deletion
 
-Deletion must support provisioning and failed sandboxes when a provider reference exists. It uses the existing provider-specific permanent-deletion confirmation and bounded reconciliation behavior.
+Deletion must support preparing and failed sandboxes when a provider reference exists. It uses the existing provider-specific permanent-deletion confirmation and bounded reconciliation behavior.
 
-Waterbox does not silently delete an accepted Box merely because bootstrap failed. The public Waterbox resource remains the ownership and recovery handle unless a separately designed cleanup action is explicitly requested.
+Waterbox does not silently delete a created Box merely because preparation failed. The public Waterbox resource remains the ownership and recovery handle unless a separately designed cleanup action is explicitly requested.
 
 ## Licensing And Notices
 
@@ -637,7 +635,7 @@ After npm launch, registry publication gets a separate plan or an appended phase
 
 ### Phase 0: Baseline And Capability Gate
 
-Status: pending
+Status: partially verified live; stop/resume and snapshot overwrite remain pending
 
 Scope:
 
@@ -655,7 +653,7 @@ The live probe verifies only launch prerequisites:
 - Upload of a current CLI-sized artifact.
 - `systemd-run` and `systemctl` behavior required by secure-transfer expiry.
 - Stop/resume persistence of installed Waterbox files.
-- Snapshot-sourced creation followed by runtime overwrite.
+- Snapshot-sourced creation from a stopped sandbox followed by runtime overwrite.
 - Permanent cleanup and exact baseline reconciliation.
 
 Acceptance criteria:
@@ -680,7 +678,7 @@ The actual live command is defined by the probe implementation and is not author
 
 ### Phase 1: Node-Compatible Shared Persistence
 
-Status: implemented locally; Node 24.15.0 verification pending; depends on Phase 0 credential-free baseline
+Status: implemented and verified on Node 24.15.0; depends on Phase 0 credential-free baseline
 
 Scope:
 
@@ -708,7 +706,7 @@ Also run focused Node 24 repository compatibility checks added by this phase.
 
 ### Phase 2: Node MCP And One-Shot CLI
 
-Status: implemented locally; Node 24.15.0 and latest Node 24 CI verification pending; depends on Phase 1
+Status: implemented and verified on Node 24.15.0; current Node 24 CI verification remains pending; depends on Phase 1
 
 Scope:
 
@@ -739,42 +737,43 @@ node --check packages/mcp/dist/waterbox-cli.js
 git diff --check
 ```
 
-Run the generated artifacts under the declared Node minimum and latest Node 24 LTS patch in CI.
+Run the generated artifacts under the declared Node minimum and a current Node 24 patch in CI.
 
-### Phase 3: Durable Provider Preparation
+### Phase 3: Durable Preparing Checkpoint
 
-Status: pending; depends on Phases 0 and 2
+Status: credential-free implementation verified; depends on Phases 0 and 2
 
 Scope:
 
-- Split provider allocation from preparation.
-- Persist accepted provider references before bootstrap.
-- Resume same-key provisioning safely.
+- Add `preparing` to the shared sandbox state contract and persisted lifecycle between normal provider creation and `running`.
+- Keep the existing provider create operation and its reliability semantics unchanged.
+- Persist the provider reference returned by create before invoking mandatory preparation.
+- Resume same-key preparation safely without adding provider-create replay.
 - Preserve recovery and deletion for failed or ambiguous preparation.
 
 Acceptance criteria:
 
-- Core stores the Box identity before any file upload or installation command.
-- Same-key replay resumes null-reference allocation or referenced preparation correctly.
-- Definite post-acceptance failure preserves a public failed resource and provider reference.
-- Unresolved ambiguity preserves provisioning and in-progress idempotency.
-- Every ordinary post-acceptance failed or unresolved create response gives the caller the public sandbox record or stable public sandbox ID required by `probe_sandbox` and `delete_sandbox`; focused MCP tests prove the recovery handle is usable.
-- Provisioning and failed resources with provider references are deletable.
-- Concurrent preparation converges without duplicate provider resources or corrupt installation.
+- Provider creation still runs through the existing `createSandbox` method; no allocation/readiness split, automatic create replay, or list reconciliation is added.
+- Core stores the Box identity and commits `preparing` before any file upload or installation command.
+- Provider readiness alone cannot transition a sandbox to `running`.
+- Tools, secure transfer, lifecycle mutations, and snapshot creation reject `preparing`; probe and deletion remain available.
+- Same-key replay resumes only persisted `preparing` work and never repeats provider create from a null-reference `provisioning` record.
+- Definite post-checkpoint failure preserves a public failed resource and provider reference.
+- Unresolved preparation ambiguity preserves `preparing` and in-progress idempotency.
+- Every ordinary post-checkpoint failed or unresolved response gives the caller the public sandbox record or stable public sandbox ID required by `probe_sandbox` and `delete_sandbox`; focused MCP tests prove the recovery handle is usable.
+- Preparing and failed resources with provider references are deletable.
+- Concurrent preparation converges without corrupt installation.
 - Existing no-retry semantics for user operations remain unchanged.
 - Provider-neutral tests use simple fakes; Box-specific paths do not leak into core.
 
 Required fault points include:
 
-- Before provider acceptance.
-- Accepted response lost.
-- After provider reference persistence.
-- During readiness wait.
-- Artifact upload response lost.
-- Installation response lost before and after completion.
-- Health verification failure.
-- Cancellation at every boundary.
-- Process reconstruction from SQLite followed by same-key replay.
+- Existing provider-create rejection and ambiguity behavior remains unchanged.
+- Provider create succeeds but persistence of its result fails, proving no stronger guarantee is claimed.
+- After the `preparing` checkpoint but before preparation starts.
+- Preparation cancellation and definite failure through injected provider-neutral fakes.
+- Process reconstruction from SQLite followed by same-key preparation resume.
+- Provider inspection while `preparing`, proving provider live readiness cannot bypass preparation.
 
 Verification:
 
@@ -788,23 +787,25 @@ No live Box call is required for the credential-free completion of this phase.
 
 ### Phase 4: Box Bootstrap-On-Create
 
-Status: pending; depends on successful live Phase 0 calibration and Phase 3
+Status: fresh live flow passed; snapshot-sourced reinstall failed during install and full live acceptance remains pending; depends on Phase 3
 
 Scope:
 
 - Remove Box's system-template source from fresh creation.
 - Inject the packaged Node CLI artifact into the Box provider.
-- Upload, install, manifest, verify, and reconcile the artifact.
+- Replace Box's Phase 3 deterministic preparation with artifact upload, install, manifest, verification, and reconciliation.
 - Re-bootstrap snapshot-sourced Boxes.
 
 Acceptance criteria:
 
 - Fresh create omits `from`.
 - Snapshot create uses only the user snapshot reference.
+- Box's existing create operation still waits for provider readiness and returns its reference before preparation starts.
 - No `BOX_SYSTEM_TEMPLATE_REF` configuration remains in supported MCP or local API composition.
 - No Bun download, apt command, or ripgrep installation occurs.
 - Installation is deterministic, bounded, idempotent, and secret-free.
 - Manifest and health verification reconcile ambiguous installation responses.
+- Artifact upload loss, installation response loss before and after completion, health failure, cancellation, and same-key restart from `preparing` have focused coverage.
 - Box provider diagnostics contain no artifact bytes, credentials, provider IDs, commands, or raw response bodies.
 - Secure transfer and async Bash work on a plain Box.
 - Stop/resume and user-snapshot restore retain user data and restore Waterbox operation.
@@ -818,7 +819,7 @@ bun run build:mcp
 git diff --check
 ```
 
-Then run one separately authorized isolated-account live Direct MCP smoke covering fresh creation, all tools, secure transfer, quick and dispatched Bash, stop/resume behavior where exposed, snapshot creation, snapshot-sourced creation, current-runtime overwrite, deletion, and exact baseline reconciliation.
+Then run separately authorized isolated-account live checks for the remaining stop/resume and snapshot-sourced reinstall gates. Snapshot-sourced creation from a stopped sandbox must reinstall the current runtime before Phase 4 receives full live acceptance.
 
 ### Phase 5: Package, License, And Documentation
 
@@ -875,7 +876,7 @@ Pull-request CI gates:
 - Full tests and typecheck.
 - MCP and CLI Node builds.
 - Static Bun-reference rejection in release artifacts.
-- Node minimum and latest-LTS artifact tests.
+- Node minimum and current-Node-24 artifact tests.
 - Package dry-run and installed-tarball test.
 - License/notice closure check.
 - `publint` and metadata validation.
@@ -920,7 +921,7 @@ Release candidate gates:
 2. Full CI green.
 3. Packed tarball reviewed and checksum recorded in release evidence.
 4. No secrets or local state in tarball.
-5. Node minimum and latest Node 24 launch pass with Bun absent.
+5. Node minimum and current Node 24 launch pass with Bun absent.
 6. Unconfigured MCP connects and returns provider-neutral setup guidance.
 7. Configured isolated-account Box smoke passes and returns to exact baseline.
 8. The pinned certified `add-mcp` version generates correct `waterbox` configurations for representative clients in temporary homes; the unversioned user command is checked once as a release observation and its resolved version is recorded.
@@ -1026,7 +1027,7 @@ Do not delete system-template machinery until the plain-Box bootstrap live gate 
 | MCP | stdio handshake, tool listing, setup guidance, cancellation, diagnostics redaction |
 | Unconfigured safety | Absent/unknown/incomplete provider returns guidance before local file, SQLite, artifact, or provider I/O |
 | CLI | health, version, all tools, secure transfer, quick and dispatched Bash |
-| Core | accepted-reference persistence, same-key resume, concurrency, failure recovery |
+| Core | preparing checkpoint, same-key preparation resume, readiness gating, concurrency, failure recovery |
 | Box adapter | exact request bodies, deterministic upload, idempotent install, ambiguity reconciliation |
 | Packaging | clean tarball install, npm bin symlink, Node-only runtime, file allowlist |
 | Reproducibility | two clean packs have identical content hashes; the selected tested `.tgz` is the published artifact |
@@ -1060,16 +1061,16 @@ Live tests require explicit isolated-account authorization and must prove:
 
 ## Launch Checklist
 
-- [ ] Phase 0 baseline recorded.
-- [ ] Plain Box Node/rg/bootstrap capability calibrated live.
+- [ ] Phase 0 baseline fully recorded.
+- [ ] Plain Box stop/resume and snapshot-overwrite capability calibrated live.
 - [x] Shared SQLite migrated to Node.
 - [x] Local MCP runs on Node 24 without Bun.
 - [x] In-Box CLI runs on Node 24 without Bun.
-- [ ] Provider allocation reference persists before bootstrap.
-- [ ] Same-key create resumes provisioning safely.
-- [ ] Fresh Box creation no longer uses a system snapshot.
+- [x] Provider create result persists as `preparing` before bootstrap.
+- [x] Same-key create resumes only durable preparation safely.
+- [x] Fresh Box creation no longer uses a system snapshot.
 - [ ] Snapshot-sourced creation installs the current runtime.
-- [ ] System-template configuration and supported-path docs removed.
+- [ ] Legacy system-template machinery removed after the snapshot/live gate.
 - [ ] npm package renamed to `waterbox`.
 - [ ] Package is CLI-only.
 - [ ] Missing provider is a connected setup state.
@@ -1089,6 +1090,7 @@ Live tests require explicit isolated-account authorization and must prove:
 ## Implementation Log
 
 - 2026-08-31: Plan created from the npm launch review. Settled the unscoped `waterbox` package, CLI-only distribution, provider-neutral explicit configuration, Node 24 local and sandbox runtimes, plain-Box bootstrap, accepted-resource persistence, Apache-2.0 licensing, tarball verification, trusted npm publication, and official registry deferral. No implementation or live provider operation occurred while writing the plan.
-- 2026-08-31: Phase 1 implementation migrated repository statements to `prepare()` and made `node:sqlite` `DatabaseSync` the default runtime, preserving explicit no-create behavior, read-only access, disabled foreign-key enforcement, numeric change counts, durability, CAS, pagination, malformed-row handling, and idempotent close. A package-local conditional adapter keeps Bun 1.3.2 test and local API tooling operational without including `bun:sqlite` in Node-targeted bundles. Verification passed 74 focused Bun tests, typecheck, `git diff --check`, a Node-targeted bundle inspection, and the focused repository compatibility test on Node 25.2.1 and installed Node 24.6.0. The declared minimum Node 24.15.0 is not installed locally, so that exact runtime check remains pending.
-- 2026-08-31: Phase 2 implementation moved the MCP bin and one-shot CLI to Node-targeted ESM with Node shebangs, bundled the CLI into the npm package, changed detached Bash worker execution to `/usr/local/bin/node`, and replaced secure-transfer `Bun.spawn` calls with bounded Node child-process handling. Unconfigured, unknown, unsupported, incomplete, and malformed provider setups now remain connected and preflight every tool before SQLite, provider, bootstrap-artifact, or local-file I/O. Box template installation now uses the existing `/usr/local/bin/node` and rejects Bun artifacts. Verification passed all 315 repository tests, typecheck, both Node syntax checks, template validation, exact artifact scans with no Bun runtime references, Node stdio and CLI execution on Node 25.2.1 and installed Node 24.6.0, and a clean packed-package npm-bin symlink launch. No live Box operation occurred. The declared Node 24.15.0 floor and latest Node 24 CI runs remain pending because those runtimes are not installed locally.
-- 2026-08-31: The Node-only product follow-up replaced Bun artifact generation and `prepack` with an esbuild script executed by Node. MCP and CLI source bundles now build, pack, install, and launch with Bun absent from `PATH`; the npm allowlist and exact artifact scan exclude the repository's test-only Bun SQLite adapter. Active template documentation and the ignored local `user-probe` configuration now point at Node and `dist/waterbox.js`. The complete 315-test repository suite, typecheck, Node 25.2.1 clean pack/install/stdio launch, installed Node 24.6.0 build and CLI execution, artifact scans, and `git diff --check` pass. Exact Node 24.15.0 and latest Node 24 CI verification remain pending.
+- 2026-08-31: Node 24.15.0 verification passed using the official darwin-arm64 binary: Node build and syntax, `node:sqlite` compatibility, clean pack/install, and npm-bin MCP setup smoke. The official SHASUMS checksum matched; signature verification was unavailable because GPG tooling was absent.
+- 2026-08-31: Phase 3 credential-free implementation verified the existing create operation followed by a durable `preparing` checkpoint and mandatory provider preparation. No create replay, allocation/readiness split, or list-diff correlation was added.
+- 2026-08-31: Phase 4 fresh live flow passed: fresh create, initial incomplete verification, correlated upload, install, final verification, running probe, all tools, secure transfer, async Bash, concurrency, tracked cleanup, and exact baseline comparison. The verifier natural-EOF handling was corrected from this live observation.
+- 2026-08-31: Snapshot-sourced reinstall failed during install and remains pending. Stop/resume and snapshot overwrite are also pending, so Phase 0 and Phase 4 full live acceptance are not complete. Legacy template machinery deletion remains deferred until that gate passes.

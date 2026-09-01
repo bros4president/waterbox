@@ -53,7 +53,7 @@ describe("public resources", () => {
   }
 
   test("accepts all canonical states", () => {
-    expect(SandboxStateSchema.options).toEqual(["provisioning", "running", "stopping", "stopped", "resuming", "terminating", "terminated", "failed"])
+    expect(SandboxStateSchema.options).toEqual(["provisioning", "preparing", "running", "stopping", "stopped", "resuming", "terminating", "terminated", "failed"])
     expect(SnapshotStateSchema.options).toEqual(["creating", "ready", "failed", "deleting", "deleted"])
   })
 

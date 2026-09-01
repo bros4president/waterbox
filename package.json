@@ -13,7 +13,7 @@
     "smoke:pi-mcp": "bun run scripts/pi-mcp-smoke.ts",
     "chat:pi-mcp": "bun run scripts/pi-mcp-chat.ts",
     "build:box-template": "node scripts/build-waterbox.mjs cli && bun run scripts/build-box-system-template.ts",
-    "start:api-local": "bun run apps/api-local/src/main.ts",
+    "start:api-local": "bun run build:mcp && bun run apps/api-local/src/main.ts",
     "test:api-local": "bun test apps/api-local/test/integration.test.ts",
     "test:node-sqlite": "node --experimental-strip-types --experimental-transform-types --test packages/sandbox-repository-sqlite/test/node-compatibility.test.ts",
     "smoke:control-plane-box": "bun run scripts/control-plane-box-smoke.ts",

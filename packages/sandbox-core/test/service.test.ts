@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId, SnapshotId } from "@waterbox/contracts"
-import { DomainError, SandboxService } from "@waterbox/core"
+import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
 import type { ListRepositoryInput, RepositoryPage, SandboxRepository } from "@waterbox/core/ports"
 import {
   ProviderError,
@@ -68,14 +68,6 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
     resolve = resolvePromise
   })
   return { promise, resolve }
-}
-
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt++) {
-    if (predicate()) return
-    await Bun.sleep(0)
-  }
-  throw new Error("Condition was not reached")
 }
 
 describe("account ownership", () => {
@@ -187,6 +179,46 @@ describe("secure file transfer", () => {
 })
 
 describe("durable create idempotency", () => {
+  test("persists the provider reference as preparing before preparation starts", async () => {
+    const gate = deferred()
+    const started = deferred()
+    const provider = new FakeSandboxProvider()
+    provider.prepareBarrier = gate.promise
+    provider.prepareStarted = started.resolve
+    const { service, sandboxes } = harness({ provider })
+
+    const creation = service.createSandbox(alice, {}, { idempotencyKey: "checkpoint" })
+    await started.promise
+
+    expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({
+      state: "preparing",
+      providerRef: { privateSandboxId: "sbx_calm-cactus-a1" },
+    })
+    gate.resolve()
+    expect((await creation).state).toBe("running")
+  })
+
+  test("does not claim provider-reference durability when checkpoint persistence fails", async () => {
+    const base = new InMemorySandboxRepository()
+    const sandboxes = new FailingSandboxCasRepository(base)
+    const provider = new FakeSandboxProvider()
+    const service = new SandboxService({
+      sandboxes,
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
+    })
+
+    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "checkpoint-failure" }), "provider_failure")
+
+    expect(provider.createCalls).toBe(1)
+    expect(provider.prepareCalls).toBe(0)
+    expect(await base.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({ state: "provisioning", providerRef: null })
+  })
+
   test("pre-aborted create does not allocate, persist, or dispatch", async () => {
     const { service, sandboxes, idempotency, provider } = harness({ sandboxIds: [] })
     const controller = new AbortController()
@@ -200,28 +232,54 @@ describe("durable create idempotency", () => {
     expect(await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "cancelled" })).toBeUndefined()
   })
 
-  test("in-flight create cancellation preserves the exact reason and provisioning record", async () => {
+  test("cancellation before provider create returns leaves the old provisioning record", async () => {
     const gate = deferred()
+    const started = deferred()
+    const provider = new AbortBeforeCreateResultProvider()
+    provider.createBarrier = gate.promise
+    provider.createStarted = started.resolve
+    const { service, sandboxes, idempotency } = harness({ provider })
+    const controller = new AbortController()
+    const creation = service.createSandbox(alice, {}, { idempotencyKey: "cancel-before-create", signal: controller.signal })
+    await started.promise
+    const reason = new DOMException("cancel before create result", "AbortError")
+    controller.abort(reason)
+    gate.resolve()
+
+    await expect(creation).rejects.toBe(reason)
+    expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({ state: "provisioning", providerRef: null })
+    expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "cancel-before-create" }))?.state).toBe("in_progress")
+    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "cancel-before-create" }), "idempotency_in_progress")
+    expect(provider.createCalls).toBe(1)
+  })
+
+  test("cancellation that receives a provider reference persists the preparation checkpoint", async () => {
+    const gate = deferred()
+    const started = deferred()
     const provider = new FakeSandboxProvider()
     provider.createBarrier = gate.promise
+    provider.createStarted = started.resolve
     const { service, sandboxes, idempotency } = harness({ provider })
     const controller = new AbortController()
     const creation = service.createSandbox(alice, {}, { idempotencyKey: "cancelled", signal: controller.signal })
-    await waitUntil(() => provider.createCalls === 1)
+    await started.promise
     const reason = new DOMException("cancel in flight", "AbortError")
     controller.abort(reason)
     gate.resolve()
 
     await expect(creation).rejects.toBe(reason)
     expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({
-      state: "provisioning",
+      state: "preparing",
       providerRef: { privateSandboxId: "sbx_calm-cactus-a1" },
     })
     expect((await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.lastError).toBeUndefined()
     expect(await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "cancelled" })).toMatchObject({
       state: "in_progress",
     })
-    expect((await service.getSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("running")
+    expect((await service.getSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("preparing")
+    expect((await service.createSandbox(alice, {}, { idempotencyKey: "cancelled" })).state).toBe("running")
+    expect(provider.createCalls).toBe(1)
+    expect(provider.prepareCalls).toBe(1)
   })
 
   test("same account, key, and normalized body returns the same sandbox", async () => {
@@ -267,12 +325,14 @@ describe("durable create idempotency", () => {
 
   test("concurrent same-key creation reserves one ID and provisions one provider resource", async () => {
     const gate = deferred()
+    const started = deferred()
     const provider = new FakeSandboxProvider()
     provider.createBarrier = gate.promise
+    provider.createStarted = started.resolve
     const { service, idempotency } = harness({ provider })
 
     const first = service.createSandbox(alice, {}, { idempotencyKey: "concurrent" })
-    await waitUntil(() => provider.createCalls === 1)
+    await started.promise
     const second = service.createSandbox(alice, {}, { idempotencyKey: "concurrent" })
     await expectDomainError(second, "idempotency_in_progress")
 
@@ -288,33 +348,208 @@ describe("durable create idempotency", () => {
       .toBe("completed")
   })
 
-  test("replay heals a failed idempotency completion without reprovisioning", async () => {
-    const idempotency = new FailingCompletionIdempotencyRepository()
-    const { service, sandboxes, provider } = harness({ idempotency })
+  test("concurrent preparation from reconstructed services converges through durable CAS", async () => {
+    const gate = deferred()
+    const firstStarted = deferred()
+    const secondStarted = deferred()
+    const provider = new FakeSandboxProvider()
+    provider.prepareBarrier = gate.promise
+    provider.prepareStarted = () => (provider.prepareCalls === 1 ? firstStarted : secondStarted).resolve()
+    const first = harness({ provider })
+    const secondService = new SandboxService({
+      sandboxes: first.sandboxes,
+      snapshots: first.snapshots,
+      idempotency: first.idempotency,
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })
 
-    await expectDomainError(
-      service.createSandbox(alice, {}, { idempotencyKey: "completion-failure" }),
+    const initiating = first.service.createSandbox(alice, {}, { idempotencyKey: "concurrent-preparation" })
+    await firstStarted.promise
+    const reconstructed = secondService.createSandbox(alice, {}, { idempotencyKey: "concurrent-preparation" })
+    await secondStarted.promise
+    gate.resolve()
+
+    const results = await Promise.all([initiating, reconstructed])
+    expect(results.map((result) => result.state)).toEqual(["running", "running"])
+    expect(provider.createCalls).toBe(1)
+    expect((await first.idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "concurrent-preparation" }))?.state).toBe("completed")
+  })
+
+  test("definite preparation failure retains a deletable failed resource and redacted recovery handle", async () => {
+    const provider = new FakeSandboxProvider()
+    provider.prepareError = new ProviderError("failure", "provider secret bx_private")
+    const { service, sandboxes, idempotency } = harness({ provider })
+
+    const error = await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "prepare-failure" }),
+      "provider_failure",
+    )
+
+    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect((error as SandboxRecoveryError).sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(error.message).not.toContain("provider secret")
+    expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({
+      state: "failed",
+      providerRef: { privateSandboxId: "sbx_calm-cactus-a1" },
+      lastError: { code: "provider_failure", message: "The provider operation failed" },
+    })
+    expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "prepare-failure" }))?.state).toBe("failed")
+    const replay = await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "prepare-failure" }),
+      "provider_failure",
+    )
+    expect(replay).toBeInstanceOf(SandboxRecoveryError)
+    expect((replay as SandboxRecoveryError).sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(provider.prepareCalls).toBe(1)
+    expect((await service.probeSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("failed")
+    expect((await service.deleteSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("terminated")
+  })
+
+  test("successful preparation persistence failure remains preparing and resumable", async () => {
+    const base = new InMemorySandboxRepository()
+    const sandboxes = new FailingRunningCommitRepository(base)
+    const idempotency = new InMemoryIdempotencyRepository()
+    const provider = new FakeSandboxProvider()
+    const service = new SandboxService({
+      sandboxes,
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency,
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
+    })
+
+    const error = await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "running-commit" }),
       "conflict",
     )
-    expect((await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.state).toBe("running")
-    expect((await idempotency.get({
-      accountId: alice.accountId,
-      scope: "sandbox:create",
-      key: "completion-failure",
-    }))?.state).toBe("in_progress")
+    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect(await base.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({ state: "preparing", lastError: undefined })
+    expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "running-commit" }))?.state).toBe("in_progress")
 
-    const replay = await service.createSandbox(alice, {}, { idempotencyKey: "completion-failure" })
-    expect(replay.state).toBe("running")
+    expect((await service.createSandbox(alice, {}, { idempotencyKey: "running-commit" })).state).toBe("running")
     expect(provider.createCalls).toBe(1)
-    expect((await idempotency.get({
-      accountId: alice.accountId,
-      scope: "sandbox:create",
-      key: "completion-failure",
-    }))?.state).toBe("completed")
+    expect(provider.prepareCalls).toBe(2)
   })
+
+  test("failure persistence exhaustion reports recovery without leaving failed missing its error", async () => {
+    const base = new InMemorySandboxRepository()
+    const sandboxes = new RejectFailedSandboxRepository(base)
+    const provider = new FakeSandboxProvider()
+    provider.prepareError = new ProviderError("failure", "private failure")
+    const service = new SandboxService({
+      sandboxes,
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
+    })
+
+    const error = await expectDomainError(
+      service.createSandbox(alice, {}, { idempotencyKey: "failure-persistence" }),
+      "conflict",
+    )
+    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect(await base.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({ state: "preparing", lastError: undefined })
+
+    sandboxes.rejectFailures = false
+    provider.prepareError = undefined
+    expect((await service.createSandbox(alice, {}, { idempotencyKey: "failure-persistence" })).state).toBe("running")
+  })
+
+  test("ambiguous and cancelled preparation remain preparing and resumable", async () => {
+    const ambiguousProvider = new FakeSandboxProvider()
+    ambiguousProvider.prepareError = new ProviderError("ambiguous_execution", "lost response bx_private")
+    const ambiguous = harness({ provider: ambiguousProvider })
+
+    const error = await expectDomainError(
+      ambiguous.service.createSandbox(alice, {}, { idempotencyKey: "ambiguous" }),
+      "ambiguous_execution",
+    )
+    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect((await ambiguous.sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.state).toBe("preparing")
+    expect((await ambiguous.idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "ambiguous" }))?.state).toBe("in_progress")
+    ambiguousProvider.prepareError = undefined
+    expect((await ambiguous.service.createSandbox(alice, {}, { idempotencyKey: "ambiguous" })).state).toBe("running")
+    expect(ambiguousProvider.createCalls).toBe(1)
+
+    const gate = deferred()
+    const started = deferred()
+    const cancelledProvider = new FakeSandboxProvider()
+    cancelledProvider.prepareBarrier = gate.promise
+    cancelledProvider.prepareStarted = started.resolve
+    const cancelled = harness({ provider: cancelledProvider })
+    const controller = new AbortController()
+    const creation = cancelled.service.createSandbox(alice, {}, { idempotencyKey: "cancel-prepare", signal: controller.signal })
+    await started.promise
+    const reason = new DOMException("cancel preparation", "AbortError")
+    controller.abort(reason)
+    gate.resolve()
+    await expect(creation).rejects.toBe(reason)
+    expect((await cancelled.sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.state).toBe("preparing")
+    expect((await cancelled.idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "cancel-prepare" }))?.state).toBe("in_progress")
+    expect((await cancelled.service.createSandbox(alice, {}, { idempotencyKey: "cancel-prepare" })).state).toBe("running")
+    expect(cancelledProvider.createCalls).toBe(1)
+  })
+
+  test("preparation cannot replace the durable provider reference", async () => {
+    const provider = new FakeSandboxProvider()
+    provider.prepareSandbox = async () => ({
+      state: "running",
+      providerRef: { privateSandboxId: "sbx_other-cloud-z9" },
+    })
+    const { service, sandboxes } = harness({ provider })
+
+    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "changed-reference" }), "provider_failure")
+    expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({
+      state: "failed",
+      providerRef: { privateSandboxId: "sbx_calm-cactus-a1" },
+    })
+  })
+
 })
 
 describe("lifecycle and optional groups", () => {
+  test("rejects configured providers without mandatory preparation", () => {
+    const provider = new FakeSandboxProvider()
+    const unsupported = { ...provider, name: provider.name, prepareSandbox: undefined } as unknown as FakeSandboxProvider
+
+    expect(() => new SandboxService({
+      sandboxes: new InMemorySandboxRepository(),
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[unsupported.name, unsupported]]),
+      defaultProvider: unsupported.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })).toThrow("does not implement sandbox preparation")
+  })
+
+  test("preparing gates mutations and operations while deletion remains available", async () => {
+    const { service, sandboxes, provider } = harness()
+    const sandboxId = "sbx_preparing-cloud-a1" as SandboxId
+    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "preparing"))
+
+    await expectDomainError(service.stopSandbox(alice, sandboxId), "invalid_state")
+    await expectDomainError(service.resumeSandbox(alice, sandboxId), "invalid_state")
+    await expectDomainError(service.createSnapshot(alice, sandboxId, {}), "invalid_state")
+    await expectDomainError(service.executeTool(alice, sandboxId, "read", { filePath: "/workspace/a" }), "invalid_state")
+    await expectDomainError(service.initiateSecureFileTransfer(alice, sandboxId), "invalid_state")
+    await expectDomainError(service.observeBashJob(alice, sandboxId, `job_${"a".repeat(32)}`, 0, 64), "invalid_state")
+    await expectDomainError(service.cleanupBashJob(alice, sandboxId, `job_${"a".repeat(32)}`), "invalid_state")
+
+    expect(provider.stopCalls).toBe(0)
+    expect(provider.executeCalls).toBe(0)
+    expect((await service.deleteSandbox(alice, sandboxId)).state).toBe("terminated")
+    expect(provider.deleteCalls).toBe(1)
+  })
+
   test("invalid create observations fail both sandbox and idempotency records", async () => {
     const provider = new InvalidCreateObservationProvider()
     const { service, sandboxes, idempotency } = harness({ provider })
@@ -404,10 +639,12 @@ describe("lifecycle and optional groups", () => {
     expect(provider.stopCalls).toBe(0)
 
     const gate = deferred()
+    const started = deferred()
     provider.stopBarrier = gate.promise
+    provider.stopStarted = started.resolve
     const inFlight = new AbortController()
     const stopping = service.stopSandbox(alice, sandbox.sandboxId, inFlight.signal)
-    await waitUntil(() => provider.stopCalls === 1)
+    await started.promise
     const inFlightReason = new DOMException("cancel stop in flight", "AbortError")
     inFlight.abort(inFlightReason)
     gate.resolve()
@@ -430,12 +667,13 @@ describe("lifecycle and optional groups", () => {
     expect(provider.deleteSnapshotCalls).toBe(1)
   })
 
-  test("snapshot creation accepts a stopped sandbox", async () => {
-    const { service } = harness()
+  test("snapshot creation remains available from stopped sandboxes", async () => {
+    const { service, provider } = harness()
     const sandbox = await service.createSandbox(alice, {})
     await service.stopSandbox(alice, sandbox.sandboxId)
 
     expect((await service.createSnapshot(alice, sandbox.sandboxId, {})).state).toBe("ready")
+    expect(provider.createSnapshotCalls).toBe(1)
   })
 
   test("create-from-snapshot enforces ownership, readiness, relationship, and capability", async () => {
@@ -538,11 +776,12 @@ describe("execution and reconciliation", () => {
     const sandbox = await service.createSandbox(alice, {}, { signal: createSignal })
     const sandboxRef = { privateSandboxId: sandbox.sandboxId }
     expect(provider.createInputs[0]).toMatchObject({ accountId: alice.accountId, sandboxId: sandbox.sandboxId, signal: createSignal })
+    expect(provider.prepareInputs[0]).toEqual({ accountId: alice.accountId, providerRef: sandboxRef, signal: createSignal })
 
-    const stopSignal = new AbortController().signal
-    await service.stopSandbox(alice, sandbox.sandboxId, stopSignal)
     const snapshotSignal = new AbortController().signal
     const snapshot = await service.createSnapshot(alice, sandbox.sandboxId, {}, snapshotSignal)
+    const stopSignal = new AbortController().signal
+    await service.stopSandbox(alice, sandbox.sandboxId, stopSignal)
     const resumeSignal = new AbortController().signal
     await service.resumeSandbox(alice, sandbox.sandboxId, resumeSignal)
     const deleteSnapshotSignal = new AbortController().signal
@@ -618,13 +857,13 @@ describe("execution and reconciliation", () => {
     const sandbox = await service.createSandbox(alice, {})
     await service.stopSandbox(alice, sandbox.sandboxId)
     const gate = deferred()
+    const started = deferred()
     provider.resumeBarrier = gate.promise
+    provider.resumeStarted = started.resolve
 
     const first = service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/a" })
-    await waitUntil(() => provider.resumeCalls === 1)
+    await started.promise
     const second = service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/b" })
-    await Bun.sleep(0)
-    expect(provider.resumeCalls).toBe(1)
 
     gate.resolve()
     const [firstEvents, secondEvents] = await Promise.all([
@@ -643,10 +882,12 @@ describe("execution and reconciliation", () => {
     const sandbox = await service.createSandbox(alice, {})
     await service.stopSandbox(alice, sandbox.sandboxId)
     const gate = deferred()
+    const started = deferred()
     provider.resumeBarrier = gate.promise
+    provider.resumeStarted = started.resolve
 
     const initiating = service.resumeSandbox(alice, sandbox.sandboxId)
-    await waitUntil(() => provider.resumeCalls === 1)
+    await started.promise
     const joiningController = new AbortController()
     const joining = service.resumeSandbox(alice, sandbox.sandboxId, joiningController.signal)
     const reason = new DOMException("cancel joining resume", "AbortError")
@@ -665,11 +906,13 @@ describe("execution and reconciliation", () => {
     const sandbox = await service.createSandbox(alice, {})
     await service.stopSandbox(alice, sandbox.sandboxId)
     const gate = deferred()
+    const started = deferred()
     provider.resumeBarrier = gate.promise
+    provider.resumeStarted = started.resolve
     const initiatingController = new AbortController()
 
     const initiating = service.resumeSandbox(alice, sandbox.sandboxId, initiatingController.signal)
-    await waitUntil(() => provider.resumeCalls === 1)
+    await started.promise
     const joining = service.resumeSandbox(alice, sandbox.sandboxId)
     const reason = new DOMException("cancel initiating resume", "AbortError")
     initiatingController.abort(reason)
@@ -748,20 +991,30 @@ describe("execution and reconciliation", () => {
     await expectDomainError(collect(events), "ambiguous_execution")
   })
 
-  test("get reconciles transitional sandbox and snapshot provider states", async () => {
+  test("preparing probe blocks readiness but persists provider failure and termination", async () => {
     const { service, sandboxes, snapshots, provider } = harness()
     const sandboxId = "sbx_async-cloud-a1" as SandboxId
+    const terminatedId = "sbx_gone-cloud-a1" as SandboxId
     const snapshotId = "snap_async-forest-a1" as SnapshotId
-    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "provisioning"))
+    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "preparing"))
+    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, terminatedId, "preparing"))
     await snapshots.createIfAbsent(snapshotRecord(alice.accountId, snapshotId, sandboxId, "creating"))
     provider.sandboxStates.set(sandboxId, "running")
     provider.snapshotStates.set(snapshotId, "ready")
 
     const sandboxSignal = new AbortController().signal
     const snapshotSignal = new AbortController().signal
-    expect((await service.getSandbox(alice, sandboxId, sandboxSignal)).state).toBe("running")
+    expect((await service.getSandbox(alice, sandboxId, sandboxSignal)).state).toBe("preparing")
+    expect((await service.probeSandbox(alice, sandboxId, sandboxSignal)).state).toBe("preparing")
+    provider.sandboxStates.set(sandboxId, "failed")
+    expect(await service.probeSandbox(alice, sandboxId, sandboxSignal)).toMatchObject({
+      state: "failed",
+      lastError: { code: "provider_failure", message: "The provider reports that sandbox preparation failed" },
+    })
+    provider.sandboxStates.set(terminatedId, "terminated")
+    expect((await service.probeSandbox(alice, terminatedId, sandboxSignal)).state).toBe("terminated")
     expect((await service.getSnapshot(alice, snapshotId, snapshotSignal)).state).toBe("ready")
-    expect(provider.inspectSandboxCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(3)
     expect(provider.inspectSnapshotCalls).toBe(1)
     expect(provider.lifecycleInputs[0]).toEqual({
       operation: "inspect",
@@ -773,18 +1026,43 @@ describe("execution and reconciliation", () => {
     })
   })
 
-  test("readiness reconciliation is bounded for asynchronous provider states", async () => {
+  test("asynchronous create remains provisioning until readiness is prepared", async () => {
+    const gate = deferred()
+    const started = deferred()
     const provider = new AsyncCreateProvider()
-    const { service } = harness({ provider })
-    const sandbox = await service.createSandbox(alice, {})
-    expect(sandbox.state).toBe("provisioning")
+    provider.prepareBarrier = gate.promise
+    provider.prepareStarted = started.resolve
+    const { service, sandboxes } = harness({ provider })
 
-    await expectDomainError(
-      service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/a" }),
-      "conflict",
-    )
-    expect(provider.inspectSandboxCalls).toBe(8)
+    const created = await service.createSandbox(alice, {}, { idempotencyKey: "async-create" })
+    expect(created.state).toBe("provisioning")
+    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "async-create" }), "idempotency_in_progress")
+
+    const reconciling = service.getSandbox(alice, created.sandboxId)
+    await started.promise
+    expect(await sandboxes.get(alice.accountId, created.sandboxId)).toMatchObject({ state: "preparing" })
+    await expectDomainError(service.executeTool(alice, created.sandboxId, "read", { filePath: "/workspace/a" }), "invalid_state")
     expect(provider.executeCalls).toBe(0)
+    gate.resolve()
+    expect((await reconciling).state).toBe("running")
+    expect(provider.createCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(1)
+    expect(provider.prepareCalls).toBe(1)
+  })
+
+  test("async readiness cannot persist provider-reported preparing", async () => {
+    const provider = new AsyncCreateProvider()
+    const { service, sandboxes } = harness({ provider })
+
+    const created = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(created.sandboxId, "preparing")
+
+    await expectDomainError(service.getSandbox(alice, created.sandboxId), "provider_failure")
+    expect(await sandboxes.get(alice.accountId, created.sandboxId)).toMatchObject({
+      state: "provisioning",
+      providerRef: { privateSandboxId: created.sandboxId },
+    })
+    expect(provider.prepareCalls).toBe(0)
   })
 })
 
@@ -883,19 +1161,32 @@ describe("records and compare-and-swap", () => {
   })
 })
 
-class AsyncCreateProvider extends FakeSandboxProvider {
-  override async createSandbox(input: ProviderCreateSandboxInput) {
-    this.createCalls++
-    this.providerIdempotencyKeys.push(input.idempotencyKey)
-    this.sandboxStates.set(input.sandboxId, "provisioning")
-    return { state: "provisioning" as const, providerRef: { privateSandboxId: input.sandboxId } }
-  }
-}
-
 class InvalidCreateObservationProvider extends FakeSandboxProvider {
   override async createSandbox(input: ProviderCreateSandboxInput) {
     this.createCalls++
     return { state: "stopped" as const, providerRef: { privateSandboxId: input.sandboxId } }
+  }
+}
+
+class AsyncCreateProvider extends FakeSandboxProvider {
+  override async createSandbox(input: ProviderCreateSandboxInput) {
+    this.createCalls++
+    this.createInputs.push(input)
+    this.providerIdempotencyKeys.push(input.idempotencyKey)
+    this.sandboxStates.set(input.sandboxId, "running")
+    return { state: "provisioning" as const, providerRef: { privateSandboxId: input.sandboxId } }
+  }
+}
+
+class AbortBeforeCreateResultProvider extends FakeSandboxProvider {
+  override async createSandbox(input: ProviderCreateSandboxInput) {
+    this.createCalls++
+    this.createStarted?.()
+    this.createInputs.push(input)
+    this.providerIdempotencyKeys.push(input.idempotencyKey)
+    await this.createBarrier
+    input.signal.throwIfAborted()
+    return { state: "running" as const, providerRef: { privateSandboxId: input.sandboxId } }
   }
 }
 
@@ -918,18 +1209,6 @@ class SnapshotSignalProvider extends FakeSandboxProvider {
     this.inspectSnapshotSignal = input.signal
     input.signal.throwIfAborted()
     return super.inspectSnapshot(input)
-  }
-}
-
-class FailingCompletionIdempotencyRepository extends InMemoryIdempotencyRepository {
-  #failCompletion = true
-
-  override async compareAndSwap(record: import("@waterbox/core/records").IdempotencyRecord, expectedVersion: number) {
-    if (this.#failCompletion && record.state === "completed") {
-      this.#failCompletion = false
-      throw new Error("injected idempotency completion failure")
-    }
-    return super.compareAndSwap(record, expectedVersion)
   }
 }
 
@@ -956,6 +1235,44 @@ class RacingSandboxRepository implements SandboxRepository {
       await this.base.compareAndSwap({ ...record, state: "terminated" }, expectedVersion)
       return false
     }
+    return this.base.compareAndSwap(record, expectedVersion)
+  }
+}
+
+class FailingSandboxCasRepository implements SandboxRepository {
+  constructor(readonly base: InMemorySandboxRepository) {}
+
+  createIfAbsent(record: SandboxRecord): Promise<boolean> { return this.base.createIfAbsent(record) }
+  get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined> { return this.base.get(accountId, sandboxId) }
+  list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> { return this.base.list(input) }
+  async compareAndSwap(): Promise<boolean> { throw new Error("injected sandbox persistence failure") }
+}
+
+class FailingRunningCommitRepository implements SandboxRepository {
+  #failRunningCommit = true
+  constructor(readonly base: InMemorySandboxRepository) {}
+
+  createIfAbsent(record: SandboxRecord): Promise<boolean> { return this.base.createIfAbsent(record) }
+  get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined> { return this.base.get(accountId, sandboxId) }
+  list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> { return this.base.list(input) }
+  compareAndSwap(record: SandboxRecord, expectedVersion: number): Promise<boolean> {
+    if (this.#failRunningCommit && record.state === "running") {
+      this.#failRunningCommit = false
+      throw new Error("injected running commit failure")
+    }
+    return this.base.compareAndSwap(record, expectedVersion)
+  }
+}
+
+class RejectFailedSandboxRepository implements SandboxRepository {
+  rejectFailures = true
+  constructor(readonly base: InMemorySandboxRepository) {}
+
+  createIfAbsent(record: SandboxRecord): Promise<boolean> { return this.base.createIfAbsent(record) }
+  get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined> { return this.base.get(accountId, sandboxId) }
+  list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> { return this.base.list(input) }
+  compareAndSwap(record: SandboxRecord, expectedVersion: number): Promise<boolean> {
+    if (this.rejectFailures && record.state === "failed") return Promise.resolve(false)
     return this.base.compareAndSwap(record, expectedVersion)
   }
 }

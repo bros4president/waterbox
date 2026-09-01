@@ -1,4 +1,4 @@
-import type { ErrorCode } from "@waterbox/contracts"
+import type { ErrorCode, SandboxId } from "@waterbox/contracts"
 import { ProviderError } from "./provider.ts"
 import type { ResourceErrorRecord } from "./records.ts"
 
@@ -9,6 +9,16 @@ export class DomainError extends Error {
     super(message, options)
     this.name = "DomainError"
     this.code = code
+  }
+}
+
+export class SandboxRecoveryError extends DomainError {
+  readonly sandboxId: SandboxId
+
+  constructor(error: DomainError, sandboxId: SandboxId) {
+    super(error.code, `Sandbox ${sandboxId} requires recovery; use probe_sandbox or delete_sandbox with this sandboxId`)
+    this.name = "SandboxRecoveryError"
+    this.sandboxId = sandboxId
   }
 }
 

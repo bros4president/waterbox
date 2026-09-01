@@ -8,6 +8,7 @@ export const TimestampSchema = z.string().datetime({ offset: true })
 
 export const SandboxStateSchema = z.enum([
   "provisioning",
+  "preparing",
   "running",
   "stopping",
   "stopped",

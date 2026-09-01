@@ -24,6 +24,7 @@ import type {
   ToolArgumentsByName,
   ToolEventByName,
 } from "@waterbox/core/provider"
+import { ProviderError } from "@waterbox/core/provider"
 import { FakeSandboxProvider, FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"
 import type { McpBackend } from "../src/backend.ts"
 import { absorbBashReceipt } from "../src/bash-observation.ts"
@@ -57,7 +58,6 @@ const directConfig: BoxMcpConfig = {
     config: {
       apiBaseUrl: "https://ascii.dev/api/box/v1",
       apiKey: "not-used-by-fake",
-      systemTemplateRef: "waterbox-system-v6",
       polling: { intervalMs: 1, timeoutMs: 2 },
     },
   },
@@ -145,6 +145,58 @@ describe("Waterbox MCP server", () => {
     } finally {
       await close()
     }
+  })
+
+  test("returns a redacted recovery handle and resumes preparation from SQLite without recreating", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-mcp-preparation-"))
+    const config = { ...directConfig, sqlitePath: join(directory, "waterbox.sqlite") }
+    try {
+      const firstProvider = new ValidFakeProvider({ name: "box" })
+      firstProvider.prepareError = new ProviderError("ambiguous_execution", "lost response with provider secret")
+      const firstBackend = await createDirectBackend(config, {
+        provider: firstProvider,
+        clock: new FixedClock("2026-08-27T00:00:00.000Z"),
+        ids: new SequenceIdGenerator([sandbox.sandboxId]),
+      })
+      const first = await connected(firstBackend)
+      try {
+        const unresolved = await first.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "recover-create" } })
+        expect(unresolved).toMatchObject({ isError: true, content: [{ text: expect.stringContaining(sandbox.sandboxId) }] })
+        expect(JSON.stringify(unresolved)).not.toContain("provider secret")
+      } finally { await first.close() }
+
+      const secondProvider = new ValidFakeProvider({ name: "box" })
+      const secondBackend = await createDirectBackend(config, {
+        provider: secondProvider,
+        clock: new FixedClock("2026-08-27T00:00:00.000Z"),
+        ids: new SequenceIdGenerator(),
+      })
+      const second = await connected(secondBackend)
+      try {
+        const recovered = await second.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "recover-create" } })
+        expect(recovered).toMatchObject({ content: [{ text: expect.stringContaining('"state":"running"') }] })
+        expect(secondProvider.createCalls).toBe(0)
+        expect(secondProvider.prepareCalls).toBe(1)
+        expect((await second.client.callTool({ name: "delete_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).isError).not.toBe(true)
+      } finally { await second.close() }
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  test("makes a definite preparation failure deletable through its MCP recovery handle", async () => {
+    const provider = new ValidFakeProvider({ name: "box" })
+    provider.prepareError = new ProviderError("failure", "private provider failure")
+    const backend = await createDirectBackend(directConfig, {
+      provider,
+      clock: new FixedClock("2026-08-27T00:00:00.000Z"),
+      ids: new SequenceIdGenerator([sandbox.sandboxId]),
+    })
+    const connection = await connected(backend)
+    try {
+      const failed = await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "failed-create" } })
+      expect(failed).toMatchObject({ isError: true, content: [{ text: expect.stringContaining(sandbox.sandboxId) }] })
+      expect(JSON.stringify(failed)).not.toContain("private provider failure")
+      expect((await connection.client.callTool({ name: "delete_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).isError).not.toBe(true)
+    } finally { await connection.close() }
   })
 
   test("fails the acknowledged Waterbox provider before creating local state", async () => {

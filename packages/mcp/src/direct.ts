@@ -1,7 +1,7 @@
 import type { Identity } from "@waterbox/contracts"
 import { SandboxService, type Clock, type ReadableIdGenerator } from "@waterbox/core"
 import type { SandboxProvider } from "@waterbox/core/provider"
-import { BoxSandboxProvider, SystemBoxProviderClock } from "@waterbox/provider-box"
+import { BoxSandboxProvider, loadSandboxRuntimeArtifact, SystemBoxProviderClock } from "@waterbox/provider-box"
 import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
 import { mkdir } from "node:fs/promises"
 import { dirname } from "node:path"
@@ -59,6 +59,7 @@ export async function createDirectBackend(
   try {
     const provider = overrides.provider ?? new BoxSandboxProvider(config.provider.config, {
       clock: new SystemBoxProviderClock(),
+      artifact: await loadSandboxRuntimeArtifact(new URL("../dist/waterbox-cli.js", import.meta.url), "0.1.0"),
       ...(process.env.WATERBOX_MCP_DIAGNOSTICS === "1"
         ? { diagnostic: (event) => console.error(`Waterbox Box diagnostic: ${JSON.stringify(event)}`) }
         : {}),

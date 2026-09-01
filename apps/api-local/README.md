@@ -64,7 +64,6 @@ For a manual OpenCode session over the temporary local API and experimental MCP,
 ```sh
 WATERBOX_MCP_EXPERIMENT_AUTHORIZATION=I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES \
 WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT=YES \
-BOX_SYSTEM_TEMPLATE_REF=waterbox-system-v6 \
 bun run chat:control-plane-mcp
 ```
 

@@ -11,7 +11,6 @@ const EnvironmentSchema = z.object({
   WATERBOX_SQLITE_PATH: NonEmptySchema.optional(),
   BOX_API_BASE_URL: z.url().default("https://ascii.dev/api/box/v1"),
   BOX_API_KEY: NonEmptySchema.optional(),
-  BOX_SYSTEM_TEMPLATE_REF: NonEmptySchema.default("waterbox-system-v6"),
   BOX_POLL_INTERVAL_MS: PositiveIntegerSchema.default(1_000),
   BOX_POLL_TIMEOUT_MS: PositiveIntegerSchema.default(120_000),
 }).strict()
@@ -22,7 +21,6 @@ export interface BoxMcpConfig {
     config: {
       apiBaseUrl: string
       apiKey: string
-      systemTemplateRef: string
       polling: { intervalMs: number; timeoutMs: number }
     }
   }
@@ -68,7 +66,6 @@ export function parseMcpConfig(
       config: {
         apiBaseUrl: parsed.data.BOX_API_BASE_URL,
         apiKey: parsed.data.BOX_API_KEY,
-        systemTemplateRef: parsed.data.BOX_SYSTEM_TEMPLATE_REF,
         polling: {
           intervalMs: parsed.data.BOX_POLL_INTERVAL_MS,
           timeoutMs: parsed.data.BOX_POLL_TIMEOUT_MS,

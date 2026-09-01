@@ -22,6 +22,7 @@ export const ErrorEnvelopeSchema = z.object({
     code: ErrorCodeSchema,
     message: z.string().min(1).max(2_000),
     requestId: z.string().min(1).max(255),
+    sandboxId: z.string().regex(/^sbx_[a-z]+-[a-z]+-[a-z0-9]+$/).optional(),
   }).strict(),
 }).strict()
 

@@ -179,6 +179,7 @@ export class FakeSandboxProvider implements SandboxProvider {
   readonly snapshots?: NonNullable<SandboxProvider["snapshots"]>
   readonly secureFileTransfer?: NonNullable<SandboxProvider["secureFileTransfer"]>
   createCalls = 0
+  prepareCalls = 0
   inspectSandboxCalls = 0
   stopCalls = 0
   resumeCalls = 0
@@ -188,11 +189,18 @@ export class FakeSandboxProvider implements SandboxProvider {
   deleteSnapshotCalls = 0
   executeCalls = 0
   createBarrier?: Promise<void>
+  prepareBarrier?: Promise<void>
+  prepareError?: unknown
   stopBarrier?: Promise<void>
   resumeBarrier?: Promise<void>
+  createStarted?: () => void
+  prepareStarted?: () => void
+  stopStarted?: () => void
+  resumeStarted?: () => void
   executeError?: unknown
   readonly providerIdempotencyKeys: string[] = []
   readonly createInputs: ProviderCreateSandboxInput[] = []
+  readonly prepareInputs: ProviderOperationInput[] = []
   readonly lifecycleInputs: Array<{ operation: "inspect" | "stop" | "resume" | "delete"; input: ProviderOperationInput }> = []
   readonly snapshotInputs: Array<{ operation: "create" | "inspect" | "delete"; input: ProviderCreateSnapshotInput | ProviderSnapshotOperationInput }> = []
   readonly toolInputs: ProviderExecuteInput[] = []
@@ -225,11 +233,22 @@ export class FakeSandboxProvider implements SandboxProvider {
 
   async createSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation> {
     this.createCalls++
+    this.createStarted?.()
     this.createInputs.push(input)
     this.providerIdempotencyKeys.push(input.idempotencyKey)
     await this.createBarrier
     this.sandboxStates.set(input.sandboxId, "running")
     return { state: "running", providerRef: sandboxRef(input.sandboxId) }
+  }
+
+  async prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
+    this.prepareCalls++
+    this.prepareStarted?.()
+    this.prepareInputs.push(input)
+    await this.prepareBarrier
+    input.signal.throwIfAborted()
+    if (this.prepareError !== undefined) throw this.prepareError
+    return { state: "running", providerRef: input.providerRef }
   }
 
   async inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
@@ -241,6 +260,7 @@ export class FakeSandboxProvider implements SandboxProvider {
 
   protected async stop(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     this.stopCalls++
+    this.stopStarted?.()
     this.lifecycleInputs.push({ operation: "stop", input })
     await this.stopBarrier
     const id = refId(input.providerRef)
@@ -250,6 +270,7 @@ export class FakeSandboxProvider implements SandboxProvider {
 
   protected async resume(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     this.resumeCalls++
+    this.resumeStarted?.()
     this.lifecycleInputs.push({ operation: "resume", input })
     await this.resumeBarrier
     const id = refId(input.providerRef)

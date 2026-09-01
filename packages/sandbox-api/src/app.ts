@@ -36,7 +36,7 @@ import {
   type Identity,
   type ToolName,
 } from "@waterbox/contracts"
-import { DomainError } from "@waterbox/core"
+import { DomainError, SandboxRecoveryError } from "@waterbox/core"
 import type { WaterboxApiDependencies } from "./types.ts"
 
 type Variables = { identity: Identity; requestId: string }
@@ -168,7 +168,14 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
 
   app.onError((error, c) => {
     if (error instanceof DomainError) {
-      return errorResponse(c, c.get("requestId"), error.code, publicMessage(error.code), statusFor(error.code))
+      return errorResponse(
+        c,
+        c.get("requestId"),
+        error.code,
+        publicMessage(error.code),
+        statusFor(error.code),
+        error instanceof SandboxRecoveryError ? error.sandboxId : undefined,
+      )
     }
     return errorResponse(c, c.get("requestId"), "internal_error", "An internal error occurred", 500)
   })
@@ -271,8 +278,8 @@ function openApiDocument(app: OpenAPIHono<ApiEnv>) {
   })
 }
 
-function errorResponse(c: { json: Function }, requestId: string, code: ErrorCode, message: string, status: number): Response {
-  return c.json({ error: { code, message, requestId } }, status)
+function errorResponse(c: { json: Function }, requestId: string, code: ErrorCode, message: string, status: number, sandboxId?: string): Response {
+  return c.json({ error: { code, message, requestId, ...(sandboxId === undefined ? {} : { sandboxId }) } }, status)
 }
 
 function statusFor(code: ErrorCode): number {

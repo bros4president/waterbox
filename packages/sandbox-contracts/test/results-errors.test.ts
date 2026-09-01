@@ -151,6 +151,10 @@ describe("structured errors", () => {
       },
     }
     expect(ErrorEnvelopeSchema.parse(envelope)).toEqual(envelope)
+    expect(ErrorEnvelopeSchema.parse({
+      error: { ...envelope.error, sandboxId: "sbx_calm-cactus-7k3m" },
+    }).error.sandboxId).toBe("sbx_calm-cactus-7k3m")
+    expect(ErrorEnvelopeSchema.safeParse({ error: { ...envelope.error, sandboxId: "bx_private" } }).success).toBe(false)
   })
 
   test("rejects unknown codes, details, and envelope fields", () => {

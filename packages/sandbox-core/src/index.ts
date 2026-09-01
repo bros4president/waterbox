@@ -1,4 +1,4 @@
-export { DomainError } from "./errors.ts"
+export { DomainError, SandboxRecoveryError } from "./errors.ts"
 export { SandboxService } from "./service.ts"
 export type {
   CreateSandboxOptions,

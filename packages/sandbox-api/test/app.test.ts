@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { DomainError } from "@waterbox/core"
+import { DomainError, SandboxRecoveryError } from "@waterbox/core"
 import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH } from "@waterbox/contracts"
 import { createWaterboxApi, type WaterboxCore } from "../src/index.ts"
 
@@ -177,6 +177,25 @@ describe("Waterbox API", () => {
     const text = await response.text()
     expect(text).not.toContain(secret)
     expect(JSON.parse(text)).toEqual({ error: { code: "not_found", message: "The resource was not found", requestId: "req_test" } })
+  })
+
+  test("includes only the public sandbox recovery ID for post-checkpoint failures", async () => {
+    const secret = "private provider detail"
+    const recovery = new SandboxRecoveryError(new DomainError("provider_failure", secret), sandbox.sandboxId)
+    const { app } = api({ createSandbox: async () => { throw recovery } })
+
+    const response = await app.request("/v1/sandboxes", { method: "POST", headers: jsonHeaders, body: "{}" })
+    expect(response.status).toBe(502)
+    const text = await response.text()
+    expect(text).not.toContain(secret)
+    expect(JSON.parse(text)).toEqual({
+      error: {
+        code: "provider_failure",
+        message: "The provider operation failed",
+        requestId: "req_test",
+        sandboxId: sandbox.sandboxId,
+      },
+    })
   })
 
   test("rejects non-canonical core output without serializing internal fields", async () => {

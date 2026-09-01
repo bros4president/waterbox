@@ -25,11 +25,6 @@
           "description": "Box API key. Configure it using the MCP client's recommended secret or environment mechanism.",
           "isRequired": true,
           "isSecret": true
-        },
-        {
-          "name": "BOX_SYSTEM_TEMPLATE_REF",
-          "description": "Box system template",
-          "default": "waterbox-system-v6"
         }
       ]
     }

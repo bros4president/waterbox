@@ -1,12 +1,15 @@
 import { createWaterboxApi, type IdentityResolver } from "@waterbox/api"
 import { SandboxService, type Clock, type ReadableIdGenerator } from "@waterbox/core"
 import type { SandboxProvider } from "@waterbox/core/provider"
-import { BoxSandboxProvider, SystemBoxProviderClock } from "@waterbox/provider-box"
+import { BoxSandboxProvider, SystemBoxProviderClock, type SandboxRuntimeArtifact } from "@waterbox/provider-box"
 import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
+import { createHash } from "node:crypto"
+import { readFileSync } from "node:fs"
 import type { LocalApiConfig } from "./config.ts"
 
 export interface LocalApiOverrides {
   provider?: SandboxProvider
+  artifact?: SandboxRuntimeArtifact
   clock?: Clock
   ids?: ReadableIdGenerator
 }
@@ -43,7 +46,7 @@ export function fixedDevelopmentIdentityResolver(apiKey: string, accountId: stri
 export function createLocalControlPlane(config: LocalApiConfig, overrides: LocalApiOverrides = {}): LocalControlPlane {
   const store = new SqliteRepositoryStore(config.sqlitePath, { create: true })
   try {
-    const provider = overrides.provider ?? new BoxSandboxProvider(config.box, { clock: new SystemBoxProviderClock() })
+    const provider = overrides.provider ?? new BoxSandboxProvider(config.box, { clock: new SystemBoxProviderClock(), artifact: overrides.artifact ?? localRuntimeArtifact() })
     const core = new SandboxService({
       sandboxes: store.sandboxes,
       snapshots: store.snapshots,
@@ -59,6 +62,16 @@ export function createLocalControlPlane(config: LocalApiConfig, overrides: Local
     store.close()
     throw error
   }
+}
+
+export function localRuntimeArtifact(dependencies: { read(url: URL): Uint8Array } = {
+  read: url => readFileSync(url),
+}): SandboxRuntimeArtifact {
+  const artifactUrl = new URL("../../../packages/mcp/dist/waterbox-cli.js", import.meta.url)
+  let bytes: Uint8Array
+  try { bytes = dependencies.read(artifactUrl) }
+  catch { throw new Error("Waterbox local runtime artifact is unavailable") }
+  return { bytes, sha256: createHash("sha256").update(bytes).digest("hex"), cliProtocolVersion: 2, artifactVersion: "0.1.0" }
 }
 
 function timingSafeEqual(left: string, right: string): boolean {

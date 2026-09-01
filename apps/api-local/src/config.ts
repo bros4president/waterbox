@@ -13,7 +13,6 @@ const EnvironmentSchema = z.object({
   WATERBOX_DEV_ACCOUNT_ID: AccountIdSchema,
   BOX_API_BASE_URL: z.url().default("https://ascii.dev/api/box/v1"),
   BOX_API_KEY: secret,
-  BOX_SYSTEM_TEMPLATE_REF: nonSecret,
   BOX_POLL_INTERVAL_MS: positiveInteger.default(1_000),
   BOX_POLL_TIMEOUT_MS: positiveInteger.default(120_000),
 }).strict()
@@ -27,7 +26,6 @@ export interface LocalApiConfig {
   box: {
     apiBaseUrl: string
     apiKey: string
-    systemTemplateRef: string
     polling: { intervalMs: number; timeoutMs: number }
   }
 }
@@ -54,7 +52,6 @@ export function parseLocalApiConfig(environment: Record<string, string | undefin
     box: {
       apiBaseUrl: parsed.data.BOX_API_BASE_URL,
       apiKey: parsed.data.BOX_API_KEY,
-      systemTemplateRef: parsed.data.BOX_SYSTEM_TEMPLATE_REF,
       polling: { intervalMs: parsed.data.BOX_POLL_INTERVAL_MS, timeoutMs: parsed.data.BOX_POLL_TIMEOUT_MS },
     },
   }

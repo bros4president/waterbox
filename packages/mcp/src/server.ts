@@ -31,6 +31,7 @@ import {
   type ToolName,
 } from "@waterbox/contracts"
 import type { ToolArgumentsByName, ToolEventByName } from "@waterbox/core/provider"
+import { SandboxRecoveryError } from "@waterbox/core"
 import { z } from "zod"
 import type { McpBackend } from "./backend.ts"
 import { McpConfigurationError } from "./config.ts"
@@ -72,7 +73,7 @@ const tools: Tool[] = [
   tool("delete_sandbox", "Permanently deletes a user-owned Waterbox sandbox.", DeleteSandboxInputSchema),
   tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", ListSnapshotsInputSchema),
   tool("create_snapshot", "Creates a user-owned snapshot from a running or stopped Waterbox sandbox.", CreateSnapshotInputSchema),
-  tool("delete_snapshot", "Permanently deletes a user-owned Waterbox snapshot. Provider system templates are not addressable by this tool.", DeleteSnapshotInputSchema),
+  tool("delete_snapshot", "Permanently deletes a user-owned Waterbox snapshot.", DeleteSnapshotInputSchema),
   tool("send_file_securely", "Encrypts and transfers an existing local file to a sandbox without placing its contents in model context or tool arguments. The destination file is decrypted and readable inside the sandbox; avoid reading sensitive destination contents back into model context. The source file is not modified or deleted.", SendFileSecurelyInputSchema),
   tool("read", "Reads any file or lists any directory in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.read),
   tool("write", "Writes complete file contents anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.write),
@@ -184,7 +185,7 @@ function text(value: unknown) {
 }
 
 function safeMessage(error: unknown): string {
-  return error instanceof PublicMcpError || error instanceof McpConfigurationError || (error instanceof Error && error.name === "UnsupportedMcpProviderError")
+  return error instanceof PublicMcpError || error instanceof McpConfigurationError || error instanceof SandboxRecoveryError || (error instanceof Error && error.name === "UnsupportedMcpProviderError")
     ? error.message
     : "Waterbox MCP request failed"
 }

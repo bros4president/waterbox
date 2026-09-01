@@ -12,18 +12,24 @@ import {
 } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
 import { CliProtocolError, encodeInvocation, encodeSecureTransferInput } from "@waterbox/cli/protocol"
+import { createHash } from "node:crypto"
+import { readFile } from "node:fs/promises"
 
 export interface BoxProviderClock { now(): Date; sleep(milliseconds: number, signal: AbortSignal): Promise<void> }
 export interface BoxProviderConfig {
-  apiBaseUrl: string; apiKey: string; systemTemplateRef: string
+  apiBaseUrl: string; apiKey: string
   polling: { intervalMs: number; timeoutMs: number }
 }
+export interface SandboxRuntimeArtifact { bytes: Uint8Array; sha256: string; cliProtocolVersion: 2; artifactVersion: string }
 export type BoxProviderFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 export type BoxProviderDiagnostic =
   | { type: "tool-command"; tool: ToolName; success: boolean; exitCode: number | null; timedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean; hasStderr: boolean }
   | { type: "tool-event-invalid"; tool: ToolName }
   | { type: "tool-http-error"; status: number }
-export interface BoxProviderDependencies { fetch?: BoxProviderFetch; clock: BoxProviderClock; diagnostic?: (event: BoxProviderDiagnostic) => void }
+  | { type: "preparation"; stage: "verify" | "final-verify"; outcome: "complete" | "incomplete" | "ambiguous" | "failure" }
+  | { type: "preparation"; stage: "upload"; outcome: "complete" | "ambiguous" | "failure" }
+  | { type: "preparation"; stage: "install"; outcome: "complete" | "ambiguous" | "failure" }
+export interface BoxProviderDependencies { fetch?: BoxProviderFetch; clock: BoxProviderClock; artifact: SandboxRuntimeArtifact; diagnostic?: (event: BoxProviderDiagnostic) => void }
 
 type BoxState = "init" | "provisioning" | "provisioned" | "cloning" | "ready" | "idle" | "running" | "archiving" | "archived" | "error"
 interface BoxDto { id: string; state: BoxState }
@@ -36,6 +42,17 @@ const BOX_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/
 const DELETION_ID = /^bdop_[a-f0-9]{32}$/
 const MAX_JSON_BYTES = 1_048_576
 const MAX_COMMAND_JSON_BYTES = 8_388_608
+const BOOTSTRAP_VERSION = 1
+const BOOTSTRAP_COMMAND_TIMEOUT_SECONDS = 120
+const HEALTH = JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })
+const VERSION = JSON.stringify({ protocolVersion: 2 })
+const LAUNCHER = `#!/bin/sh
+set -eu
+sudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace
+sudo -n install -d -m 0700 /run/waterbox/bash-jobs
+cd /workspace
+exec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/node /usr/local/lib/waterbox-cli.js "$@"
+`
 const EVENT_SCHEMAS = { read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema, bash: BashToolEventSchema }
 class BoxHttpError extends ProviderError { constructor(readonly status: number) { super("failure", `Box request failed (${status})`) } }
 
@@ -75,17 +92,19 @@ export class BoxSandboxProvider implements SandboxProvider {
   readonly #config: Readonly<BoxProviderConfig>
   readonly #fetch: BoxProviderFetch
   readonly #clock: BoxProviderClock
+  readonly #artifact: SandboxRuntimeArtifact
   readonly #diagnostic?: (event: BoxProviderDiagnostic) => void
 
   constructor(config: BoxProviderConfig, dependencies: BoxProviderDependencies) {
-    if (!isExactObject(config, ["apiBaseUrl", "apiKey", "systemTemplateRef", "polling"]) || !isExactObject(config.polling, ["intervalMs", "timeoutMs"])) throw new TypeError("Box provider configuration is invalid")
+    if (!isExactObject(config, ["apiBaseUrl", "apiKey", "polling"]) || !isExactObject(config.polling, ["intervalMs", "timeoutMs"])) throw new TypeError("Box provider configuration is invalid")
     const apiBaseUrl = configurationUrl(config.apiBaseUrl)
-    if (!strictNonempty(config.apiKey) || !strictNonempty(config.systemTemplateRef)) throw new TypeError("Box provider configuration is invalid")
+    if (!strictNonempty(config.apiKey)) throw new TypeError("Box provider configuration is invalid")
     if (!Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs <= 0 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs) throw new TypeError("Box provider configuration is invalid")
-    if (!isExactObject(dependencies, ["clock"], ["fetch", "diagnostic"]) || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function") || !isObject(dependencies.clock) || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function") throw new TypeError("Box provider dependencies are invalid")
+    if (!isExactObject(dependencies, ["clock", "artifact"], ["fetch", "diagnostic"]) || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function") || !isObject(dependencies.clock) || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function") throw new TypeError("Box provider dependencies are invalid")
     const now = dependencies.clock.now()
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new TypeError("Box provider dependencies are invalid")
-    this.#config = { apiBaseUrl, apiKey: config.apiKey, systemTemplateRef: config.systemTemplateRef, polling: { ...config.polling } }
+    this.#config = { apiBaseUrl, apiKey: config.apiKey, polling: { ...config.polling } }
+    this.#artifact = validateArtifact(dependencies.artifact)
     this.#fetch = dependencies.fetch ?? fetch
     this.#clock = dependencies.clock
     this.#diagnostic = dependencies.diagnostic
@@ -93,10 +112,90 @@ export class BoxSandboxProvider implements SandboxProvider {
 
   async createSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation> {
     validateCreateSandboxInput(input)
-    const sourceName = input.sourceSnapshotRef === undefined ? this.#config.systemTemplateRef : snapshotRef(input.sourceSnapshotRef).name
-    const created = createdBox(await this.#boxJson("POST", "/boxes", input.signal, { body: { from: sourceName, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId } }, idempotencyKey: input.idempotencyKey, expectedStatuses: [202] }))
+    const source = input.sourceSnapshotRef === undefined ? {} : { from: snapshotRef(input.sourceSnapshotRef).name }
+    const created = createdBox(await this.#boxJson("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId } }, idempotencyKey: input.idempotencyKey, expectedStatuses: [202] }))
     const ready = await this.#waitForReady(created, input.signal)
     return { state: mapSandboxState(ready.state), providerRef: { kind: "box-sandbox-v2", boxId: ready.id } }
+  }
+  async prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
+    validateOperationInput(input)
+    const ref = sandboxRef(input.providerRef)
+    const state = await this.#reconcileRuntime(ref.boxId, input.signal, "verify")
+    if (state === "incomplete") {
+      await this.#uploadRuntime(ref.boxId, input.signal)
+      await this.#installRuntime(ref.boxId, input.signal)
+      if (await this.#reconcileRuntime(ref.boxId, input.signal, "final-verify") !== "complete") throw bootstrapAmbiguous()
+    }
+    return { state: "running", providerRef: ref as unknown as JsonValue }
+  }
+  async #uploadRuntime(boxId: string, signal: AbortSignal): Promise<void> {
+    const path = artifactPath(this.#artifact.sha256)
+    const body = { path, content: Buffer.from(this.#artifact.bytes).toString("base64"), encoding: "base64" }
+    try {
+      const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(this.#config.polling.timeoutMs)])
+      let response: Response
+      try { response = await this.#fetch(`${this.#config.apiBaseUrl}/boxes/${segment(boxId)}/files`, { method: "PUT", headers: { authorization: `Bearer ${this.#config.apiKey}`, accept: "application/json", "content-type": "application/json" }, body: JSON.stringify(body), signal: requestSignal }) }
+      catch (error) { if (signal.aborted) throw signal.reason ?? error; throw bootstrapAmbiguous() }
+      if (!response.ok) {
+        try { await safeBoxError(response, requestSignal) } catch { throw bootstrapAmbiguous() }
+        if (response.status >= 500) throw bootstrapAmbiguous()
+        throw new BoxHttpError(response.status)
+      }
+      if (response.status !== 200) { cancelStreamDetached(response.body); throw bootstrapFailure() }
+      let value: unknown
+      try { requireMediaType(response, "application/json"); value = await boundedJson(response, requestSignal, MAX_JSON_BYTES) }
+      catch (error) { if (signal.aborted) throw signal.reason ?? error; throw bootstrapAmbiguous() }
+      writtenFile(value, path, this.#artifact.bytes.byteLength)
+      this.#emitDiagnostic({ type: "preparation", stage: "upload", outcome: "complete" })
+    } catch (error) {
+      if (signal.aborted) { this.#emitDiagnostic({ type: "preparation", stage: "upload", outcome: "ambiguous" }); throw signal.reason ?? error }
+      if (error instanceof ProviderError && error.kind === "failure") { this.#emitDiagnostic({ type: "preparation", stage: "upload", outcome: "failure" }); throw error }
+      this.#emitDiagnostic({ type: "preparation", stage: "upload", outcome: "ambiguous" })
+      throw bootstrapAmbiguous()
+    }
+  }
+  async #installRuntime(boxId: string, signal: AbortSignal): Promise<void> {
+    try {
+      const command = commandResponse(await this.#bootstrapCommand(boxId, installCommand(this.#artifact), signal))
+      if (uncertainCommand(command)) throw bootstrapAmbiguous()
+      if (!command.success || command.exitCode !== 0 || command.stdout !== "waterbox-bootstrap-installed\n" || meaningfulCommandStderr(command.stderr) !== "") throw bootstrapFailure()
+      this.#emitDiagnostic({ type: "preparation", stage: "install", outcome: "complete" })
+    } catch (error) {
+      if (signal.aborted) { this.#emitDiagnostic({ type: "preparation", stage: "install", outcome: "ambiguous" }); throw signal.reason ?? error }
+      if (error instanceof ProviderError && error.kind === "failure") { this.#emitDiagnostic({ type: "preparation", stage: "install", outcome: "failure" }); throw error }
+      this.#emitDiagnostic({ type: "preparation", stage: "install", outcome: "ambiguous" }); throw bootstrapAmbiguous()
+    }
+  }
+  async #reconcileRuntime(boxId: string, signal: AbortSignal, stage: "verify" | "final-verify"): Promise<"complete" | "incomplete"> {
+    let command
+    try { command = commandResponse(await this.#bootstrapCommand(boxId, verifyCommand(this.#artifact), signal)) }
+    catch (error) {
+      if (signal.aborted) { this.#emitDiagnostic({ type: "preparation", stage, outcome: "ambiguous" }); throw signal.reason ?? error }
+      if (error instanceof ProviderError && error.kind === "failure") { this.#emitDiagnostic({ type: "preparation", stage, outcome: "failure" }); throw error }
+      this.#emitDiagnostic({ type: "preparation", stage, outcome: "ambiguous" }); throw bootstrapAmbiguous()
+    }
+    if (uncertainCommand(command) || meaningfulCommandStderr(command.stderr) !== "") { this.#emitDiagnostic({ type: "preparation", stage, outcome: "ambiguous" }); throw bootstrapAmbiguous() }
+    if (!command.success || command.exitCode !== 0) { this.#emitDiagnostic({ type: "preparation", stage, outcome: "failure" }); throw bootstrapFailure() }
+    if (command.stdout === "waterbox-bootstrap-ok\n") { this.#emitDiagnostic({ type: "preparation", stage, outcome: "complete" }); return "complete" }
+    if (command.stdout === "waterbox-bootstrap-incomplete\n") { this.#emitDiagnostic({ type: "preparation", stage, outcome: "incomplete" }); return "incomplete" }
+    const failed = /^waterbox-bootstrap-failed-(health|version|node|rg)\n$/.exec(command.stdout)
+    if (failed) { this.#emitDiagnostic({ type: "preparation", stage, outcome: "failure" }); throw bootstrapFailure() }
+    this.#emitDiagnostic({ type: "preparation", stage, outcome: "ambiguous" })
+    throw bootstrapAmbiguous()
+  }
+  async #bootstrapCommand(boxId: string, command: string, signal: AbortSignal): Promise<unknown> {
+    signal.throwIfAborted()
+    let response: Response
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(this.#config.polling.timeoutMs)])
+    try { response = await this.#fetch(`${this.#config.apiBaseUrl}/boxes/${segment(boxId)}/commands`, { method: "POST", headers: { authorization: `Bearer ${this.#config.apiKey}`, accept: "application/json", "content-type": "application/json" }, body: JSON.stringify({ command, timeoutSeconds: BOOTSTRAP_COMMAND_TIMEOUT_SECONDS }), signal: requestSignal }) }
+    catch (error) { if (signal.aborted) throw signal.reason ?? error; throw bootstrapAmbiguous() }
+    if (!response.ok) {
+      try { await safeBoxError(response, requestSignal) } catch { throw bootstrapAmbiguous() }
+      if (response.status >= 500) throw bootstrapAmbiguous()
+      throw bootstrapFailure()
+    }
+    try { requireMediaType(response, "application/json"); return await boundedJson(response, requestSignal, MAX_COMMAND_JSON_BYTES) }
+    catch (error) { if (signal.aborted) throw signal.reason ?? error; throw bootstrapAmbiguous() }
   }
   async inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     validateOperationInput(input)
@@ -372,6 +471,106 @@ function isObject(value: unknown): value is Record<string, unknown> { return typ
 function isExactObject(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, unknown> { if (!isObject(value)) return false; const allowed = new Set([...required, ...optional]); return required.every((key) => Object.hasOwn(value, key)) && Object.keys(value).every((key) => allowed.has(key)) }
 function requireMediaType(response: Response, expected: string): void { if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== expected) throw new Error("invalid media type") }
 function ambiguous(): ProviderError { return new ProviderError("ambiguous_execution", "Tool execution outcome is unknown") }
+function bootstrapAmbiguous(): ProviderError { return new ProviderError("ambiguous_execution", "Box runtime preparation outcome is unknown") }
+function bootstrapFailure(): ProviderError { return new ProviderError("failure", "Box runtime preparation failed") }
+function uncertainCommand(value: ReturnType<typeof commandResponse>): boolean { return value.timedOut || value.stdoutTruncated || value.stderrTruncated }
+function artifactPath(sha256: string): string { return `/tmp/waterbox-cli-${sha256}.js` }
+function manifest(artifact: SandboxRuntimeArtifact): string { return JSON.stringify({ schemaVersion: 1, artifactSha256: artifact.sha256, artifactVersion: artifact.artifactVersion, cliProtocolVersion: artifact.cliProtocolVersion, nodeMajor: 24, bootstrapVersion: BOOTSTRAP_VERSION }) }
+function shellLiteral(value: string): string { return `'${value.replaceAll("'", "'\\''")}'` }
+const NODE_SHA256_SCRIPT = "const{createHash}=require('node:crypto'),{createReadStream}=require('node:fs'),h=createHash('sha256'),s=createReadStream(process.argv[1]);s.on('data',b=>h.update(b));s.on('end',()=>process.stdout.write(h.digest('hex')));s.on('error',()=>{process.exitCode=1})"
+function nodeSha256(path: string, variable = false, nodePath = "/usr/local/bin/node"): string { return `sudo -n ${shellLiteral(nodePath)} -e ${shellLiteral(NODE_SHA256_SCRIPT)} ${variable ? `"${path}"` : shellLiteral(path)}` }
+interface BootstrapVerifyLayout { manifestPath: string; cliPath: string; waterboxPath: string; nodePath: string; rgPath: string }
+const BOOTSTRAP_VERIFY_LAYOUT: BootstrapVerifyLayout = { manifestPath: "/usr/local/lib/waterbox-bootstrap.json", cliPath: "/usr/local/lib/waterbox-cli.js", waterboxPath: "/usr/local/bin/waterbox", nodePath: "/usr/local/bin/node", rgPath: "rg" }
+function verificationChecks(artifact: SandboxRuntimeArtifact, override?: BootstrapVerifyLayout): Readonly<Record<"installedDigest" | "health" | "version" | "node" | "rg", string>> {
+  const layout = override ?? BOOTSTRAP_VERIFY_LAYOUT
+  return {
+    installedDigest: `test "$(${nodeSha256(layout.cliPath, false, layout.nodePath)})" = ${artifact.sha256}`,
+    health: `test "$(${shellLiteral(layout.waterboxPath)} health)" = ${shellLiteral(HEALTH)}`,
+    version: `test "$(${shellLiteral(layout.waterboxPath)} version)" = ${shellLiteral(VERSION)}`,
+    node: `case "$(${shellLiteral(layout.nodePath)} --version)" in v24.*) true ;; *) false ;; esac`,
+    rg: `case "$(${shellLiteral(layout.rgPath)} --version)" in 'ripgrep '*) true ;; *) false ;; esac`,
+  }
+}
+function verifyCommand(artifact: SandboxRuntimeArtifact, override?: BootstrapVerifyLayout): string {
+  const layout = override ?? BOOTSTRAP_VERIFY_LAYOUT
+  const expectedManifest = shellLiteral(manifest(artifact))
+  const checks = verificationChecks(artifact, layout)
+  return [
+    "set -eu",
+    `if ! test -f ${shellLiteral(layout.manifestPath)} || ! test "$(sudo -n cat ${shellLiteral(layout.manifestPath)})" = ${expectedManifest}; then`,
+    "  printf '%s\\n' waterbox-bootstrap-incomplete",
+    `elif ! ${checks.installedDigest}; then`,
+    "  printf '%s\\n' waterbox-bootstrap-incomplete",
+    `elif ! ${checks.health}; then`,
+    "  printf '%s\\n' waterbox-bootstrap-failed-health",
+    `elif ! ${checks.version}; then`,
+    "  printf '%s\\n' waterbox-bootstrap-failed-version",
+    `elif ! ${checks.node}; then`,
+    "  printf '%s\\n' waterbox-bootstrap-failed-node",
+    `elif ! ${checks.rg}; then`,
+    "  printf '%s\\n' waterbox-bootstrap-failed-rg",
+    "else",
+    "  printf '%s\\n' waterbox-bootstrap-ok",
+    "fi",
+  ].join("\n")
+}
+interface BootstrapInstallLayout {
+  uploadPath: string; libraryDirectory: string; binaryDirectory: string; workspaceDirectory: string; jobsDirectory: string
+  cliPath: string; launcherPath: string; manifestPath: string; nodePath: string
+}
+const BOOTSTRAP_INSTALL_LAYOUT: BootstrapInstallLayout = {
+  uploadPath: "", libraryDirectory: "/usr/local/lib", binaryDirectory: "/usr/local/bin", workspaceDirectory: "/workspace", jobsDirectory: "/run/waterbox/bash-jobs",
+  cliPath: "/usr/local/lib/waterbox-cli.js", launcherPath: "/usr/local/bin/waterbox", manifestPath: "/usr/local/lib/waterbox-bootstrap.json", nodePath: "/usr/local/bin/node",
+}
+function installCommand(artifact: SandboxRuntimeArtifact, override?: BootstrapInstallLayout): string {
+  const digest = artifact.sha256
+  const layout = override ?? { ...BOOTSTRAP_INSTALL_LAYOUT, uploadPath: artifactPath(digest) }
+  const cliTemplate = `${layout.libraryDirectory}/.waterbox-cli.${digest}.XXXXXX`
+  const launcherTemplate = `${layout.binaryDirectory}/.waterbox.XXXXXX`
+  const manifestTemplate = `${layout.libraryDirectory}/.waterbox-bootstrap.XXXXXX`
+  return [
+    "set -eu",
+    "uid=$(id -u); gid=$(id -g)",
+    "sudo -n true",
+    `sudo -n install -d -m 0755 ${shellLiteral(layout.libraryDirectory)} ${shellLiteral(layout.binaryDirectory)}`,
+    `sudo -n install -d -m 0755 -o "$uid" -g "$gid" ${shellLiteral(layout.workspaceDirectory)}`,
+    `sudo -n install -d -m 0700 ${shellLiteral(layout.jobsDirectory)}`,
+    "cli=; launcher=; manifest=",
+    "cleanup() { [ -z \"$cli\" ] || sudo -n rm -f -- \"$cli\"; [ -z \"$launcher\" ] || sudo -n rm -f -- \"$launcher\"; [ -z \"$manifest\" ] || sudo -n rm -f -- \"$manifest\"; }",
+    "trap cleanup EXIT HUP INT TERM",
+    `cli=$(sudo -n mktemp ${shellLiteral(cliTemplate)})`,
+    `launcher=$(sudo -n mktemp ${shellLiteral(launcherTemplate)})`,
+    `manifest=$(sudo -n mktemp ${shellLiteral(manifestTemplate)})`,
+    `sudo -n install -m 0600 ${shellLiteral(layout.uploadPath)} "$cli"`,
+    `test "$(${nodeSha256("$cli", true, layout.nodePath)})" = ${digest}`,
+    "sudo -n chmod 0644 \"$cli\"",
+    `printf %s ${shellLiteral(Buffer.from(LAUNCHER).toString("base64"))} | base64 -d | sudo -n tee \"$launcher\" >/dev/null`,
+    "sudo -n chmod 0755 \"$launcher\"",
+    `printf %s ${shellLiteral(Buffer.from(manifest(artifact)).toString("base64"))} | base64 -d | sudo -n tee \"$manifest\" >/dev/null`,
+    "sudo -n chmod 0644 \"$manifest\"",
+    `sudo -n mv -f "$launcher" ${shellLiteral(layout.launcherPath)}`,
+    `sudo -n mv -f "$cli" ${shellLiteral(layout.cliPath)}`,
+    `sudo -n mv -f "$manifest" ${shellLiteral(layout.manifestPath)}`,
+    "trap - EXIT HUP INT TERM",
+    "printf '%s\\n' waterbox-bootstrap-installed",
+  ].join("\n")
+}
+function validateArtifact(value: unknown): SandboxRuntimeArtifact {
+  if (!isExactObject(value, ["bytes", "sha256", "cliProtocolVersion", "artifactVersion"]) || !(value.bytes instanceof Uint8Array) || value.bytes.byteLength < 1 || typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.sha256) || value.cliProtocolVersion !== 2 || typeof value.artifactVersion !== "string" || !/^[0-9A-Za-z][0-9A-Za-z.+-]{0,127}$/.test(value.artifactVersion)) throw new TypeError("Box runtime artifact is invalid")
+  const bytes = Uint8Array.from(value.bytes)
+  if (createHash("sha256").update(bytes).digest("hex") !== value.sha256) throw new TypeError("Box runtime artifact is invalid")
+  let text: string
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes) } catch { throw new TypeError("Box runtime artifact is invalid") }
+  if (!text.startsWith("#!/usr/bin/env node\n")) throw new TypeError("Box runtime artifact is invalid")
+  return { bytes, sha256: value.sha256, cliProtocolVersion: 2, artifactVersion: value.artifactVersion }
+}
+export async function loadSandboxRuntimeArtifact(url: URL, artifactVersion: string): Promise<SandboxRuntimeArtifact> {
+  if (!(url instanceof URL) || url.protocol !== "file:") throw new TypeError("Box runtime artifact location is invalid")
+  let bytes: Uint8Array
+  try { bytes = await readFile(url) } catch { throw new TypeError("Box runtime artifact could not be loaded") }
+  const sha256 = createHash("sha256").update(bytes).digest("hex")
+  return validateArtifact({ bytes, sha256, cliProtocolVersion: 2, artifactVersion })
+}
 function meaningfulCommandStderr(value: string): string {
   return value.replace(/^sh: 0: getcwd\(\) failed: No such file or directory\n?/, "")
 }
@@ -436,4 +635,4 @@ function invalidInput(): never { throw new ProviderError("failure", "The Box pro
 async function internalSnapshotName(accountId: string, snapshotId: string): Promise<string> { const [a, s] = await Promise.all([shortHash(accountId), shortHash(snapshotId)]); return `waterbox-${slug(accountId)}-${a}-${slug(snapshotId)}-${s}` }
 function slug(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 8) || "id" }
 async function shortHash(value: string): Promise<string> { const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)); return [...new Uint8Array(digest).slice(0, 6)].map((byte) => byte.toString(16).padStart(2, "0")).join("") }
-export const __testing = { internalSnapshotName }
+export const __testing = { BOOTSTRAP_INSTALL_LAYOUT, BOOTSTRAP_VERIFY_LAYOUT, LAUNCHER, internalSnapshotName, artifactPath, installCommand, manifest, nodeSha256, verificationChecks, verifyCommand }

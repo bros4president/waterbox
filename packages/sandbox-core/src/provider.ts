@@ -127,6 +127,7 @@ export class ProviderError extends Error {
 export interface SandboxProvider {
   readonly name: string
   createSandbox(input: ProviderCreateSandboxInput): Promise<ProviderSandboxObservation>
+  prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]>

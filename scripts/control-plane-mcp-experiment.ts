@@ -140,14 +140,12 @@ async function boxJson(baseUrl: string, apiKey: string, path: string, init: Requ
   return response.json()
 }
 
-export async function preflight(baseUrl: string, apiKey: string, templateRef: string): Promise<BoxBaseline> {
-  const [limits, template, listed] = await Promise.all([
+export async function preflight(baseUrl: string, apiKey: string): Promise<BoxBaseline> {
+  const [limits, listed] = await Promise.all([
     boxJson(baseUrl, apiKey, "/limits"),
-    boxJson(baseUrl, apiKey, `/named-snapshots/${encodeURIComponent(templateRef)}`),
     boxJson(baseUrl, apiKey, "/boxes"),
   ])
   if (limits?.ok !== true || limits?.type !== "limits.info" || limits.canStart !== true || !Number.isInteger(limits.activeBoxes) || !Number.isInteger(limits.maxActiveBoxes) || limits.activeBoxes >= limits.maxActiveBoxes) throw new Error("Box account has no capacity for the experiment")
-  if (template?.ok !== true || template?.type !== "snapshot.named.info" || template.snapshot?.name !== templateRef || template.snapshot?.status !== "ready") throw new Error("Configured Box system template is not ready")
   if (listed?.ok !== true || listed?.type !== "box.list" || !Array.isArray(listed.boxes) || !listed.boxes.every((item: any) => typeof item?.id === "string")) throw new Error("Box preflight returned an invalid Box list")
   return { ids: new Set(listed.boxes.map((item: any) => item.id)), activeBoxes: limits.activeBoxes }
 }
@@ -209,19 +207,18 @@ async function main(): Promise<void> {
   const mode = experimentMode(process.argv.slice(2))
   assertExperimentAuthorized(process.env)
   const boxApiKey = process.env.BOX_API_KEY
-  const templateRef = process.env.BOX_SYSTEM_TEMPLATE_REF
-  if (!boxApiKey || !templateRef) throw new Error("BOX_API_KEY and BOX_SYSTEM_TEMPLATE_REF are required")
+  if (!boxApiKey) throw new Error("BOX_API_KEY is required")
   const baseUrl = (process.env.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1").replace(/\/$/, "")
   const openCode = await resolveOpenCode()
-  const baseline = await preflight(baseUrl, boxApiKey, templateRef)
-  console.log(JSON.stringify({ stage: "preflight", templateReady: true, activeBoxes: baseline.activeBoxes }))
+  const baseline = await preflight(baseUrl, boxApiKey)
+  console.log(JSON.stringify({ stage: "preflight", activeBoxes: baseline.activeBoxes }))
 
   const directory = await mkdtemp(join(tmpdir(), "waterbox-mcp-experiment-"))
   const sqlitePath = join(directory, "control-plane.sqlite"), statePath = join(directory, "mcp-state.json"), configPath = join(directory, "opencode.json")
   const developmentApiKey = crypto.randomUUID(), accountId = `experiment-${crypto.randomUUID()}`, idempotencyKey = `experiment-${crypto.randomUUID()}`
   const config: LocalApiConfig = {
     host: "127.0.0.1", port: 1, sqlitePath, developmentApiKey, accountId,
-    box: { apiBaseUrl: baseUrl, apiKey: boxApiKey, systemTemplateRef: templateRef, polling: { intervalMs: 1_000, timeoutMs: 30_000 } },
+    box: { apiBaseUrl: baseUrl, apiKey: boxApiKey, polling: { intervalMs: 1_000, timeoutMs: 30_000 } },
   }
   const local = startLocalServer(createLocalControlPlane(config), { host: "127.0.0.1", port: 0, idleTimeoutSeconds: 60 })
   const apiUrl = `http://127.0.0.1:${local.server.port}`

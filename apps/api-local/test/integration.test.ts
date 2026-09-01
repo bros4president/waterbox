@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -21,9 +22,10 @@ import type {
   SandboxProvider,
   ToolEventByName,
 } from "@waterbox/core/provider"
+import { ProviderError } from "@waterbox/core/provider"
 import { FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { createDaemon } from "@waterbox/daemon"
-import { createLocalControlPlane } from "../src/app.ts"
+import { createLocalControlPlane, localRuntimeArtifact } from "../src/app.ts"
 import { LocalConfigurationError, parseLocalApiConfig, type LocalApiConfig } from "../src/config.ts"
 import { startLocalServer } from "../src/server.ts"
 
@@ -33,6 +35,8 @@ const snapshotId = "snap_silver-forest-2p9x"
 const apiKey = "development-secret-never-print"
 const accountId = "acct_local_test"
 const internalUrl = "https://protected.invalid/daemon?_token=provider-secret"
+const runtimeBytes = new TextEncoder().encode('#!/usr/bin/env node\nconst WORKSPACE_ROOT="/workspace",worker="__internal-bash-worker",node="/usr/local/bin/node",cli="/usr/local/lib/waterbox-cli.js";void[WORKSPACE_ROOT,worker,node,cli]\n')
+const runtimeArtifact = { bytes: runtimeBytes, sha256: createHash("sha256").update(runtimeBytes).digest("hex"), cliProtocolVersion: 2 as const, artifactVersion: "0.1.0" }
 const eventSchemas = { read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema, bash: BashToolEventSchema }
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!() })
@@ -43,9 +47,14 @@ class DaemonBackedProvider implements SandboxProvider {
   readonly snapshots = { create: (input: ProviderCreateSnapshotInput) => this.createSnapshot(input), inspect: (input: ProviderSnapshotOperationInput) => this.inspectSnapshot(input), delete: (input: ProviderSnapshotOperationInput) => this.deleteSnapshot(input) }
   readonly states = new Map<string, "running" | "stopped" | "terminated">()
   readonly snapshotStates = new Map<string, "ready" | "deleted">()
+  prepareError?: unknown
   lastToolSignal?: AbortSignal
   constructor(readonly daemonUrl: string) {}
   async createSandbox(input: ProviderCreateSandboxInput) { this.states.set(input.sandboxId, "running"); return { state: "running" as const, providerRef: { id: input.sandboxId, url: internalUrl } } }
+  async prepareSandbox(input: ProviderOperationInput) {
+    if (this.prepareError !== undefined) throw this.prepareError
+    return { state: "running" as const, providerRef: input.providerRef }
+  }
   async inspectSandbox(input: ProviderOperationInput) { const id = refId(input.providerRef); return { state: this.states.get(id) ?? "running", providerRef: input.providerRef } }
   async stop(input: ProviderOperationInput) { this.states.set(refId(input.providerRef), "stopped"); return { state: "stopped" as const, providerRef: input.providerRef } }
   async resume(input: ProviderOperationInput) { this.states.set(refId(input.providerRef), "running"); return { state: "running" as const, providerRef: input.providerRef } }
@@ -99,7 +108,7 @@ async function fixture(ids = [sandboxId, secondSandboxId]) {
   const provider = new DaemonBackedProvider(`http://127.0.0.1:${daemonServer.port}`)
   const config: LocalApiConfig = {
     host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: apiKey, accountId,
-    box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", systemTemplateRef: "unused-template", polling: { intervalMs: 1, timeoutMs: 10 } },
+    box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", polling: { intervalMs: 1, timeoutMs: 10 } },
   }
   const create = () => createLocalControlPlane(config, { provider, clock: new FixedClock(), ids: new SequenceIdGenerator(ids, [snapshotId]) })
   const plane = create()
@@ -121,9 +130,28 @@ async function json(baseUrl: string, path: string, init: RequestInit = {}) {
 const post = (body: unknown) => ({ method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
 
 describe("local API composition", () => {
+  test("reads the fixed package-relative artifact and fails safely when it is missing", async () => {
+    let reads = 0; let readUrl: URL | undefined
+    const artifact = localRuntimeArtifact({
+      read(url) { readUrl = url; reads++; return runtimeBytes },
+    })
+    expect(reads).toBe(1)
+    expect(readUrl?.pathname.endsWith("/packages/mcp/dist/waterbox-cli.js")).toBe(true)
+    expect(artifact.sha256).toBe(runtimeArtifact.sha256)
+    expect(() => localRuntimeArtifact({ read() { throw new Error("missing") } })).toThrow("Waterbox local runtime artifact is unavailable")
+
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-api-local-clean-"))
+    const config: LocalApiConfig = {
+      host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: "placeholder-development-key", accountId,
+      box: { apiBaseUrl: "https://api.box.invalid", apiKey: "placeholder-not-a-live-key", polling: { intervalMs: 1, timeoutMs: 10 } },
+    }
+    const plane = createLocalControlPlane(config, { artifact })
+    try { expect((await plane.fetch(new Request("http://local.test/health"))).status).toBe(200) }
+    finally { plane.close(); await rm(directory, { recursive: true, force: true }) }
+  })
+
   test("strict configuration is secret-safe and fixed identity rejects other keys", async () => {
-    const raw = { WATERBOX_SQLITE_PATH: "/tmp/waterbox.sqlite", WATERBOX_DEV_API_KEY: apiKey, WATERBOX_DEV_ACCOUNT_ID: accountId, BOX_API_KEY: "box-secret", BOX_SYSTEM_TEMPLATE_REF: "template" }
-    expect(parseLocalApiConfig(raw).developmentApiKey).toBe(apiKey)
+    const raw = { WATERBOX_SQLITE_PATH: "/tmp/waterbox.sqlite", WATERBOX_DEV_API_KEY: apiKey, WATERBOX_DEV_ACCOUNT_ID: accountId, BOX_API_KEY: "box-secret" }
     let error: unknown
     try { parseLocalApiConfig({ ...raw, WATERBOX_API_PORT: "not-a-port" }) } catch (caught) { error = caught }
     expect(error).toBeInstanceOf(LocalConfigurationError)
@@ -145,6 +173,34 @@ describe("local API composition", () => {
     const replacementUrl = `http://127.0.0.1:${replacement.server.port}`
     expect((await json(replacementUrl, "/v1/sandboxes")).items).toHaveLength(1)
     expect((await json(replacementUrl, `/v1/sandboxes/${sandboxId}`)).sandboxId).toBe(sandboxId)
+  })
+
+  test("returns recovery sandbox IDs for definite and ambiguous post-checkpoint create failures", async () => {
+    for (const kind of ["failure", "ambiguous_execution"] as const) {
+      const context = await fixture([sandboxId])
+      const secret = `private-${kind}-detail`
+      context.provider.prepareError = new ProviderError(kind, secret)
+
+      const response = await request(context.baseUrl, "/v1/sandboxes", {
+        ...post({}),
+        headers: { "content-type": "application/json", "idempotency-key": `prepare-${kind}` },
+      })
+      expect(response.status).toBe(502)
+      const text = await response.text()
+      expect(text).not.toContain(secret)
+      expect(JSON.parse(text)).toEqual({
+        error: {
+          code: kind === "failure" ? "provider_failure" : "ambiguous_execution",
+          message: kind === "failure" ? "The provider operation failed" : "The provider execution outcome is unknown",
+          requestId: expect.any(String),
+          sandboxId,
+        },
+      })
+
+      const recovered = await json(context.baseUrl, `/v1/sandboxes/${sandboxId}`)
+      expect(recovered.state).toBe(kind === "failure" ? "failed" : "preparing")
+      expect((await json(context.baseUrl, `/v1/sandboxes/${sandboxId}`, { method: "DELETE" })).state).toBe("terminated")
+    }
   })
 
   test("runs lifecycle, snapshots, snapshot fork, and every tool without leaking internals", async () => {
