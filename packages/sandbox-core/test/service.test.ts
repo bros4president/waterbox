@@ -667,7 +667,7 @@ describe("lifecycle and optional groups", () => {
     expect(provider.deleteSnapshotCalls).toBe(1)
   })
 
-  test("persists a ready snapshot before applying its exact stopped source observation", async () => {
+  test("persists the source observation before finalizing a ready snapshot", async () => {
     const { service, provider, sandboxes, snapshots } = harness()
     const sandbox = await service.createSandbox(alice, {})
     provider.createSnapshotObservation = { state: "ready", providerRef: { fakeSnapshot: "native-snapshot" }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandbox.sandboxId } } }
@@ -714,6 +714,48 @@ describe("lifecycle and optional groups", () => {
     expect((await snapshots.get(alice.accountId, created.snapshotId))?.state).toBe("ready")
     expect((await base.get(alice.accountId, sandboxId))?.state).toBe("terminated")
     expect((await service.getSandbox(alice, sandboxId)).state).toBe("terminated")
+  })
+
+  test("leaves an exhausted source checkpoint creating and recovers it through later exact reconciliation", async () => {
+    const base = new InMemorySandboxRepository()
+    const sandboxes = new ExhaustingSourceCasRepository(base, 100)
+    const snapshots = new InMemorySnapshotRepository(), provider = new FakeSandboxProvider()
+    const sandboxId = "sbx_calm-cactus-a1" as SandboxId
+    await base.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "running"))
+    provider.sandboxStates.set(sandboxId, "running")
+    provider.createSnapshotObservation = { state: "ready", providerRef: { privateSnapshotId: "snap_silver-forest-a1" }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } } }
+    const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-a1"]) }
+    const service = new SandboxService(dependencies, { metadataConflictRetries: 1 })
+
+    const created = await service.createSnapshot(alice, sandboxId, {})
+
+    expect(created.state).toBe("creating")
+    expect((await snapshots.get(alice.accountId, created.snapshotId))?.state).toBe("creating")
+    expect((await base.get(alice.accountId, sandboxId))?.state).toBe("running")
+    sandboxes.allow()
+    provider.sandboxStates.set(sandboxId, "stopped")
+    const recovered = new SandboxService(dependencies)
+    expect((await recovered.getSnapshot(alice, created.snapshotId)).state).toBe("ready")
+    expect((await base.get(alice.accountId, sandboxId))?.state).toBe("stopped")
+  })
+
+  test("retains the checkpoint across a source repository error and reconciles a terminal failed snapshot", async () => {
+    const base = new InMemorySandboxRepository()
+    const sandboxes = new ExhaustingSourceCasRepository(base, 1, true)
+    const snapshots = new InMemorySnapshotRepository(), provider = new FakeSandboxProvider()
+    const sandboxId = "sbx_calm-cactus-a1" as SandboxId, snapshotId = "snap_silver-forest-a1" as SnapshotId
+    await base.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "running"))
+    provider.sandboxStates.set(sandboxId, "running")
+    provider.createSnapshotObservation = { state: "failed", providerRef: { privateSnapshotId: snapshotId }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } } }
+    const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], [snapshotId]) }
+
+    expect((await new SandboxService(dependencies).createSnapshot(alice, sandboxId, {})).state).toBe("creating")
+    expect((await snapshots.get(alice.accountId, snapshotId))?.providerRef).toEqual({ privateSnapshotId: snapshotId })
+    sandboxes.allow()
+    provider.snapshotStates.set(snapshotId, "failed")
+    provider.sandboxStates.set(sandboxId, "stopped")
+    expect((await new SandboxService(dependencies).getSnapshot(alice, snapshotId)).state).toBe("failed")
+    expect((await base.get(alice.accountId, sandboxId))?.state).toBe("stopped")
   })
 
   test("snapshot creation requires a running sandbox and never resumes implicitly", async () => {
@@ -1136,7 +1178,7 @@ describe("execution and reconciliation", () => {
     provider.sandboxStates.set(terminatedId, "terminated")
     expect((await service.probeSandbox(alice, terminatedId, sandboxSignal)).state).toBe("terminated")
     expect((await service.getSnapshot(alice, snapshotId, snapshotSignal)).state).toBe("ready")
-    expect(provider.inspectSandboxCalls).toBe(3)
+    expect(provider.inspectSandboxCalls).toBe(4)
     expect(provider.inspectSnapshotCalls).toBe(1)
     expect(provider.lifecycleInputs[0]).toEqual({
       operation: "inspect",
@@ -1372,6 +1414,22 @@ class FailingSandboxCasRepository implements SandboxRepository {
   get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined> { return this.base.get(accountId, sandboxId) }
   list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> { return this.base.list(input) }
   async compareAndSwap(): Promise<boolean> { throw new Error("injected sandbox persistence failure") }
+}
+
+class ExhaustingSourceCasRepository implements SandboxRepository {
+  constructor(readonly base: InMemorySandboxRepository, private remaining: number, private readonly throws = false) {}
+  createIfAbsent(record: SandboxRecord): Promise<boolean> { return this.base.createIfAbsent(record) }
+  get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined> { return this.base.get(accountId, sandboxId) }
+  list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> { return this.base.list(input) }
+  allow(): void { this.remaining = 0 }
+  compareAndSwap(record: SandboxRecord, expectedVersion: number): Promise<boolean> {
+    if (record.state === "stopped" && this.remaining > 0) {
+      this.remaining--
+      if (this.throws) return Promise.reject(new Error("injected source persistence failure"))
+      return Promise.resolve(false)
+    }
+    return this.base.compareAndSwap(record, expectedVersion)
+  }
 }
 
 class FailingRunningCommitRepository implements SandboxRepository {

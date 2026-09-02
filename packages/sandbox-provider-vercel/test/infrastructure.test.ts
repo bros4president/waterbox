@@ -370,6 +370,43 @@ describe("Vercel primitive REST adapter", () => {
     await expect(cleanupAbort.value.delete({ accountId: "account", providerRef, signal: controller.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
   })
 
+  test("finds an unpersisted current automatic snapshot through the exact owned sandbox only", async () => {
+    const paths: string[] = []; const captured: { deleteContentType: string | null } = { deleteContentType: null }; let reads = 0
+    const { value } = fixture(request => {
+      const path = new URL(request.url).pathname; paths.push(`${request.method} ${path}`)
+      if (path === `/v2/sandboxes/${name()}` && request.method === "GET") return ++reads === 1
+        ? Response.json({ sandbox: { name: name(), currentSessionId: "session-1", currentSnapshotId: "auto-current", status: "stopped", tags: { "waterbox-owner": owner(), "waterbox-account": account() } }, session: { id: "session-1", projectId: "project" } })
+        : Response.json({}, { status: 404 })
+      if (path.endsWith("/snapshots/auto-current") && request.method === "GET") return Response.json({ id: "auto-current", sourceSessionId: "session-1", creationMethod: "automatic", status: "created" })
+      if (path.endsWith("/snapshots/auto-current") && request.method === "DELETE") return Response.json({ snapshot: { id: "auto-current", sourceSessionId: "session-1", status: "deleted" } })
+      if (path === `/v2/sandboxes/${name()}` && request.method === "DELETE") { captured.deleteContentType = request.headers.get("content-type"); return new Response(null, { status: 200 }) }
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    await expect(value.delete({ accountId: "account", providerRef, signal: signal() })).resolves.toMatchObject({ state: "terminated" })
+    expect(paths).toContain("DELETE /v2/sandboxes/snapshots/auto-current")
+    expect(paths).toContain(`DELETE /v2/sandboxes/${name()}`)
+    expect(captured.deleteContentType).toBe("application/json")
+  })
+
+  test("uses the exact current automatic snapshot instead of a stale persisted reference", async () => {
+    const paths: string[] = []; let reads = 0
+    const { value } = fixture(request => {
+      const path = new URL(request.url).pathname; paths.push(`${request.method} ${path}`)
+      if (path === `/v2/sandboxes/${name()}` && request.method === "GET") return ++reads === 1
+        ? Response.json({ sandbox: { name: name(), currentSessionId: "session-2", currentSnapshotId: "auto-new", status: "stopped", tags: { "waterbox-owner": owner(), "waterbox-account": account() } }, session: { id: "session-2", projectId: "project" } })
+        : Response.json({}, { status: 404 })
+      if (path.endsWith("/snapshots/auto-new") && request.method === "GET") return Response.json({ id: "auto-new", sourceSessionId: "session-2", creationMethod: "automatic", status: "created" })
+      if (path.endsWith("/snapshots/auto-new") && request.method === "DELETE") return Response.json({ snapshot: { id: "auto-new", sourceSessionId: "session-2", status: "deleted" } })
+      if (path === `/v2/sandboxes/${name()}` && request.method === "DELETE") return new Response(null, { status: 200 })
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account(), automaticSnapshotId: "auto-old" } as const
+    await expect(value.delete({ accountId: "account", providerRef, signal: signal() })).resolves.toMatchObject({ state: "terminated" })
+    expect(paths).toContain("DELETE /v2/sandboxes/snapshots/auto-new")
+    expect(paths.some(path => path.includes("auto-old"))).toBe(false)
+  })
+
   test("uses the owned sandbox current-snapshot link when Vercel automatic snapshots omit copied tags/names, and reconciles tombstone races without DELETE replay", async () => {
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account(), automaticSnapshotId: "auto-old" } as const
     const liveShapePaths: string[] = []; let liveShapeReads = 0
@@ -448,7 +485,38 @@ describe("Vercel primitive REST adapter", () => {
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     await expect(value.runCommand({ accountId: "account", providerRef, script: "sleep 30", timeoutMs: 1000, signal: controller.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
-    expect(paths).toContain("POST /v2/sandboxes/sessions/session-1/cmd/command-cancel/kill")
+    expect(paths.filter(path => path === "POST /v2/sandboxes/sessions/session-1/cmd/command-cancel/kill")).toHaveLength(1)
+  })
+
+  test("covers command timeout plus transport allowance and kills a nonterminal command", async () => {
+    let now = 0; const paths: string[] = []
+    const clock: VercelProviderClock = { now: () => now, sleep: async (_milliseconds, signal) => { signal.throwIfAborted(); now += 6 } }
+    const value = new VercelSandboxInfrastructure(config, { clock, fetch: async (requestInput, init) => {
+      const request = new Request(requestInput, init), path = new URL(request.url).pathname; paths.push(`${request.method} ${path}`)
+      if (path === `/v2/sandboxes/${name()}`) return created(name())
+      if (path.endsWith("/cmd") && request.method === "POST") return Response.json({ command: { id: "command-long", sessionId: "session-1", exitCode: null } })
+      if (path.endsWith("/cmd/command-long") && request.method === "GET") return Response.json({ command: { id: "command-long", sessionId: "session-1", exitCode: null } })
+      if (path.endsWith("/cmd/command-long/kill")) return Response.json({})
+      throw new Error(`unexpected ${request.method} ${path}`)
+    } })
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    await expect(value.runCommand({ accountId: "account", providerRef, script: "sleep 30", timeoutMs: 10, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(paths).toContain("POST /v2/sandboxes/sessions/session-1/cmd/command-long/kill")
+  })
+
+  test("kills a command when a wait request consumes its remaining observation bound", async () => {
+    const paths: string[] = []
+    const value = new VercelSandboxInfrastructure(config, { clock: new Clock(), fetch: async (requestInput, init) => {
+      const request = new Request(requestInput, init), path = new URL(request.url).pathname; paths.push(`${request.method} ${path}`)
+      if (path === `/v2/sandboxes/${name()}`) return created(name())
+      if (path.endsWith("/cmd") && request.method === "POST") return Response.json({ command: { id: "command-held", sessionId: "session-1", exitCode: null } })
+      if (path.endsWith("/cmd/command-held") && request.method === "GET") return new Promise<Response>((_resolve, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }))
+      if (path.endsWith("/cmd/command-held/kill")) return Response.json({})
+      throw new Error(`unexpected ${request.method} ${path}`)
+    } })
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    await expect(value.runCommand({ accountId: "account", providerRef, script: "sleep 30", timeoutMs: 1, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(paths).toContain("POST /v2/sandboxes/sessions/session-1/cmd/command-held/kill")
   })
 
   test("replaces a prior tracked automatic snapshot only after proving and deleting that prior automatic artifact", async () => {

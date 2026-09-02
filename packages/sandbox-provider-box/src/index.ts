@@ -122,8 +122,7 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async create(input: InfrastructureCreateInput): Promise<InfrastructureSandboxObservation> {
     assertCreateInput(input); input.signal.throwIfAborted()
     const source = input.sourceSnapshotRef === undefined ? {} : { from: snapshotRef(input.sourceSnapshotRef).name }
-    const created = await this.#dispatchedLifecycleMutation(input.signal, async () => createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId } }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })))
-    const ready = await this.#waitReady(created, input.signal)
+    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId } }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
     return observation(mapSandboxState(ready.state), { kind: "box-sandbox-v2", boxId: ready.id })
   }
 
@@ -137,20 +136,21 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async runCommand(input: InfrastructureCommandInput): Promise<InfrastructureCommandResult> {
     assertCommandInput(input)
     const ref = sandboxRef(input.providerRef)
+    const requestSignal = AbortSignal.any([input.signal, AbortSignal.timeout(input.timeoutMs + this.#config.polling.timeoutMs)])
     let response: Response
     try {
-      response = await this.#fetch(`${this.#config.apiBaseUrl}/boxes/${segment(ref.boxId)}/commands`, { method: "POST", headers: this.#headers(true), body: JSON.stringify({ command: input.script, timeoutSeconds: Math.ceil(input.timeoutMs / 1000) }), signal: input.signal })
+      response = await this.#fetch(`${this.#config.apiBaseUrl}/boxes/${segment(ref.boxId)}/commands`, { method: "POST", headers: this.#headers(true), body: JSON.stringify({ command: input.script, timeoutSeconds: Math.ceil(input.timeoutMs / 1000) }), signal: requestSignal })
     } catch (error) { if (input.signal.aborted) throw input.signal.reason ?? error; throw ambiguous() }
     if (!response.ok) {
       this.#emit({ type: "tool-http-error", status: response.status })
-      await safeError(response, input.signal)
+      await safeError(response, requestSignal)
       if (input.signal.aborted) throw input.signal.reason
       if (response.status >= 500) throw ambiguous()
       throw new BoxHttpError(response.status)
     }
     try {
       media(response)
-      const result = commandResult(await json(response, input.signal, MAX_COMMAND_JSON_BYTES))
+      const result = commandResult(await json(response, requestSignal, MAX_COMMAND_JSON_BYTES))
       const stdout = new TextEncoder().encode(result.stdout)
       const stderr = new TextEncoder().encode(meaningfulStderr(result.stderr))
       if (stdout.byteLength > (input.maxStdoutBytes ?? MAX_JSON_BYTES) || stderr.byteLength > (input.maxStderrBytes ?? MAX_JSON_BYTES)) throw ambiguous()
@@ -159,13 +159,12 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   }
 
   async writeFile(input: InfrastructureWriteFileInput): Promise<void> {
-    assertWriteFileInput(input)
+    assertWriteFileInput(input); input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
     try {
-      const value = await this.#json("PUT", `/boxes/${segment(ref.boxId)}/files`, input.signal, { body: { path: input.path, content: Buffer.from(input.contents).toString("base64"), encoding: "base64" }, statuses: [200] })
+      const value = await this.#json("PUT", `/boxes/${segment(ref.boxId)}/files`, input.signal, { body: { path: input.path, content: Buffer.from(input.contents).toString("base64"), encoding: "base64" }, statuses: [200], dispatchedMutation: true })
       writtenFile(value, input.path, input.contents.byteLength)
     } catch (error) {
-      if (input.signal.aborted) throw input.signal.reason ?? error
       if (error instanceof BoxHttpError) throw error
       throw new ProviderError("ambiguous_execution", "Box file write outcome is unknown")
     }
@@ -180,14 +179,18 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async #resume(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    const state = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"))
-    return observation(mapSandboxState((await this.#waitReady(state, input.signal)).state), ref)
+    const state = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"), input.signal))
+    return observation(mapSandboxState(state.state), ref)
   }
   async delete(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    const operation = await this.#dispatchedLifecycleMutation(input.signal, async () => deletion(await this.#json("DELETE", `/boxes/${segment(ref.boxId)}`, input.signal, { headers: { "x-ascii-confirm-delete": ref.boxId }, statuses: [202], dispatchedMutation: true }), "box.deleting", ref.boxId))
-    await this.#waitDeletion(operation.id, ref.boxId, input.signal)
+    let operation: { id: string; status: string }
+    try {
+      operation = await this.#dispatchedLifecycleMutation(input.signal, async () => deletion(await this.#json("DELETE", `/boxes/${segment(ref.boxId)}`, input.signal, { headers: { "x-ascii-confirm-delete": ref.boxId }, statuses: [202], dispatchedMutation: true }), "box.deleting", ref.boxId))
+    } catch (error) { if (error instanceof BoxHttpError && error.status === 404) return observation("terminated", ref); throw error }
+    try { await this.#waitDeletion(operation.id, ref.boxId, input.signal) }
+    catch (error) { if (error instanceof ProviderError && error.kind === "ambiguous_execution") throw error; throw ambiguousMutation() }
     return observation("terminated", ref)
   }
   async #createSnapshot(input: InfrastructureCreateSnapshotInput): Promise<InfrastructureSnapshotObservation> {
@@ -196,10 +199,13 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
     const source = infoBox(await this.#json("GET", `/boxes/${segment(sandbox.boxId)}`, input.signal, { statuses: [200] }), sandbox.boxId)
     if (mapSandboxState(source.state) !== "running") throw new ProviderError("failure", "The snapshot source is not running")
     try {
-      const value = namedSnapshot(await this.#json("POST", "/named-snapshots", input.signal, { body: { boxId: sandbox.boxId, name }, statuses: [202] }), "snapshot.named.saving", name, sandbox.boxId)
+      const value = namedSnapshot(await this.#json("POST", "/named-snapshots", input.signal, { body: { boxId: sandbox.boxId, name }, statuses: [202], dispatchedMutation: true }), "snapshot.named.saving", name, sandbox.boxId)
       return snapshotObservation(mapSnapshotState(value.status), { kind: "box-named-snapshot-v2", name })
     } catch (error) {
-      if (input.signal.aborted) throw input.signal.reason ?? error
+      if (input.signal.aborted) {
+        if (error instanceof ProviderError && error.kind === "ambiguous_execution") throw error
+        throw input.signal.reason ?? error
+      }
       if (error instanceof ProviderError && (error.kind === "limit" || error instanceof BoxHttpError && error.status < 500)) throw error
       try {
         const value = namedSnapshot(await this.#json("GET", `/named-snapshots/${segment(name)}`, input.signal, { statuses: [200] }), "snapshot.named.info", name, sandbox.boxId)
@@ -209,13 +215,18 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   }
   async #inspectSnapshot(input: InfrastructureSnapshotInput): Promise<InfrastructureSnapshotObservation> {
     const ref = snapshotRef(input.providerRef)
-    const value = namedSnapshot(await this.#json("GET", `/named-snapshots/${segment(ref.name)}`, input.signal, { statuses: [200] }), "snapshot.named.info", ref.name)
-    return snapshotObservation(mapSnapshotState(value.status), ref)
+    try {
+      const value = namedSnapshot(await this.#json("GET", `/named-snapshots/${segment(ref.name)}`, input.signal, { statuses: [200] }), "snapshot.named.info", ref.name)
+      return snapshotObservation(mapSnapshotState(value.status), ref)
+    } catch (error) { if (error instanceof BoxHttpError && error.status === 404) return snapshotObservation("deleted", ref); throw error }
   }
   async #deleteSnapshot(input: InfrastructureSnapshotInput): Promise<InfrastructureSnapshotObservation> {
+    input.signal.throwIfAborted()
     const ref = snapshotRef(input.providerRef)
-    deletedSnapshot(await this.#json("DELETE", `/named-snapshots/${segment(ref.name)}`, input.signal, { statuses: [200] }), ref.name)
-    return snapshotObservation("deleted", ref)
+    try {
+      deletedSnapshot(await this.#json("DELETE", `/named-snapshots/${segment(ref.name)}`, input.signal, { statuses: [200], dispatchedMutation: true }), ref.name)
+      return snapshotObservation("deleted", ref)
+    } catch (error) { if (error instanceof BoxHttpError && error.status === 404) return snapshotObservation("deleted", ref); throw error }
   }
 
   async #waitReady(initial: BoxDto, signal: AbortSignal): Promise<BoxDto> {
@@ -244,28 +255,27 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
     catch (error) {
       if (error instanceof BoxHttpError || error instanceof ProviderError && error.kind !== "failure") throw error
       if (error instanceof ProviderError) throw ambiguousMutation()
-      if (signal.aborted) throw signal.reason ?? error
       throw ambiguousMutation()
     }
   }
   async #json(method: string, path: string, signal: AbortSignal, options: { body?: unknown; headers?: Record<string, string>; idempotencyKey?: string; statuses?: number[]; dispatchedMutation?: boolean } = {}): Promise<unknown> {
     let response: Response
-    try { response = await this.#fetch(`${this.#config.apiBaseUrl}${path}`, { method, headers: { ...this.#headers(options.body !== undefined), ...(options.idempotencyKey === undefined ? {} : { "idempotency-key": options.idempotencyKey }), ...options.headers }, ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }), signal }) }
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(this.#config.polling.timeoutMs)])
+    try { response = await this.#fetch(`${this.#config.apiBaseUrl}${path}`, { method, headers: { ...this.#headers(options.body !== undefined), ...(options.idempotencyKey === undefined ? {} : { "idempotency-key": options.idempotencyKey }), ...options.headers }, ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }), signal: requestSignal }) }
     catch (error) {
-      if (options.dispatchedMutation && !abortError(error)) throw ambiguousMutation()
-      if (signal.aborted) throw signal.reason ?? error
       if (options.dispatchedMutation) throw ambiguousMutation()
+      if (signal.aborted) throw signal.reason ?? error
       throw new ProviderError("failure", "Box request failed")
     }
     if (!response.ok) {
-      const failure = await safeError(response, signal)
+      const failure = await safeError(response, requestSignal)
       if (/(?:snapshot.*quota|quota.*snapshot|snapshot[_-]limit)/i.test(`${failure.code} ${failure.message}`)) throw new ProviderError("limit", "Box named snapshot limit reached")
       if (options.dispatchedMutation && response.status >= 500) throw ambiguousMutation()
       throw new BoxHttpError(response.status)
     }
     if (options.statuses && !options.statuses.includes(response.status)) throw new ProviderError("failure", "Box returned an unexpected status")
     if (response.status === 204) return undefined
-    try { media(response); return await json(response, signal, MAX_JSON_BYTES) } catch (error) { if (signal.aborted) throw signal.reason ?? error; if (options.dispatchedMutation) throw ambiguousMutation(); throw new ProviderError("failure", "Box returned an invalid response") }
+    try { media(response); return await json(response, requestSignal, MAX_JSON_BYTES) } catch (error) { if (options.dispatchedMutation) throw ambiguousMutation(); if (signal.aborted) throw signal.reason ?? error; throw new ProviderError("failure", "Box returned an invalid response") }
   }
   #emit(event: BoxProviderDiagnostic): void { try { this.#diagnostic?.(event) } catch {} }
 }
@@ -315,7 +325,6 @@ function mapSandboxState(state: BoxState): SandboxState { return READY.has(state
 function mapSnapshotState(state: SnapshotStatus): SnapshotState { return state === "saving" ? "creating" : state }
 function ambiguous(): ProviderError { return new ProviderError("ambiguous_execution", "Box command outcome is unknown") }
 function ambiguousMutation(): ProviderError { return new ProviderError("ambiguous_execution", "Box mutation outcome is unknown") }
-function abortError(error: unknown): boolean { return error instanceof Error && error.name === "AbortError" }
 function meaningfulStderr(value: string): string { return value.replace(/^sh: 0: getcwd\(\) failed: No such file or directory\n?/, "") }
 function segment(value: string): string { return encodeURIComponent(value) }
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value === value.trim() }
@@ -324,6 +333,6 @@ function object(value: unknown): value is Record<string, unknown> { return typeo
 function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, any> { return object(value) && required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key)) }
 function media(response: Response): void { if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw new Error("invalid media type") }
 async function safeError(response: Response, signal: AbortSignal): Promise<{ code: string; message: string }> { try { media(response); const value = await json(response, signal, MAX_JSON_BYTES); return object(value) && typeof value.code === "string" ? { code: value.code, message: typeof value.message === "string" ? value.message : "" } : { code: "", message: "" } } catch { return { code: "", message: "" } } }
-async function json(response: Response, signal: AbortSignal, maximum: number): Promise<unknown> { if (!response.body) throw new Error("missing body"); const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let length = 0; try { while (true) { signal.throwIfAborted(); const next = await reader.read(); if (next.done) break; length += next.value.byteLength; if (length > maximum) throw new Error("response too large"); chunks.push(next.value) } } finally { reader.releaseLock() } const bytes = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength } return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
+async function json(response: Response, signal: AbortSignal, maximum: number): Promise<unknown> { if (!response.body) throw new Error("missing body"); const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let length = 0, done = false; try { while (true) { signal.throwIfAborted(); const next = await reader.read(); if (next.done) { done = true; break } length += next.value.byteLength; if (length > maximum) throw new Error("response too large"); chunks.push(next.value) } } finally { if (!done) await reader.cancel().catch(() => undefined); reader.releaseLock() } const bytes = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength } return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
 async function snapshotName(accountId: string, snapshotId: string): Promise<string> { const hash = async (value: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).slice(0, 6)].map(byte => byte.toString(16).padStart(2, "0")).join(""); const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 8) || "id"; return `waterbox-${slug(accountId)}-${await hash(accountId)}-${slug(snapshotId)}-${await hash(snapshotId)}` }
 export { loadSandboxRuntimeArtifact } from "@waterbox/provider-runtime"

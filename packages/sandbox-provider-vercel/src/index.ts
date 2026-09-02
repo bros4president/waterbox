@@ -173,7 +173,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
       commandId = command(created, native.sessionId).id
     } catch (error) { throw mutationError(error, "Vercel command outcome is unknown") }
     try {
-      const terminal = await this.#waitCommand(native.sessionId, commandId, input.signal)
+      const terminal = await this.#waitCommand(native.sessionId, commandId, input.timeoutMs, input.signal)
       const logs = await this.#logs(native.sessionId, commandId, input.signal, input.maxStdoutBytes ?? MAX_COMMAND_OUTPUT_BYTES, input.maxStderrBytes ?? MAX_COMMAND_OUTPUT_BYTES)
       const result = { exitCode: terminal.exitCode, stdout: logs.stdout, stderr: logs.stderr, timedOut: false, stdoutTruncated: false, stderrTruncated: false }
       assertCommandResult(result, input)
@@ -221,8 +221,8 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     let native: NativeSandbox | undefined
     try { native = await this.#inspectNamed(value.name, value.owner, value.account, input.signal) }
     catch (error) { if (error instanceof VercelHttpError && error.status === 404) return { state: "terminated", providerRef: value }; throw error }
-    await this.#cleanupAutomaticSnapshot(value, native, input.signal)
-    try { await this.#json("DELETE", `/v2/sandboxes/${segment(value.name)}`, input.signal, { query: { projectId: this.#config.projectId, teamId: this.#config.teamId, deleteOrphanSnapshots: "false" }, mutation: true }) }
+    await this.#cleanupAutomaticSnapshot(native, input.signal)
+    try { await this.#json("DELETE", `/v2/sandboxes/${segment(value.name)}`, input.signal, { query: { projectId: this.#config.projectId, teamId: this.#config.teamId, deleteOrphanSnapshots: "false" }, mutation: true, empty: true, statuses: [200] }) }
     catch (error) { if (!(error instanceof VercelHttpError && error.status === 404)) throw mutationError(error, "Vercel delete outcome is unknown") }
     const deadline = this.#deadline()
     while (true) {
@@ -314,13 +314,16 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     return sandbox(await this.#json("GET", `/v2/sandboxes/${segment(name)}`, signal, { query: { projectId: this.#config.projectId, teamId: this.#config.teamId, resume: String(resume) }, mutation }), name, this.#config.projectId, owner, account)
   }
 
-  async #waitCommand(sessionId: string, commandId: string, signal: AbortSignal): Promise<{ exitCode: number }> {
-    const deadline = this.#deadline()
+  async #waitCommand(sessionId: string, commandId: string, timeoutMs: number, signal: AbortSignal): Promise<{ exitCode: number }> {
+    const deadline = this.#now() + timeoutMs + this.#config.polling.requestTimeoutMs
     while (true) {
-      const result = command(await this.#json("GET", `/v2/sandboxes/sessions/${segment(sessionId)}/cmd/${segment(commandId)}`, signal, { query: { teamId: this.#config.teamId, wait: "true" } }), sessionId)
+      const remaining = Math.max(1, deadline - this.#now())
+      let result: { id: string; exitCode: number | null }
+      try { result = command(await this.#json("GET", `/v2/sandboxes/sessions/${segment(sessionId)}/cmd/${segment(commandId)}`, signal, { query: { teamId: this.#config.teamId, wait: "true" }, requestTimeoutMs: remaining }), sessionId) }
+      catch (error) { if (!signal.aborted) await this.#kill(sessionId, commandId); throw error }
       if (result.id !== commandId) throw new Error("command identity mismatch")
       if (result.exitCode !== null) return { exitCode: result.exitCode }
-      if (this.#now() >= deadline) throw new Error("command polling timed out")
+      if (this.#now() >= deadline) { await this.#kill(sessionId, commandId); throw new Error("command polling timed out") }
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
     }
   }
@@ -378,10 +381,11 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     try { await this.#json("POST", `/v2/sandboxes/sessions/${segment(sessionId)}/cmd/${segment(commandId)}/kill`, new AbortController().signal, { query: { teamId: this.#config.teamId }, body: { signal: 15 }, mutation: true }) } catch {}
   }
 
-  async #cleanupAutomaticSnapshot(value: SandboxRef, native: NativeSandbox, signal: AbortSignal): Promise<void> {
-    if (!value.automaticSnapshotId) return
+  async #cleanupAutomaticSnapshot(native: NativeSandbox, signal: AbortSignal): Promise<void> {
+    const automaticSnapshotId = native.currentSnapshotId
+    if (!automaticSnapshotId) return
     let current: NativeSnapshot
-    try { current = snapshotEnvelope(await this.#json("GET", `/v2/sandboxes/snapshots/${segment(value.automaticSnapshotId)}`, signal, { query: { teamId: this.#config.teamId } })) }
+    try { current = snapshotEnvelope(await this.#json("GET", `/v2/sandboxes/snapshots/${segment(automaticSnapshotId)}`, signal, { query: { teamId: this.#config.teamId } })) }
     catch (error) { if (error instanceof VercelHttpError && error.status === 404) return; throw error }
     // The live snapshot resource has no copied name/tags. Exact ownership is
     // instead proved by the exact owned named-sandbox read and its current
@@ -427,7 +431,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     throw ambiguous("Vercel automatic snapshot cleanup outcome is unknown")
   }
 
-  async #json(method: string, path: string, signal: AbortSignal, options: { query?: Record<string, string>; body?: unknown; binary?: boolean; headers?: Record<string, string>; mutation?: boolean; statuses?: readonly number[] } = {}): Promise<unknown> {
+  async #json(method: string, path: string, signal: AbortSignal, options: { query?: Record<string, string>; body?: unknown; binary?: boolean; empty?: boolean; headers?: Record<string, string>; mutation?: boolean; statuses?: readonly number[]; requestTimeoutMs?: number } = {}): Promise<unknown> {
     let response: Response
     try { response = await this.#request(method, path, signal, options) }
     catch (error) { if (options.mutation) throw ambiguous("Vercel mutation outcome is unknown", true); if (signal.aborted) throw signal.reason ?? error; throw new ProviderError("failure", "Vercel request failed") }
@@ -439,16 +443,16 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     }
     const acceptedStatuses = options.statuses ?? [200]
     if (!acceptedStatuses.includes(response.status)) { await cancel(response); if (options.mutation) throw ambiguous("Vercel mutation outcome is unknown"); throw new ProviderError("failure", "Vercel returned an unexpected status") }
-    if (options.binary) { await cancel(response); return undefined }
+    if (options.binary || options.empty) { await cancel(response); return undefined }
     if (media(response) !== "application/json") { await cancel(response); if (options.mutation) throw ambiguous("Vercel mutation outcome is unknown"); throw new ProviderError("failure", "Vercel returned an invalid response") }
     try { return JSON.parse(await boundedText(response, MAX_RESPONSE_BYTES, signal)) }
     catch (error) { if (options.mutation) throw ambiguous("Vercel mutation outcome is unknown"); if (signal.aborted) throw signal.reason ?? error; throw new ProviderError("failure", "Vercel returned an invalid response") }
   }
 
-  #request(method: string, path: string, signal: AbortSignal, options: { query?: Record<string, string>; body?: unknown; binary?: boolean; headers?: Record<string, string> } = {}): Promise<Response> {
+  #request(method: string, path: string, signal: AbortSignal, options: { query?: Record<string, string>; body?: unknown; binary?: boolean; headers?: Record<string, string>; requestTimeoutMs?: number } = {}): Promise<Response> {
     const url = new URL(path, this.#config.apiOrigin)
     for (const [key, value] of Object.entries(options.query ?? {})) url.searchParams.set(key, value)
-    return this.#fetch(url, { method, headers: { authorization: `Bearer ${this.#config.token}`, accept: "application/json", "content-type": options.binary ? "application/gzip" : "application/json", ...(options.headers ?? {}) }, ...(options.body === undefined ? {} : { body: (options.binary ? options.body : JSON.stringify(options.body)) as BodyInit }), signal: AbortSignal.any([signal, AbortSignal.timeout(this.#config.polling.requestTimeoutMs)]) })
+    return this.#fetch(url, { method, headers: { authorization: `Bearer ${this.#config.token}`, accept: "application/json", "content-type": options.binary ? "application/gzip" : "application/json", ...(options.headers ?? {}) }, ...(options.body === undefined ? {} : { body: (options.binary ? options.body : JSON.stringify(options.body)) as BodyInit }), signal: AbortSignal.any([signal, AbortSignal.timeout(options.requestTimeoutMs ?? this.#config.polling.requestTimeoutMs)]) })
   }
   #deadline(): number { return this.#now() + this.#config.polling.timeoutMs }
   #now(): number { const value = this.#clock.now(); if (!Number.isFinite(value)) throw new ProviderError("failure", "Vercel provider clock is invalid"); return value }

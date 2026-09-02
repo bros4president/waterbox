@@ -405,9 +405,18 @@ export class SandboxService {
         signal: providerSignal,
       })
       providerSignal.throwIfAborted()
-      const persisted = await this.#applySnapshotObservation(record, "creating", observation)
-      if (observation.sourceSandbox !== undefined) await this.#applySnapshotSourceObservation(sandbox, observation.sourceSandbox)
-      return toSnapshot(persisted)
+      // Retain creating until a provider-reported source consequence is durable.
+      // The persisted reference lets normal snapshot reconciliation finish this
+      // checkpoint after a process loss without any provider-specific state.
+      const checkpointed = await this.#applySnapshotObservation(record, "creating", {
+        state: observation.sourceSandbox === undefined ? observation.state : "creating",
+        providerRef: observation.providerRef,
+      })
+      if (observation.sourceSandbox !== undefined) {
+        try { await this.#applySnapshotSourceObservation(sandbox, observation.sourceSandbox) }
+        catch { return toSnapshot(checkpointed) }
+      }
+      return toSnapshot(await this.#applySnapshotObservation(checkpointed, "creating", observation))
     } catch (error) {
       if (providerSignal.aborted && !isAmbiguousExecution(error)) {
         if (observation !== undefined) {
@@ -955,6 +964,22 @@ export class SandboxService {
     } catch (error) {
       if (signal.aborted) throw signal.reason
       throw mapProviderError(error)
+    }
+    if (record.state === "creating" && observation.state !== "creating") {
+      const source = await this.#getSandboxRecord({ accountId: record.accountId }, record.sourceSandboxId)
+      let sourceObservation
+      try {
+        sourceObservation = await provider.inspectSandbox({ accountId: source.accountId, providerRef: source.providerRef, signal })
+        signal.throwIfAborted()
+      } catch (error) {
+        if (signal.aborted) throw signal.reason
+        throw mapProviderError(error)
+      }
+      try { await this.#applySnapshotSourceObservation(source, sourceObservation) }
+      catch (error) {
+        if (error instanceof DomainError && error.code === "conflict") return record
+        throw error
+      }
     }
     return this.#applySnapshotObservation(record, record.state, observation)
   }

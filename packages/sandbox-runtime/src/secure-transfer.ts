@@ -38,6 +38,8 @@ export interface SecureTransferRuntimeOptions {
   runSystemCommand?: (command: string, arguments_: string[]) => Promise<number>
   /** Test seam for detached expiry scheduling; production uses a detached Node child. */
   scheduleDetachedExpiry?: (statePath: string, expiredPath: string, ttlMs: number) => Promise<void>
+  /** Test-only delay override for exercising the real detached fallback child. */
+  detachedExpiryDelayMs?: number
 }
 
 export async function initiateSecureFileTransfer(options: SecureTransferRuntimeOptions): Promise<SecureTransferInitiated> {
@@ -109,7 +111,7 @@ export async function consumeSecureFileTransfer(
   }
 }
 
-async function scheduleExpiry(statePath: string, transferId: string, ttlMs: number, options: Pick<SecureTransferRuntimeOptions, "runSystemCommand" | "scheduleDetachedExpiry">): Promise<void> {
+async function scheduleExpiry(statePath: string, transferId: string, ttlMs: number, options: Pick<SecureTransferRuntimeOptions, "runSystemCommand" | "scheduleDetachedExpiry" | "detachedExpiryDelayMs">): Promise<void> {
   const unit = `waterbox-transfer-expire-${transferId}`
   const claimedPath = resolve(dirname(statePath), `${transferId}.claimed`)
   const expiredPath = resolve(dirname(statePath), `${transferId}.expired`)
@@ -120,14 +122,14 @@ async function scheduleExpiry(statePath: string, transferId: string, ttlMs: numb
   // a detached copy of the current Node runtime; it removes state only if a
   // transfer is still pending, so a successful one-use consumption does not
   // later gain an expired tombstone.
-  await (options.scheduleDetachedExpiry ?? scheduleDetachedExpiry)(statePath, expiredPath, ttlMs)
+  await (options.scheduleDetachedExpiry ?? scheduleDetachedExpiry)(statePath, expiredPath, options.detachedExpiryDelayMs ?? ttlMs)
 }
 
 async function scheduleDetachedExpiry(statePath: string, expiredPath: string, ttlMs: number): Promise<void> {
   // Atomic rename claims only the pending state. A consuming caller has
   // already renamed it to `.claimed`, which must never be expired by a late
   // detached timer.
-  const program = "const fs=require('node:fs/promises');const [state,expired,delay]=process.argv.slice(1);setTimeout(async()=>{const lease=expired+'.pending';try{await fs.rename(state,lease)}catch(error){if(error&&error.code==='ENOENT')return;return}try{await fs.writeFile(expired,'',{mode:0o600})}finally{await fs.rm(lease,{force:true})}},Number(delay)).unref?.()"
+  const program = "const fs=require('node:fs/promises');const [state,expired,delay]=process.argv.slice(1);setTimeout(async()=>{const lease=expired+'.pending';try{await fs.rename(state,lease)}catch(error){if(error&&error.code==='ENOENT')return;return}try{await fs.writeFile(expired,'',{mode:0o600})}finally{await fs.rm(lease,{force:true})}},Number(delay))"
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn(process.execPath, ["-e", program, statePath, expiredPath, String(ttlMs)], { detached: true, stdio: "ignore" })
     child.once("error", reject)

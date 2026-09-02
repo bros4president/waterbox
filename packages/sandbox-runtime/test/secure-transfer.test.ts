@@ -109,6 +109,24 @@ describe("sandbox-side secure file transfer", () => {
     await expect(stat(join(stateRoot, `${failedId}.json`))).rejects.toMatchObject({ code: "ENOENT" })
   })
 
+  test("keeps the real detached fallback child alive until its expiry timer fires", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "waterbox-secure-workspace-"))
+    const stateRoot = await mkdtemp(join(tmpdir(), "waterbox-secure-state-"))
+    cleanup.push(workspaceRoot, stateRoot)
+    const transferId = crypto.randomUUID()
+    await initiateSecureFileTransfer({
+      workspaceRoot, stateRoot, randomUUID: () => transferId,
+      runSystemCommand: async () => 1,
+      detachedExpiryDelayMs: 25,
+    })
+    const expired = join(stateRoot, `${transferId}.expired`)
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try { await stat(expired); break } catch (error) { if (attempt === 39) throw error; await Bun.sleep(10) }
+    }
+    await expect(stat(join(stateRoot, `${transferId}.json`))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await stat(expired)).toBeDefined()
+  })
+
   test("expires only pending state into a tombstone and never races a claimed one-use transfer", async () => {
     const value = await fixture()
     const statePath = join(value.stateRoot, `${value.transferId}.json`)

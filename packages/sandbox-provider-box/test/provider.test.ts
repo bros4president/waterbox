@@ -106,6 +106,62 @@ describe("Box primitive contracts", () => {
     await expect(value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: controller.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
   })
 
+  test("keeps actual post-dispatch aborts and server failures ambiguous for writes and snapshots", async () => {
+    const controller = new AbortController()
+    const aborted = infrastructure(() => { controller.abort(new DOMException("late abort", "AbortError")); throw new DOMException("late abort", "AbortError") }).value
+    await expect(aborted.writeFile({ accountId: "account", providerRef: sandboxRef, path: "/tmp/a", contents: new Uint8Array(), signal: controller.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    const failed = infrastructure(request => request.method === "GET" ? box("ready") : Response.json({ code: "internal" }, { status: 500 })).value
+    await expect(failed.snapshots.create({ accountId: "account", snapshotId: "snap_silver-forest-2p9x" as never, providerRef: sandboxRef, expectedState: "running", signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    const snapshotController = new AbortController()
+    const snapshotAbort = infrastructure(request => {
+      if (request.method === "GET") return box("ready")
+      snapshotController.abort(new DOMException("late abort", "AbortError"))
+      throw new DOMException("late abort", "AbortError")
+    }).value
+    await expect(snapshotAbort.snapshots.create({ accountId: "account", snapshotId: "snap_silver-forest-2p9x" as never, providerRef: sandboxRef, expectedState: "running", signal: snapshotController.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+  })
+
+  test("honors cancellation before file-write and snapshot-delete dispatch", async () => {
+    let requests = 0
+    const { value } = infrastructure(() => { requests++; throw new Error("must not dispatch") })
+    const controller = new AbortController(), reason = new DOMException("cancelled", "AbortError")
+    controller.abort(reason)
+    await expect(value.writeFile({ accountId: "account", providerRef: sandboxRef, path: "/tmp/a", contents: new Uint8Array(), signal: controller.signal })).rejects.toBe(reason)
+    await expect(value.snapshots.delete({ accountId: "account", snapshotId: "snap_silver-forest-2p9x" as never, providerRef: { kind: "box-named-snapshot-v2", name: "waterbox-user-snapshot" }, signal: controller.signal })).rejects.toBe(reason)
+    expect(requests).toBe(0)
+  })
+
+  test("treats snapshot 404 as deleted and a lost delete acknowledgement as ambiguous", async () => {
+    const ref = { kind: "box-named-snapshot-v2", name: "waterbox-user-snapshot" } as const
+    await expect(infrastructure(() => Response.json({ code: "not_found" }, { status: 404 })).value.snapshots.inspect({ accountId: "account", snapshotId: "snap_silver-forest-2p9x" as never, providerRef: ref, signal: signal() })).resolves.toMatchObject({ state: "deleted" })
+    await expect(infrastructure(() => { throw new TypeError("lost after delete") }).value.snapshots.delete({ accountId: "account", snapshotId: "snap_silver-forest-2p9x" as never, providerRef: ref, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+  })
+
+  test("accepts terminal sandbox absence on a retry after a lost delete acknowledgement", async () => {
+    const lost = infrastructure(() => { throw new TypeError("lost after delete") }).value
+    await expect(lost.delete({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    await expect(infrastructure(() => Response.json({ code: "not_found" }, { status: 404 })).value.delete({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toMatchObject({ state: "terminated" })
+  })
+
+  test("does not mistake a missing deletion-operation record for sandbox absence", async () => {
+    const { value } = infrastructure(request => request.method === "DELETE"
+      ? Response.json({ ok: true, type: "box.deleting", operation: { id: `bdop_${"a".repeat(32)}`, kind: "box", targetId: sandboxRef.boxId, status: "pending" } }, { status: 202 })
+      : Response.json({ code: "not_found" }, { status: 404 }))
+    await expect(value.delete({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+  })
+
+  test("bounds requests independently and preserves read versus dispatched-write outcomes", async () => {
+    const fetch = (_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true }))
+    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 5 } }, { clock: new Clock(), fetch })
+    await expect(value.inspect({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+    await expect(value.writeFile({ accountId: "account", providerRef: sandboxRef, path: "/tmp/a", contents: new Uint8Array(), signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+  })
+
+  test("allows a command its requested timeout plus the polling transport allowance", async () => {
+    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 5 } }, { clock: new Clock(), fetch: async () => { await Bun.sleep(10); return command("ok") } })
+    await expect(value.runCommand({ accountId: "account", providerRef: sandboxRef, script: "true", timeoutMs: 20, signal: signal() })).resolves.toMatchObject({ exitCode: 0 })
+  })
+
   test("maps the bounded terminal command result without exposing a Box command DTO", async () => {
     const { value, requests } = infrastructure(() => command("ok\n"))
     await expect(value.runCommand({ accountId: "account", providerRef: sandboxRef, script: "printf ok", cwd: "/workspace", timeoutMs: 120_000, maxStdoutBytes: 10, maxStderrBytes: 10, signal: signal() })).resolves.toEqual({ exitCode: 0, stdout: new TextEncoder().encode("ok\n"), stderr: new Uint8Array(), timedOut: false, stdoutTruncated: false, stderrTruncated: false })

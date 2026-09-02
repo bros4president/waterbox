@@ -83,5 +83,9 @@ export async function exerciseInfrastructureLifecycle(
     signal: input.signal,
   })
   await infrastructure.snapshots.delete({ accountId: input.accountId, snapshotId: input.snapshotId, providerRef: snapshot.providerRef, signal: input.signal })
+  const deleted = await infrastructure.delete({ accountId: input.accountId, providerRef: sandbox.providerRef, signal: input.signal })
+  if (deleted.state !== "terminated") throw new TypeError("Sandbox delete did not reach terminal absence")
+  const restoredDeleted = await infrastructure.delete({ accountId: input.accountId, providerRef: sourceRestored.providerRef, signal: input.signal })
+  if (restoredDeleted.state !== "terminated") throw new TypeError("Restored sandbox delete did not reach terminal absence")
   return { sandbox: inspected, restored, sourceRestored }
 }
