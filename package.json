@@ -21,6 +21,7 @@
     "chat:control-plane-mcp": "bun run --cwd packages/sandbox-cli build && bun run scripts/control-plane-mcp-experiment.ts --interactive",
     "build:mcp": "node scripts/build-waterbox.mjs mcp",
     "smoke:mcp-direct": "bun run build:mcp && bun run scripts/direct-mcp-smoke.ts",
+    "smoke:mcp-vercel": "bun run build:mcp && bun run scripts/vercel-mcp-smoke.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check:premerge": "bun run typecheck && bun run test && bun run test:node-sqlite && git diff --check \"$(git merge-base HEAD origin/main)\"..HEAD && git diff --check && git diff --cached --check",

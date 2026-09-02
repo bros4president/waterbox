@@ -19,15 +19,31 @@ export interface ReconciliationOptions {
   sleep?: (milliseconds: number) => Promise<void>
   now?: () => number
 }
-interface DirectSmokeClient {
+export interface DirectSmokeClient {
   listTools(): Promise<{ tools: Array<{ name: string }> }>
   callTool(request: { name: string; arguments?: Record<string, unknown> }): Promise<any>
 }
-interface ProductFlowOptions {
+export interface McpRuntimeLayout {
+  workdir: string
+  markerPath: string
+  runtimeLauncher: string
+  staleRuntimeCommand: string
+  restoredRuntimeCheck: string
+}
+export interface ProductFlowOptions {
   localSecretPath: string
   sleep?: (milliseconds: number) => Promise<void>
   log?: (line: string) => void
   secrets?: string[]
+  runtime?: McpRuntimeLayout
+}
+
+const BOX_RUNTIME_LAYOUT: McpRuntimeLayout = {
+  workdir: "/root",
+  markerPath: "/home/user/.waterbox-direct-marker",
+  runtimeLauncher: "/usr/local/bin/waterbox",
+  staleRuntimeCommand: "sudo -n rm -f /usr/local/lib/waterbox-cli.js",
+  restoredRuntimeCheck: "test -s /usr/local/lib/waterbox-cli.js && test -f /usr/local/lib/waterbox-bootstrap.json",
 }
 
 export function assertDirectSmokeAuthorized(environment: Record<string, string | undefined>): void {
@@ -67,6 +83,7 @@ export function baselineReconciliationError(result: BaselineReconciliation): Err
 
 export async function runDirectMcpProductFlow(client: DirectSmokeClient, options: ProductFlowOptions): Promise<void> {
   const sleep = options.sleep ?? Bun.sleep
+  const runtime = options.runtime ?? BOX_RUNTIME_LAYOUT
   const report = (stage: string, facts: Record<string, boolean | number>) => options.log?.(redact(JSON.stringify({ stage, ...facts }), options.secrets ?? []))
   let sandboxId: string | undefined, snapshotId: string | undefined, restoredSandboxId: string | undefined, marker: string | undefined
   let failure: unknown
@@ -85,35 +102,35 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     if (created.state !== "running" || created.sourceSnapshotId !== undefined) throw new Error("Direct MCP fresh sandbox was not running")
     const target = { sandboxId }
     if (SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "probe_sandbox", arguments: target })))).state !== "running") throw new Error("Direct MCP fresh sandbox probe was not running")
-    const runtime = await successfulOutput(client, "bash", { ...target, command: "/usr/local/bin/waterbox health; /usr/local/bin/waterbox version", workdir: "/root" }, sleep)
-    if (!runtime.includes(HEALTH) || !runtime.includes(VERSION)) throw new Error("Direct MCP current runtime verification failed")
+    const runtimeHealth = await successfulOutput(client, "bash", { ...target, command: `${runtime.runtimeLauncher} health; ${runtime.runtimeLauncher} version`, workdir: runtime.workdir }, sleep)
+    if (!runtimeHealth.includes(HEALTH) || !runtimeHealth.includes(VERSION)) throw new Error("Direct MCP current runtime verification failed")
     report("created", { running: true, runtimeCurrent: true })
 
-    await verifySecureTransfer(client, target, options.localSecretPath, sleep)
-    await verifyAsyncBash(client, target, sleep)
+    await verifySecureTransfer(client, target, options.localSecretPath, runtime, sleep)
+    await verifyAsyncBash(client, target, runtime, sleep)
     let foregroundSettled = false
-    const foreground = successfulOutput(client, "bash", { ...target, command: "touch /tmp/waterbox-concurrency-ready; sleep 12", description: "Hold one independent command", workdir: "/root", timeout: 15_000 }, sleep).finally(() => { foregroundSettled = true })
-    const concurrent = successfulOutput(client, "bash", { ...target, command: "for attempt in $(seq 1 50); do test -f /tmp/waterbox-concurrency-ready && exit 0; sleep 0.1; done; exit 1", description: "Verify concurrent command dispatch", workdir: "/root", timeout: 10_000 }, sleep)
+    const foreground = successfulOutput(client, "bash", { ...target, command: "touch /tmp/waterbox-concurrency-ready; sleep 12", description: "Hold one independent command", workdir: runtime.workdir, timeout: 15_000 }, sleep).finally(() => { foregroundSettled = true })
+    const concurrent = successfulOutput(client, "bash", { ...target, command: "for attempt in $(seq 1 50); do test -f /tmp/waterbox-concurrency-ready && exit 0; sleep 0.1; done; exit 1", description: "Verify concurrent command dispatch", workdir: runtime.workdir, timeout: 10_000 }, sleep)
     if (await Promise.race([concurrent.then(() => false), sleep(7_000).then(() => true)])) throw new Error("Direct MCP provider serialized concurrent commands")
     if (foregroundSettled) throw new Error("Direct MCP foreground command completed before the concurrency assertion")
     await foreground
     report("concurrency", { independent: true })
 
-    await successfulOutput(client, "write", { ...target, filePath: "/root/direct-smoke.txt", content: "Alpha\n" }, sleep)
-    if (!(await successfulOutput(client, "read", { ...target, filePath: "/root/direct-smoke.txt" }, sleep)).includes("Alpha")) throw new Error("Direct MCP read assertion failed")
-    await successfulOutput(client, "edit", { ...target, filePath: "/root/direct-smoke.txt", oldString: "Alpha", newString: "Beta" }, sleep)
-    await successfulOutput(client, "patch", { ...target, patchText: "*** Begin Patch\n*** Add File: /root/direct-patched.txt\n+Patched\n*** End Patch" }, sleep)
-    if (!(await successfulOutput(client, "glob", { ...target, pattern: "direct-*.txt", path: "/root" }, sleep)).includes("direct-smoke.txt")) throw new Error("Direct MCP glob assertion failed")
-    if (!(await successfulOutput(client, "grep", { ...target, pattern: "Beta", path: "/root", include: "*.txt" }, sleep)).includes("direct-smoke.txt")) throw new Error("Direct MCP grep assertion failed")
-    const bash = await successfulOutput(client, "bash", { ...target, command: "pwd; id -u; cat direct-smoke.txt", workdir: "/root" }, sleep)
-    if (!bash.includes("/root") || !bash.includes("\n0\n") || !bash.includes("Beta")) throw new Error("Direct MCP bash assertion failed")
+    await successfulOutput(client, "write", { ...target, filePath: `${runtime.workdir}/direct-smoke.txt`, content: "Alpha\n" }, sleep)
+    if (!(await successfulOutput(client, "read", { ...target, filePath: `${runtime.workdir}/direct-smoke.txt` }, sleep)).includes("Alpha")) throw new Error("Direct MCP read assertion failed")
+    await successfulOutput(client, "edit", { ...target, filePath: `${runtime.workdir}/direct-smoke.txt`, oldString: "Alpha", newString: "Beta" }, sleep)
+    await successfulOutput(client, "patch", { ...target, patchText: `*** Begin Patch\n*** Add File: ${runtime.workdir}/direct-patched.txt\n+Patched\n*** End Patch` }, sleep)
+    if (!(await successfulOutput(client, "glob", { ...target, pattern: "direct-*.txt", path: runtime.workdir }, sleep)).includes("direct-smoke.txt")) throw new Error("Direct MCP glob assertion failed")
+    if (!(await successfulOutput(client, "grep", { ...target, pattern: "Beta", path: runtime.workdir, include: "*.txt" }, sleep)).includes("direct-smoke.txt")) throw new Error("Direct MCP grep assertion failed")
+    const bash = await successfulOutput(client, "bash", { ...target, command: "pwd; id -u; cat direct-smoke.txt", workdir: runtime.workdir }, sleep)
+    if (!bash.includes(runtime.workdir) || !/\n\d+\n/.test(bash) || !bash.includes("Beta")) throw new Error("Direct MCP bash assertion failed")
     report("flow", { tools: 7, secureTransfer: true, asyncBash: true })
 
     marker = `waterbox-direct-marker-${crypto.randomUUID()}`
-    await successfulOutput(client, "write", { ...target, filePath: "/home/user/.waterbox-direct-marker", content: marker }, sleep)
+    await successfulOutput(client, "write", { ...target, filePath: runtime.markerPath, content: marker }, sleep)
     // This command is already executing through the healthy CLI; removing its installed artifact
     // makes the inherited snapshot incomplete without touching the user marker or user data.
-    await successfulOutput(client, "bash", { ...target, command: "sudo -n rm -f /usr/local/lib/waterbox-cli.js", workdir: "/root" }, sleep)
+    await successfulOutput(client, "bash", { ...target, command: runtime.staleRuntimeCommand, workdir: runtime.workdir }, sleep)
     let snapshot
     try {
       const result = await callTool(client, { name: "create_snapshot", arguments: { sandboxId } }, 180_000)
@@ -139,9 +156,9 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     const restoredTarget = { sandboxId: restoredSandboxId }
     if (SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "probe_sandbox", arguments: restoredTarget })))).state !== "running") throw new Error("Direct MCP restored sandbox probe was not running")
     report("restored", { running: true })
-    if ((await successfulOutput(client, "read", { ...restoredTarget, filePath: "/home/user/.waterbox-direct-marker" }, sleep)) !== marker) throw new Error("Direct MCP restored user data verification failed")
+    if ((await successfulOutput(client, "read", { ...restoredTarget, filePath: runtime.markerPath }, sleep)) !== marker) throw new Error("Direct MCP restored user data verification failed")
     report("restored-user-data", { preserved: true })
-    const restoredRuntime = await successfulOutput(client, "bash", { ...restoredTarget, command: "/usr/local/bin/waterbox health; /usr/local/bin/waterbox version; test -s /usr/local/lib/waterbox-cli.js && test -f /usr/local/lib/waterbox-bootstrap.json", workdir: "/root" }, sleep)
+    const restoredRuntime = await successfulOutput(client, "bash", { ...restoredTarget, command: `${runtime.runtimeLauncher} health; ${runtime.runtimeLauncher} version; ${runtime.restoredRuntimeCheck}`, workdir: runtime.workdir }, sleep)
     if (!restoredRuntime.includes(HEALTH) || !restoredRuntime.includes(VERSION)) throw new Error("Direct MCP restored runtime verification failed")
     report("restored-runtime", { reinstalled: true, current: true })
   } catch (error) {
@@ -228,25 +245,26 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
   return { ok: true as const, flow: "direct-mcp-smoke" }
 }
 
-async function verifySecureTransfer(client: DirectSmokeClient, target: { sandboxId: string }, localSecretPath: string, sleep: (milliseconds: number) => Promise<void>): Promise<void> {
-  if ((JSON.parse(resultText(await callTool(client, { name: "send_file_securely", arguments: { ...target, sourcePath: localSecretPath, targetPath: "/root/direct-secret.bin" } }))) as { bytes?: unknown }).bytes !== 5) throw new Error("Direct MCP secure file transfer assertion failed")
-  await successfulOutput(client, "bash", { ...target, command: "test -f /root/direct-secret.bin && test \"$(stat -c %a /root/direct-secret.bin)\" = 600 && test \"$(wc -c </root/direct-secret.bin)\" -eq 5", workdir: "/root" }, sleep)
+async function verifySecureTransfer(client: DirectSmokeClient, target: { sandboxId: string }, localSecretPath: string, runtime: McpRuntimeLayout, sleep: (milliseconds: number) => Promise<void>): Promise<void> {
+  const targetPath = `${runtime.workdir}/direct-secret.bin`
+  if ((JSON.parse(resultText(await callTool(client, { name: "send_file_securely", arguments: { ...target, sourcePath: localSecretPath, targetPath } }))) as { bytes?: unknown }).bytes !== 5) throw new Error("Direct MCP secure file transfer assertion failed")
+  await successfulOutput(client, "bash", { ...target, command: `test -f ${targetPath} && test \"$(stat -c %a ${targetPath})\" = 600 && test \"$(wc -c <${targetPath})\" -eq 5`, workdir: runtime.workdir }, sleep)
 }
 
-async function verifyAsyncBash(client: DirectSmokeClient, target: { sandboxId: string }, sleep: (milliseconds: number) => Promise<void>): Promise<void> {
-  const explicit = await successfulResult(client, "bash", { ...target, command: "printf explicit-completed", workdir: "/root", timeout: 120_000 })
+async function verifyAsyncBash(client: DirectSmokeClient, target: { sandboxId: string }, runtime: McpRuntimeLayout, sleep: (milliseconds: number) => Promise<void>): Promise<void> {
+  const explicit = await successfulResult(client, "bash", { ...target, command: "printf explicit-completed", workdir: runtime.workdir, timeout: 120_000 })
   if (!completedBash(explicit) || explicit.output !== "explicit-completed") throw new Error("Direct MCP quick Bash with an execution timeout did not complete")
 
-  const omitted = await successfulResult(client, "bash", { ...target, command: "printf omitted-completed", workdir: "/root" })
+  const omitted = await successfulResult(client, "bash", { ...target, command: "printf omitted-completed", workdir: runtime.workdir })
   if (!completedBash(omitted) || omitted.output !== "omitted-completed") throw new Error("Direct MCP quick Bash with an omitted timeout did not complete")
 
-  const omittedSlow = await successfulResult(client, "bash", { ...target, command: "printf phase-one; sleep 20; printf phase-two", workdir: "/root" })
+  const omittedSlow = await successfulResult(client, "bash", { ...target, command: "printf phase-one; sleep 20; printf phase-two", workdir: runtime.workdir })
   if (!completedBash(omittedSlow) || !String(omittedSlow.output).includes("phase-one") || !String(omittedSlow.output).includes("phase-two")) throw new Error("Direct MCP omitted-timeout absorbed Bash assertion failed")
 
-  const conservative = await successfulResult(client, "bash", { ...target, command: "sleep 20; printf conservative-completed", workdir: "/root", timeout: 120_000 })
+  const conservative = await successfulResult(client, "bash", { ...target, command: "sleep 20; printf conservative-completed", workdir: runtime.workdir, timeout: 120_000 })
   if (!completedBash(conservative) || !String(conservative.output).includes("conservative-completed")) throw new Error("Direct MCP conservative-timeout absorbed Bash assertion failed")
 
-  const timed = await resultPayload(client, "bash", { ...target, command: "sleep 30", workdir: "/root", timeout: 2_000 })
+  const timed = await resultPayload(client, "bash", { ...target, command: "sleep 30", workdir: runtime.workdir, timeout: 2_000 })
   if (!completedBash(timed) || (timed.metadata as Record<string, unknown>).timedOut !== true) throw new Error("Direct MCP hard execution timeout did not settle as timed out")
   if (/job_[a-f0-9]{32}/.test(await successfulOutput(client, "glob", { ...target, pattern: "job_*", path: "/run/waterbox/bash-jobs" }, sleep))) throw new Error("Direct MCP completed Bash leaked a job directory")
 }

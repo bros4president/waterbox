@@ -189,10 +189,16 @@ export class FakeSandboxProvider implements SandboxProvider {
   deleteSnapshotCalls = 0
   executeCalls = 0
   createBarrier?: Promise<void>
+  createError?: unknown
   prepareBarrier?: Promise<void>
   prepareError?: unknown
   stopBarrier?: Promise<void>
+  stopError?: unknown
   resumeBarrier?: Promise<void>
+  resumeError?: unknown
+  deleteError?: unknown
+  createSnapshotError?: unknown
+  createSnapshotObservation?: ProviderSnapshotObservation
   createStarted?: () => void
   prepareStarted?: () => void
   stopStarted?: () => void
@@ -237,6 +243,7 @@ export class FakeSandboxProvider implements SandboxProvider {
     this.createInputs.push(input)
     this.providerIdempotencyKeys.push(input.idempotencyKey)
     await this.createBarrier
+    if (this.createError !== undefined) throw this.createError
     this.sandboxStates.set(input.sandboxId, "running")
     return { state: "running", providerRef: sandboxRef(input.sandboxId) }
   }
@@ -263,6 +270,7 @@ export class FakeSandboxProvider implements SandboxProvider {
     this.stopStarted?.()
     this.lifecycleInputs.push({ operation: "stop", input })
     await this.stopBarrier
+    if (this.stopError !== undefined) throw this.stopError
     const id = refId(input.providerRef)
     this.sandboxStates.set(id, "stopped")
     return { state: "stopped", providerRef: input.providerRef }
@@ -273,6 +281,7 @@ export class FakeSandboxProvider implements SandboxProvider {
     this.resumeStarted?.()
     this.lifecycleInputs.push({ operation: "resume", input })
     await this.resumeBarrier
+    if (this.resumeError !== undefined) throw this.resumeError
     const id = refId(input.providerRef)
     this.sandboxStates.set(id, "running")
     return { state: "running", providerRef: input.providerRef }
@@ -281,6 +290,7 @@ export class FakeSandboxProvider implements SandboxProvider {
   async deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     this.deleteCalls++
     this.lifecycleInputs.push({ operation: "delete", input })
+    if (this.deleteError !== undefined) throw this.deleteError
     const id = refId(input.providerRef)
     this.sandboxStates.set(id, "terminated")
     return { state: "terminated", providerRef: input.providerRef }
@@ -289,8 +299,9 @@ export class FakeSandboxProvider implements SandboxProvider {
   protected async createSnapshot(input: ProviderCreateSnapshotInput): Promise<ProviderSnapshotObservation> {
     this.createSnapshotCalls++
     this.snapshotInputs.push({ operation: "create", input })
+    if (this.createSnapshotError !== undefined) throw this.createSnapshotError
     this.snapshotStates.set(input.snapshotId, "ready")
-    return { state: "ready", providerRef: snapshotRef(input.snapshotId) }
+    return this.createSnapshotObservation ?? { state: "ready", providerRef: snapshotRef(input.snapshotId) }
   }
 
   protected async inspectSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation> {

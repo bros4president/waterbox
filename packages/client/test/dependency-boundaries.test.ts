@@ -54,24 +54,14 @@ describe("static dependency boundaries", () => {
     expect(manifestReferences(manifest).filter(item => forbiddenClient(item.specifier))).toEqual([])
   })
 
-  test("supported MCP cannot reach core/repositories/providers except the exact artifact loader and test-only core support", async () => {
+  test("supported MCP cannot reach core, repositories, or provider packages", async () => {
     const denied: Reference[] = []
     for (const item of await referencesBelow("packages/mcp/src")) {
       if (!forbiddenMcp(item.specifier)) continue
-      if (item.kind === "static" && item.specifier === "@waterbox/provider-box" && item.symbols.join(",") === "loadSandboxRuntimeArtifact") continue
       denied.push(item)
     }
     expect(denied).toEqual([])
     const manifest = JSON.parse(await readFile("packages/mcp/package.json", "utf8")) as Manifest
-    expect(manifestReferences(manifest).filter(item => forbiddenMcp(item.specifier) && !(item.section === "devDependencies" && ["@waterbox/provider-box", "@waterbox/core"].includes(item.specifier)))).toEqual([])
-  })
-
-  test("artifact-loader exception is symbol- and syntax-specific", () => {
-    const allowed = references(`import { loadSandboxRuntimeArtifact } from "@waterbox/provider-box"`)[0]!
-    expect(allowed).toMatchObject({ kind: "static", specifier: "@waterbox/provider-box", symbols: ["loadSandboxRuntimeArtifact"] })
-    for (const source of [`import { BoxSandboxProvider } from "@waterbox/provider-box"`, `import "@waterbox/provider-box"`, `import("@waterbox/provider-box")`, `require("@waterbox/provider-box")`]) {
-      const item = references(source)[0]!
-      expect(item.kind === "static" && item.symbols.join(",") === "loadSandboxRuntimeArtifact").toBeFalse()
-    }
+    expect(manifestReferences(manifest).filter(item => forbiddenMcp(item.specifier) && !(item.section === "devDependencies" && item.specifier === "@waterbox/core"))).toEqual([])
   })
 })

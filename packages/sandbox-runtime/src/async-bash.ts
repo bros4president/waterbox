@@ -282,8 +282,12 @@ export async function runOneShotBash(
     signal?.throwIfAborted()
     const spawnProcess = options.spawnProcess ?? spawn
     const child = spawnProcess(
-      options.workerExecutable ?? "/usr/local/bin/node",
-      [...(options.workerArguments ?? ["/usr/local/lib/waterbox-cli.js"]), "__internal-bash-worker", jobId],
+      // The worker must use the same Node executable and CLI entrypoint as
+      // the currently-running one-shot runtime. Fixed Box installation paths
+      // are not a sandbox-runtime contract and break an otherwise valid
+      // full-Linux provider layout.
+      options.workerExecutable ?? process.execPath,
+      [...(options.workerArguments ?? [process.argv[1]!]), "__internal-bash-worker", jobId],
       { detached: true, stdio: "ignore", env: process.env },
     )
     let disposition: "completed" | "yielded"

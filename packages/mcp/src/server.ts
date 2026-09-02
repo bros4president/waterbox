@@ -22,7 +22,7 @@ const tools: Tool[] = [
   tool("probe_sandbox", "Queries the provider for live sandbox status and reconciles the observed state into Waterbox.", SandboxInputSchema),
   tool("delete_sandbox", "Permanently deletes a user-owned Waterbox sandbox.", SandboxInputSchema),
   tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", CursorPaginationRequestSchema),
-  tool("create_snapshot", "Creates a user-owned snapshot from a running or stopped Waterbox sandbox.", CreateSnapshotInputSchema),
+  tool("create_snapshot", "Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.", CreateSnapshotInputSchema),
   tool("delete_snapshot", "Permanently deletes a user-owned Waterbox snapshot.", SnapshotInputSchema),
   tool("send_file_securely", "Encrypts and transfers an existing local file to a sandbox without placing its contents in model context or tool arguments. The destination file is decrypted and readable inside the sandbox; avoid reading sensitive destination contents back into model context. The source file is not modified or deleted.", SendFileInputSchema),
   tool("read", "Reads any file or lists any directory in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.read),

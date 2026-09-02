@@ -1,10 +1,10 @@
 {
-  "name": "@waterbox/provider-box",
+  "name": "@waterbox/provider-vercel",
   "private": true,
+  "description": "Provider-neutral sandbox primitives for Vercel Sandbox REST, composed through the shared Waterbox runtime.",
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "dependencies": {
-    "@waterbox/cli": "workspace:*",
     "@waterbox/contracts": "workspace:*",
     "@waterbox/core": "workspace:*",
     "@waterbox/provider-runtime": "workspace:*"

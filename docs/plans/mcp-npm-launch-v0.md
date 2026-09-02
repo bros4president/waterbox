@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Node 24.15.0, Phase 3, full Phase 4 Box bootstrap, the post-PR #5 Fetch-backed live path, and the Phase 6 Vercel capability audit are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; the approved supplementary provider-primitives/Vercel implementation, current-Node-24 CI, and release-path verification remain pending.
+Status: implementation in progress. Node 24.15.0, Phase 3, full Phase 4 Box bootstrap, the post-PR #5 Fetch-backed live path, the Phase 6 Vercel capability audit, and Phase 7 provider implementation handoff are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; current-Node-24 CI and package/release-path verification remain pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -34,7 +34,7 @@ and receive a valid local stdio MCP configuration whose process:
 - Runs on Node.js 24 without Bun installed locally.
 - Connects successfully even before a provider is configured.
 - Explains provider setup without accepting secrets through model-visible tool arguments.
-- Uses an explicitly selected user-owned provider after credentials are supplied through the MCP client's environment or secret mechanism.
+- Uses an explicitly selected user-owned provider after credentials are supplied through native-keyring onboarding or the MCP client's environment or secret mechanism.
 - Creates a fresh sandbox with either explicitly configured launch provider, Box or Vercel Sandbox, without a Waterbox system snapshot.
 - Reinstalls the current Waterbox one-shot CLI when creating from a supported provider user snapshot where that provider advertises snapshots.
 - Persists the provider resource identity before preparation/bootstrap starts, while retaining the acknowledged provider-return/result-persistence failure interval.
@@ -54,7 +54,8 @@ The launch command installs configuration. It does not silently choose a provide
 - `@waterbox/control-plane-local` owns embedded core, repository, and provider composition. Its embedded bearer is process-private; synthetic URLs are in-process Fetch routing, not network traffic. A remote `ApiBackend` seam does not imply hosted Waterbox exists.
 - Waterbox remains provider-neutral. Box and Vercel Sandbox are the launch-supported providers, neither is an implicit default.
 - Missing provider configuration is a connected setup state, not a process startup failure.
-- Provider credentials are supplied by the user through environment or client-specific secret facilities.
+- Provider credentials are supplied by the user through environment or client-specific secret facilities, or by the bounded native-keyring onboarding flow: `waterbox setup`, `waterbox status`, and `waterbox logout`.
+- Native onboarding stores only Box API keys and Vercel tokens under keyring service `waterbox`; strict versioned non-secret provider settings are atomically stored in `~/.waterbox/config.json`. Persisted records allow only `https://ascii.dev/api/box/v1` and `https://api.vercel.com/` with approved defaults, preventing redirected keyring credentials; custom endpoints remain environment-only. Environment-only configuration remains the sole fallback, `.env` is never loaded implicitly, and headless Linux Secret Service/keyutils availability remains an operational durability caveat.
 - Credentials are never accepted through MCP tool arguments, returned in MCP content, or written to ordinary diagnostics.
 
 ### Runtime
@@ -93,7 +94,8 @@ Do not add in this launch:
 - A managed Waterbox Cloud provider.
 - A hosted streamable-HTTP or SSE MCP transport.
 - Provider-specific browser authentication embedded in the generic MCP.
-- A Waterbox credential vault or cross-platform keychain abstraction.
+- Custom OS-specific credential-store adapters or a general-purpose Waterbox credential vault.
+- Plaintext credential persistence or a fallback credential file.
 - Secret entry through chat, MCP tools, shell arguments, or committed configuration.
 - An npm alias or forwarding package for `@waterbox/mcp`.
 - A public library API from the `waterbox` package.
@@ -211,7 +213,7 @@ The npm bin file must begin with:
 #!/usr/bin/env node
 ```
 
-The bin entry invokes MCP `main()` unconditionally. It must not depend on direct-entry equality between `import.meta.url` and npm's symlinked `process.argv[1]`.
+With zero arguments, the bin entry invokes MCP `main()` and must not depend on direct-entry equality between `import.meta.url` and npm's symlinked `process.argv[1]`. Explicit supported arguments dispatch terminal-only onboarding commands (`setup`, `status`, and `logout`) instead; unknown arguments never start MCP.
 
 The executable emits no non-MCP stdout. Startup errors and optional diagnostics use stderr only and never include credentials, provider references, commands, local file content, response bodies, or protected URLs.
 
@@ -244,13 +246,14 @@ The completed Vercel audit established official external-hosting access-token co
 
 ### Configuration Precedence
 
-V0 configuration is environment-based:
+V0 configuration is either explicit environment configuration or bounded local native-keyring onboarding:
 
-1. Explicit process environment supplied by the MCP client.
-2. Documented non-secret defaults for provider endpoints and timing only.
-3. No provider selection default.
+1. When `WATERBOX_PROVIDER` is explicit, resolve that provider entirely from process environment; never mix persisted fields or a keyring secret.
+2. When it is absent, resolve the strictly validated persisted provider settings plus that provider's keyring secret.
+3. Provider-specific environment variables without `WATERBOX_PROVIDER` are a selection error, not an implicit provider or a mixed configuration.
+4. Documented non-secret defaults for provider endpoints and timing only; `WATERBOX_SQLITE_PATH` remains global.
 
-Waterbox does not read provider CLI login state, browser cookies, unrelated dotfiles, local files, or provider-specific credential stores in V0.
+Waterbox does not read provider CLI login state, browser cookies, unrelated dotfiles, or provider-specific credential stores in V0. It reads only its dedicated `waterbox` keyring entries and versioned non-secret configuration file.
 
 Provider selection is parsed before provider-specific fields. Unknown providers receive a stable unsupported-provider message. Missing credentials leave the MCP connected and produce setup guidance. Malformed non-secret configuration may reject provider initialization but must not corrupt MCP stdout.
 
@@ -887,7 +890,7 @@ Acceptance criteria:
 
 ### Phase 7: Evaluate Audit, Approve Contract, Then Implement Vercel Provider
 
-Status: approved for implementation through `docs/plans/sandbox-provider-primitives-and-vercel-v0.md`; the supplementary plan's Phases 1-7 remain pending.
+Status: complete; `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` completed its Phases 1-7 provider implementation handoff. Phase 8 package, legal, and release-document closure remains pending.
 
 Scope:
 
@@ -929,6 +932,7 @@ Scope:
 - Add Apache-2.0 licensing and exact bundle closure notices, including Hono/OpenAPI/API/client dependencies.
 - Rewrite package and root documentation for the Fetch-backed local architecture and both providers.
 - Remove supported-path system-template documentation and scripts only after full Phase 4 live acceptance, including snapshot-sourced reinstall.
+- This phase now includes bounded native-keyring onboarding only: exact-pinned `@napi-rs/keyring@2.0.0` remains external to the bundle and is lazy-loaded; interactive setup never accepts CLI credential arguments; config is atomically persisted without secrets; and status/logout have safe missing-versus-inaccessible-store behavior. This does not complete the remaining package rename, legal, or broad documentation scope.
 
 Acceptance criteria:
 
@@ -936,6 +940,8 @@ Acceptance criteria:
 - The tarball contains only approved files; private workspace internals are bundled, not public APIs or source packages.
 - Package metadata, legal notices, and documentation are factual for Box and Vercel Sandbox, optional capabilities, and no hosted mode.
 - `server.json` is either valid for an owned namespace or omitted from the release tarball and explicitly deferred.
+- `waterbox` is the sole public executable: zero arguments remain stdio MCP with no non-MCP stdout, and explicit `setup`, `status`, and `logout` use terminal I/O. Missing configuration, native binding, or keyring access keeps MCP connected with provider-neutral setup guidance before local/provider activity.
+- Verification includes injected credential-store/config/prompt tests, native package platform and installed-tarball tests, and confirmation that no config/output/error contains a secret. Legal notice closure remains pending with the rest of Phase 8.
 
 Verification:
 
@@ -1180,7 +1186,7 @@ Live tests require explicit isolated-account authorization and must prove:
 - [x] PR #5 integrated into the current checkout.
 - [ ] Post-merge embedded MCP Node-minimum, live, and release-path re-verification completed.
 - [x] Vercel Sandbox provider-port audit has an approved follow-up architecture decision.
-- [ ] Vercel Sandbox provider implemented only after the approved audit verdict.
+- [x] Vercel Sandbox provider implemented only after the approved audit verdict.
 - [ ] npm package renamed to `waterbox`.
 - [ ] Package is CLI-only.
 - [ ] Missing provider is a connected setup state.
@@ -1188,7 +1194,7 @@ Live tests require explicit isolated-account authorization and must prove:
 - [ ] Package-local legal files match canonical root files exactly.
 - [ ] npm metadata complete and factual.
 - [ ] Root and package docs match released behavior.
-- [ ] Box and Vercel Sandbox setup docs and isolated live gates pass.
+- [x] Box and Vercel Sandbox setup docs and isolated live gates pass.
 - [ ] Exact post-refactor bundle and legal closure verified.
 - [ ] Pull-request CI complete.
 - [ ] Trusted npm publish workflow protected.
@@ -1210,3 +1216,4 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-09-01: Post-merge verification restored workspace links and passed 446 credential-free tests, typecheck, MCP build, focused Fetch-backed coverage, and Node 24.15.0 artifact checks. The authorized Fetch-backed Box smoke passed fresh preparation, all seven tools, secure transfer, Bash, concurrency, bounded exact cleanup, and a deliberately stale snapshot-sourced reinstall with user-data preservation and current runtime verification. The raw capability probe separately passed snapshot restore, stop/resume identity and marker continuity, accepted-pending deletion with visibility/capacity release, snapshot deletion, and zero active run-owned resources. Phase 0 and Phase 4 live gates are complete; no provider identifiers or credentials were retained.
 - 2026-09-01: Phase 6 completed without adding the Vercel SDK or changing production behavior. Twelve direct-REST fake tests passed request-contract, ambiguity, lifecycle, transient snapshot, bounded-output, redaction, and cleanup cases. The separately authorized isolated-project probe passed fresh named create, Node 24, `rg`, privilege/workspace preparation, gzip-tar upload, command wait/log/kill, stop/resume persistence with replaced session identity, manual and automatic snapshots, snapshot-source restore, deletion/tombstones, and exact baseline reconciliation with zero cleanup errors. The audit in `docs/research/vercel-sandbox-provider-port-audit.md` records exactly one verdict: adapter-local shim needed, port unchanged. Phase 7 approval, production implementation, and configuration selection remain pending; no credential or provider identifier was retained in the plan or report.
 - 2026-09-01: Phase 7 architecture review approved `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` as the supplementary implementation plan. The review refined the audit recommendation: Box and Vercel share a direct low-level intersection, while the current provider implementation boundary mixes native sandbox primitives with shared Waterbox preparation, CLI, secure-transfer, and Bash-job logic. Implementation must introduce the primitive port, extract the shared runtime, migrate and live-regress Box, and only then implement and live-accept Vercel. Native `fetch` against the validated REST surface is the settled Vercel transport; no Vercel SDK dependency is planned. No production code or live provider operation occurred while recording this decision.
+- 2026-09-02: Phase 7 complete: the supplementary provider plan completed its provider-neutral primitive boundary, shared runtime, Box migration/regression, Vercel adapter/composition, documentation, and authorized two-provider acceptance. Vercel passed fresh/current preparation, all tools, ciphertext transfer, Bash, concurrency, snapshot restore/repair, stop/resume, cancellation/kill recovery, and owned automatic-snapshot tombstone cleanup with zero active resources; Box passed its direct embedded regression with exact baseline restoration. Final verification passed 474 tests and 2433 expectations, typecheck, MCP build, Node SQLite tests, the default Node composition smoke, and diff checking. `$NODE_24_15_BIN` and `$NODE_24_CURRENT_BIN` were absent, so those named commands were not run and no substitute was used. Phase 8+ package, legal, CI, and npm release work remains pending.

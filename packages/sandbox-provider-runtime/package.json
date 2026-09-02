@@ -1,0 +1,14 @@
+{
+  "name": "@waterbox/provider-runtime",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test-support": "./src/test-support.ts"
+  },
+  "dependencies": {
+    "@waterbox/cli": "workspace:*",
+    "@waterbox/contracts": "workspace:*",
+    "@waterbox/core": "workspace:*"
+  }
+}

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Encrypter } from "age-encryption"
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { consumeSecureFileTransfer, initiateSecureFileTransfer, RuntimeError, SECURE_TRANSFER_TTL_MS } from "../src/index.ts"
+import { consumeSecureFileTransfer, expirePendingSecureTransfer, initiateSecureFileTransfer, RuntimeError, SECURE_TRANSFER_TTL_MS } from "../src/index.ts"
 
 const cleanup: string[] = []
 afterEach(async () => Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true }))))
@@ -86,5 +86,59 @@ describe("sandbox-side secure file transfer", () => {
     ])
     expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1)
     expect(results.filter((result) => result.status === "rejected")).toHaveLength(1)
+  })
+
+  test("falls back from systemd to a detached expiry scheduler and removes state if scheduling fails", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "waterbox-secure-workspace-"))
+    const stateRoot = await mkdtemp(join(tmpdir(), "waterbox-secure-state-"))
+    cleanup.push(workspaceRoot, stateRoot)
+    const transferId = crypto.randomUUID()
+    const scheduled: Array<[string, string, number]> = []
+    await initiateSecureFileTransfer({
+      workspaceRoot, stateRoot, randomUUID: () => transferId,
+      runSystemCommand: async (command) => { expect(command).toBe("systemd-run"); return 1 },
+      scheduleDetachedExpiry: async (...value) => { scheduled.push(value) },
+    })
+    expect(scheduled).toEqual([[join(stateRoot, `${transferId}.json`), join(stateRoot, `${transferId}.expired`), SECURE_TRANSFER_TTL_MS]])
+    const failedId = crypto.randomUUID()
+    await expect(initiateSecureFileTransfer({
+      workspaceRoot, stateRoot, randomUUID: () => failedId,
+      runSystemCommand: async () => 1,
+      scheduleDetachedExpiry: async () => { throw new Error("detached scheduler unavailable") },
+    })).rejects.toThrow("detached scheduler unavailable")
+    await expect(stat(join(stateRoot, `${failedId}.json`))).rejects.toMatchObject({ code: "ENOENT" })
+  })
+
+  test("keeps the real detached fallback child alive until its expiry timer fires", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "waterbox-secure-workspace-"))
+    const stateRoot = await mkdtemp(join(tmpdir(), "waterbox-secure-state-"))
+    cleanup.push(workspaceRoot, stateRoot)
+    const transferId = crypto.randomUUID()
+    await initiateSecureFileTransfer({
+      workspaceRoot, stateRoot, randomUUID: () => transferId,
+      runSystemCommand: async () => 1,
+      detachedExpiryDelayMs: 25,
+    })
+    const expired = join(stateRoot, `${transferId}.expired`)
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try { await stat(expired); break } catch (error) { if (attempt === 39) throw error; await Bun.sleep(10) }
+    }
+    await expect(stat(join(stateRoot, `${transferId}.json`))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await stat(expired)).toBeDefined()
+  })
+
+  test("expires only pending state into a tombstone and never races a claimed one-use transfer", async () => {
+    const value = await fixture()
+    const statePath = join(value.stateRoot, `${value.transferId}.json`)
+    const expiredPath = join(value.stateRoot, `${value.transferId}.expired`)
+    expect(await expirePendingSecureTransfer(statePath, expiredPath)).toBeTrue()
+    await expect(stat(statePath)).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await stat(expiredPath)).toBeDefined()
+
+    const claimed = await fixture()
+    const claimedState = join(claimed.stateRoot, `${claimed.transferId}.json`)
+    await rename(claimedState, join(claimed.stateRoot, `${claimed.transferId}.claimed`))
+    expect(await expirePendingSecureTransfer(claimedState, join(claimed.stateRoot, `${claimed.transferId}.expired`))).toBeFalse()
+    await expect(stat(join(claimed.stateRoot, `${claimed.transferId}.expired`))).rejects.toMatchObject({ code: "ENOENT" })
   })
 })

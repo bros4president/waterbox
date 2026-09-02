@@ -8,3 +8,4 @@ packages/*/dist/
 .oc-remote/
 .waterbox/
 *.zip
+*.tgz

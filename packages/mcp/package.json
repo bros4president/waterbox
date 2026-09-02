@@ -4,7 +4,7 @@
   "private": false,
   "type": "module",
   "bin": {
-    "waterbox-mcp": "./dist/waterbox.js"
+    "waterbox": "./dist/waterbox.js"
   },
   "exports": {
     ".": "./dist/index.js"
@@ -13,8 +13,7 @@
     "dist/index.js",
     "dist/waterbox.js",
     "dist/waterbox-cli.js",
-    "README.md",
-    "server.json"
+    "README.md"
   ],
   "scripts": {
     "build": "node ../../scripts/build-waterbox.mjs mcp",
@@ -26,7 +25,6 @@
     "@waterbox/contracts": "workspace:*",
     "@waterbox/control-plane-local": "workspace:*",
     "@waterbox/core": "workspace:*",
-    "@waterbox/provider-box": "workspace:*",
     "zod": "4.1.8"
   },
   "engines": {
@@ -34,5 +32,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "7.8.6",
+    "@napi-rs/keyring": "2.0.0"
   }
 }

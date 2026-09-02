@@ -163,7 +163,7 @@ export class SandboxService {
         })
         providerSignal.throwIfAborted()
       } catch (error) {
-        if (providerSignal.aborted) {
+        if (providerSignal.aborted && !isAmbiguousExecution(error)) {
           if (observation !== undefined) {
             try {
               if (observation.state === "running") await this.#checkpointPreparation(record, observation)
@@ -211,7 +211,7 @@ export class SandboxService {
       }
       return toSandbox(completed)
     } catch (error) {
-      if (providerSignal.aborted) throw providerSignal.reason
+      if (providerSignal.aborted && !isAmbiguousExecution(error)) throw providerSignal.reason
       const domainError = error instanceof DomainError ? error : mapProviderError(error)
       if (reservation !== undefined && reservationCanFail) await this.#failIdempotency(reservation, domainError)
       if (!reservationCanFail && !(domainError instanceof SandboxRecoveryError)) {
@@ -316,7 +316,7 @@ export class SandboxService {
       providerSignal.throwIfAborted()
       return toSandbox(await this.#applySandboxObservation(record, "stopping", observation))
     } catch (error) {
-      if (providerSignal.aborted) throw providerSignal.reason
+      if (providerSignal.aborted && !isAmbiguousExecution(error)) throw providerSignal.reason
       const domainError = mapProviderError(error)
       await this.#failSandbox(record, "stopping", domainError)
       throw domainError
@@ -354,7 +354,7 @@ export class SandboxService {
       providerSignal.throwIfAborted()
       return toSandbox(await this.#applySandboxObservation(record, "terminating", observation))
     } catch (error) {
-      if (providerSignal.aborted) throw providerSignal.reason
+      if (providerSignal.aborted && !isAmbiguousExecution(error)) throw providerSignal.reason
       const domainError = mapProviderError(error)
       await this.#failSandbox(record, "terminating", domainError)
       throw domainError
@@ -372,8 +372,11 @@ export class SandboxService {
     const existing = await this.#getSandboxRecord(identity, sandboxId)
     const provider = this.#provider(existing.provider)
     const snapshots = this.#requireSnapshots(provider)
-    const sandbox = await this.#reconcileSandbox(existing, providerSignal)
-    if (sandbox.state !== "running" && sandbox.state !== "stopped") throw invalidState("create a snapshot", sandbox.state)
+    // This core preflight can become stale; the primitive adapter performs the
+    // final native running revalidation immediately before its mutation.
+    await this.probeSandbox(identity, sandboxId, providerSignal)
+    const sandbox = await this.#getSandboxRecord(identity, sandboxId)
+    if (sandbox.state !== "running") throw invalidState("create a snapshot", sandbox.state)
     providerSignal.throwIfAborted()
     const snapshotId = this.#snapshotId()
     const now = this.#now()
@@ -402,9 +405,20 @@ export class SandboxService {
         signal: providerSignal,
       })
       providerSignal.throwIfAborted()
-      return toSnapshot(await this.#applySnapshotObservation(record, "creating", observation))
+      // Retain creating until a provider-reported source consequence is durable.
+      // The persisted reference lets normal snapshot reconciliation finish this
+      // checkpoint after a process loss without any provider-specific state.
+      const checkpointed = await this.#applySnapshotObservation(record, "creating", {
+        state: observation.sourceSandbox === undefined ? observation.state : "creating",
+        providerRef: observation.providerRef,
+      })
+      if (observation.sourceSandbox !== undefined) {
+        try { await this.#applySnapshotSourceObservation(sandbox, observation.sourceSandbox) }
+        catch { return toSnapshot(checkpointed) }
+      }
+      return toSnapshot(await this.#applySnapshotObservation(checkpointed, "creating", observation))
     } catch (error) {
-      if (providerSignal.aborted) {
+      if (providerSignal.aborted && !isAmbiguousExecution(error)) {
         if (observation !== undefined) {
           try {
             await this.#applySnapshotObservation(record, "creating", {
@@ -455,7 +469,7 @@ export class SandboxService {
       providerSignal.throwIfAborted()
       return toSnapshot(await this.#applySnapshotObservation(record, "deleting", observation))
     } catch (error) {
-      if (providerSignal.aborted) throw providerSignal.reason
+      if (providerSignal.aborted && !isAmbiguousExecution(error)) throw providerSignal.reason
       const domainError = mapProviderError(error)
       await this.#failSnapshot(record, "deleting", domainError)
       throw domainError
@@ -833,6 +847,32 @@ export class SandboxService {
     throw new DomainError("conflict", "The snapshot changed concurrently")
   }
 
+  /**
+   * A native snapshot may itself stop or fail its already-running source. This
+   * narrow path is deliberately separate from ordinary lifecycle transitions:
+   * it accepts only exact terminal/live consequences returned with a persisted
+   * snapshot observation, and uses the same bounded CAS recovery discipline.
+   */
+  async #applySnapshotSourceObservation(
+    original: SandboxRecord,
+    observation: { state: SandboxState; providerRef: JsonValue },
+  ): Promise<SandboxRecord> {
+    if (observation.providerRef === null || !["running", "stopped", "failed", "terminated"].includes(observation.state)) {
+      throw new DomainError("provider_failure", "The provider returned an invalid snapshot source state")
+    }
+    let current = original
+    for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
+      // A concurrent lifecycle winner is authoritative; never overwrite it.
+      if (current.state !== "running") return current
+      const updated: SandboxRecord = { ...current, providerRef: observation.providerRef, state: observation.state, version: current.version + 1, updatedAt: this.#now(), lastError: undefined }
+      if (await this.#deps.sandboxes.compareAndSwap(updated, current.version)) return updated
+      const next = await this.#deps.sandboxes.get(current.accountId, current.sandboxId)
+      if (next === undefined) throw new DomainError("conflict", "The sandbox disappeared")
+      current = next
+    }
+    throw new DomainError("conflict", "The snapshot source changed concurrently")
+  }
+
   async #failSandbox(original: SandboxRecord, transition: SandboxState, error: DomainError): Promise<SandboxRecord> {
     let current = original
     for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
@@ -925,6 +965,22 @@ export class SandboxService {
       if (signal.aborted) throw signal.reason
       throw mapProviderError(error)
     }
+    if (record.state === "creating" && observation.state !== "creating") {
+      const source = await this.#getSandboxRecord({ accountId: record.accountId }, record.sourceSandboxId)
+      let sourceObservation
+      try {
+        sourceObservation = await provider.inspectSandbox({ accountId: source.accountId, providerRef: source.providerRef, signal })
+        signal.throwIfAborted()
+      } catch (error) {
+        if (signal.aborted) throw signal.reason
+        throw mapProviderError(error)
+      }
+      try { await this.#applySnapshotSourceObservation(source, sourceObservation) }
+      catch (error) {
+        if (error instanceof DomainError && error.code === "conflict") return record
+        throw error
+      }
+    }
     return this.#applySnapshotObservation(record, record.state, observation)
   }
 
@@ -937,9 +993,9 @@ export class SandboxService {
         const active = this.#resumeOperations.get(operationKey)
         if (active !== undefined) {
           try {
-            return await waitForResume(active, signal)
+            return await waitForResume(active, signal, true)
           } catch (error) {
-            if (signal.aborted) throw signal.reason
+            if (signal.aborted && !isAmbiguousExecution(error)) throw signal.reason
             const latest = await this.#getSandboxRecord(identity, sandboxId)
             if (latest.state !== "resuming") throw error
             const reconciled = await this.#reconcileSandbox(latest, signal)
@@ -969,7 +1025,7 @@ export class SandboxService {
         if (this.#resumeOperations.get(operationKey) === operation) this.#resumeOperations.delete(operationKey)
       }
       void operation.then(clearOperation, clearOperation)
-      return waitForResume(operation, signal)
+      return waitForResume(operation, signal, true)
     }
     throw new DomainError("conflict", "The sandbox resume is still in progress")
   }
@@ -984,7 +1040,7 @@ export class SandboxService {
       signal.throwIfAborted()
       return await this.#applySandboxObservation(record, "resuming", observation)
     } catch (error) {
-      if (signal.aborted) throw signal.reason
+      if (signal.aborted && !isAmbiguousExecution(error)) throw signal.reason
       const domainError = mapProviderError(error)
       await this.#failSandbox(record, "resuming", domainError)
       throw domainError
@@ -1173,6 +1229,11 @@ function isStaleSnapshotObservation(transition: SnapshotState, observed: Snapsho
   return transition === "deleting" && observed === "ready"
 }
 
+function isAmbiguousExecution(error: unknown): boolean {
+  return (error instanceof ProviderError && error.kind === "ambiguous_execution")
+    || (error instanceof DomainError && error.code === "ambiguous_execution")
+}
+
 async function* mapToolErrors<T>(events: AsyncIterable<T>, signal: AbortSignal): AsyncIterable<T> {
   try {
     for await (const event of events) yield event
@@ -1182,19 +1243,25 @@ async function* mapToolErrors<T>(events: AsyncIterable<T>, signal: AbortSignal):
   }
 }
 
-function waitForResume<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
-  signal.throwIfAborted()
+function waitForResume<T>(operation: Promise<T>, signal: AbortSignal, preserveAmbiguity = false): Promise<T> {
+  if (signal.aborted && !preserveAmbiguity) signal.throwIfAborted()
   return new Promise((resolve, reject) => {
-    const onAbort = () => reject(signal.reason)
-    signal.addEventListener("abort", onAbort, { once: true })
+    let aborted = signal.aborted
+    const onAbort = () => {
+      aborted = true
+      if (!preserveAmbiguity) reject(signal.reason)
+    }
+    if (!aborted) signal.addEventListener("abort", onAbort, { once: true })
     void operation.then(
       (value) => {
         signal.removeEventListener("abort", onAbort)
-        resolve(value)
+        if (aborted) reject(signal.reason)
+        else resolve(value)
       },
       (error: unknown) => {
         signal.removeEventListener("abort", onAbort)
-        reject(error)
+        if (aborted && !isAmbiguousExecution(error)) reject(signal.reason)
+        else reject(error)
       },
     )
   })
