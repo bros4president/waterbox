@@ -1,7 +1,7 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createRemoteApiBackend, WaterboxClient } from "@waterbox/client"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
-import { createMcpClient, type BoxProviderDiagnostic } from "./composition.ts"
+import { createMcpClient, type LocalProviderDiagnostic } from "./composition.ts"
 import { createWaterboxMcpServer } from "./server.ts"
 
 export async function main(): Promise<void> {
@@ -40,7 +40,7 @@ function diagnosticMessage(error: unknown): string {
   return `Waterbox MCP diagnostic: ${messages.join(" <- ")}`
 }
 
-export async function createStartupClient(environment: Record<string, string | undefined> = process.env, diagnostic?: (event: BoxProviderDiagnostic) => void): Promise<WaterboxClient> {
+export async function createStartupClient(environment: Record<string, string | undefined> = process.env, diagnostic?: (event: LocalProviderDiagnostic) => void): Promise<WaterboxClient> {
   try {
     return await createMcpClient(parseMcpConfig(environment), diagnostic)
   } catch (error) {
@@ -49,7 +49,7 @@ export async function createStartupClient(environment: Record<string, string | u
   }
 }
 
-function boxDiagnosticMessage(event: BoxProviderDiagnostic): string { return `Waterbox MCP diagnostic: ${JSON.stringify(event)}` }
+function boxDiagnosticMessage(event: LocalProviderDiagnostic): string { return `Waterbox MCP diagnostic: ${JSON.stringify(event)}` }
 
 function unavailableClient(error: Error): WaterboxClient {
   const client = new WaterboxClient(createRemoteApiBackend("http://waterbox.unconfigured/", async () => { throw error }))

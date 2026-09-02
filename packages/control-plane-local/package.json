@@ -11,6 +11,8 @@
     "@waterbox/contracts": "workspace:*",
     "@waterbox/core": "workspace:*",
     "@waterbox/provider-box": "workspace:*",
+    "@waterbox/provider-runtime": "workspace:*",
+    "@waterbox/provider-vercel": "workspace:*",
     "@waterbox/repository-sqlite": "workspace:*"
   }
 }

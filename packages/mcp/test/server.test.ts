@@ -28,7 +28,9 @@ describe("Waterbox MCP client renderer", () => {
     })
     const connection = await connected(commands)
     try {
-      expect((await connection.client.listTools()).tools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
+      const listedTools = (await connection.client.listTools()).tools
+      expect(listedTools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
+      expect(listedTools.find(tool => tool.name === "create_snapshot")?.description).toBe("Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.")
       const result = await connection.client.callTool({ name: "read", arguments: { sandboxId: sandbox.sandboxId, filePath: "/workspace/a.txt" } })
       expect(result).toMatchObject({ content: [{ text: expect.stringContaining('"output":"A\\n"') }] })
       expect(reads).toBe(1)
@@ -88,7 +90,7 @@ describe("Waterbox MCP client renderer", () => {
 
   test("keeps every tool side-effect free while setup is incomplete or unsupported", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-mcp-setup-")); const sqlitePath = join(directory, "must-not-exist.sqlite")
-    try { for (const environment of [{}, { WATERBOX_PROVIDER: "waterbox" }, { WATERBOX_PROVIDER: "box" }]) { const commands = await createStartupClient({ ...environment, WATERBOX_SQLITE_PATH: sqlitePath }); const connection = await connected(commands); try { const response = await connection.client.callTool({ name: "send_file_securely", arguments: { sandboxId: sandbox.sandboxId, sourcePath: join(directory, "missing"), targetPath: "/root/secret" } }); expect(response).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("WATERBOX_PROVIDER=box") }] }); expect(existsSync(sqlitePath)).toBeFalse() } finally { await connection.close() } } }
+    try { for (const environment of [{}, { WATERBOX_PROVIDER: "waterbox" }, { WATERBOX_PROVIDER: "box" }]) { const commands = await createStartupClient({ ...environment, WATERBOX_SQLITE_PATH: sqlitePath }); const connection = await connected(commands); try { const response = await connection.client.callTool({ name: "send_file_securely", arguments: { sandboxId: sandbox.sandboxId, sourcePath: join(directory, "missing"), targetPath: "/root/secret" } }); expect(response).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("WATERBOX_PROVIDER") }] }); expect(existsSync(sqlitePath)).toBeFalse() } finally { await connection.close() } } }
     finally { await rm(directory, { recursive: true, force: true }) }
   })
 

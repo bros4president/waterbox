@@ -145,6 +145,23 @@
         "@waterbox/cli": "workspace:*",
         "@waterbox/contracts": "workspace:*",
         "@waterbox/core": "workspace:*",
+        "@waterbox/provider-runtime": "workspace:*",
+      },
+    },
+    "packages/sandbox-provider-runtime": {
+      "name": "@waterbox/provider-runtime",
+      "dependencies": {
+        "@waterbox/cli": "workspace:*",
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+      },
+    },
+    "packages/sandbox-provider-vercel": {
+      "name": "@waterbox/provider-vercel",
+      "dependencies": {
+        "@waterbox/contracts": "workspace:*",
+        "@waterbox/core": "workspace:*",
+        "@waterbox/provider-runtime": "workspace:*",
       },
     },
     "packages/sandbox-repository-sqlite": {
@@ -482,6 +499,10 @@
     "@waterbox/mcp": ["@waterbox/mcp@workspace:packages/mcp"],
 
     "@waterbox/provider-box": ["@waterbox/provider-box@workspace:packages/sandbox-provider-box"],
+
+    "@waterbox/provider-runtime": ["@waterbox/provider-runtime@workspace:packages/sandbox-provider-runtime"],
+
+    "@waterbox/provider-vercel": ["@waterbox/provider-vercel@workspace:packages/sandbox-provider-vercel"],
 
     "@waterbox/repository-sqlite": ["@waterbox/repository-sqlite@workspace:packages/sandbox-repository-sqlite"],
 

@@ -22,6 +22,8 @@ export interface ProviderSandboxObservation {
 export interface ProviderSnapshotObservation {
   state: SnapshotState
   providerRef: JsonValue
+  /** Optional exact source observation after native snapshot dispatch. */
+  sourceSandbox?: ProviderSandboxObservation
 }
 
 export interface ProviderOperationInput {

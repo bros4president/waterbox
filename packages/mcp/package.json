@@ -26,7 +26,6 @@
     "@waterbox/contracts": "workspace:*",
     "@waterbox/control-plane-local": "workspace:*",
     "@waterbox/core": "workspace:*",
-    "@waterbox/provider-box": "workspace:*",
     "zod": "4.1.8"
   },
   "engines": {

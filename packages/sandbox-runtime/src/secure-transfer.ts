@@ -11,7 +11,7 @@ import {
 import { Decrypter, generateX25519Identity, identityToRecipient } from "age-encryption"
 import { spawn } from "node:child_process"
 import { constants } from "node:fs"
-import { chmod, mkdir, open, readFile, realpath, rename, rm, stat } from "node:fs/promises"
+import { chmod, mkdir, open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises"
 import { dirname, isAbsolute, resolve } from "node:path"
 import { RuntimeError } from "./runtime.ts"
 
@@ -34,6 +34,10 @@ export interface SecureTransferRuntimeOptions {
   randomUUID?: () => string
   scheduleExpiry?: (statePath: string, transferId: string, ttlMs: number) => Promise<void>
   cancelExpiry?: (transferId: string) => Promise<void>
+  /** Test seam for the systemd-to-detached expiry fallback. */
+  runSystemCommand?: (command: string, arguments_: string[]) => Promise<number>
+  /** Test seam for detached expiry scheduling; production uses a detached Node child. */
+  scheduleDetachedExpiry?: (statePath: string, expiredPath: string, ttlMs: number) => Promise<void>
 }
 
 export async function initiateSecureFileTransfer(options: SecureTransferRuntimeOptions): Promise<SecureTransferInitiated> {
@@ -54,7 +58,7 @@ export async function initiateSecureFileTransfer(options: SecureTransferRuntimeO
     await handle.close()
   }
   try {
-    await (options.scheduleExpiry ?? scheduleExpiry)(statePath, transferId, SECURE_TRANSFER_TTL_MS)
+    await (options.scheduleExpiry ?? ((path, id, ttl) => scheduleExpiry(path, id, ttl, options)))(statePath, transferId, SECURE_TRANSFER_TTL_MS)
   } catch (error) {
     await rm(statePath, { force: true })
     throw error
@@ -105,13 +109,40 @@ export async function consumeSecureFileTransfer(
   }
 }
 
-async function scheduleExpiry(statePath: string, transferId: string, ttlMs: number): Promise<void> {
+async function scheduleExpiry(statePath: string, transferId: string, ttlMs: number, options: Pick<SecureTransferRuntimeOptions, "runSystemCommand" | "scheduleDetachedExpiry">): Promise<void> {
   const unit = `waterbox-transfer-expire-${transferId}`
   const claimedPath = resolve(dirname(statePath), `${transferId}.claimed`)
   const expiredPath = resolve(dirname(statePath), `${transferId}.expired`)
-  const exitCode = await runSystemCommand("systemd-run", ["--quiet", "--unit", unit, `--on-active=${Math.ceil(ttlMs / 1_000)}s`, "/bin/sh", "-c", "rm -f -- \"$1\" \"$2\"; : >\"$3\"", "waterbox-expire", statePath, claimedPath, expiredPath])
+  const exitCode = await (options.runSystemCommand ?? runSystemCommand)("systemd-run", ["--quiet", "--unit", unit, `--on-active=${Math.ceil(ttlMs / 1_000)}s`, "/bin/sh", "-c", "rm -f -- \"$1\" \"$2\"; : >\"$3\"", "waterbox-expire", statePath, claimedPath, expiredPath])
     .catch(() => -1)
-  if (exitCode !== 0) throw new RuntimeError(500, "Secure transfer expiry could not be scheduled")
+  if (exitCode === 0) return
+  // Full-Linux sandbox images do not necessarily run systemd. Fall back to
+  // a detached copy of the current Node runtime; it removes state only if a
+  // transfer is still pending, so a successful one-use consumption does not
+  // later gain an expired tombstone.
+  await (options.scheduleDetachedExpiry ?? scheduleDetachedExpiry)(statePath, expiredPath, ttlMs)
+}
+
+async function scheduleDetachedExpiry(statePath: string, expiredPath: string, ttlMs: number): Promise<void> {
+  // Atomic rename claims only the pending state. A consuming caller has
+  // already renamed it to `.claimed`, which must never be expired by a late
+  // detached timer.
+  const program = "const fs=require('node:fs/promises');const [state,expired,delay]=process.argv.slice(1);setTimeout(async()=>{const lease=expired+'.pending';try{await fs.rename(state,lease)}catch(error){if(error&&error.code==='ENOENT')return;return}try{await fs.writeFile(expired,'',{mode:0o600})}finally{await fs.rm(lease,{force:true})}},Number(delay)).unref?.()"
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn(process.execPath, ["-e", program, statePath, expiredPath, String(ttlMs)], { detached: true, stdio: "ignore" })
+    child.once("error", reject)
+    child.once("spawn", () => { child.unref(); resolvePromise() })
+  })
+}
+
+/** Deterministic counterpart of the detached timer, used to verify expiry semantics. */
+export async function expirePendingSecureTransfer(statePath: string, expiredPath: string): Promise<boolean> {
+  const lease = `${expiredPath}.pending`
+  try { await rename(statePath, lease) }
+  catch (error) { if (isCode(error, "ENOENT")) return false; throw error }
+  try { await writeFile(expiredPath, "", { mode: 0o600 }) }
+  finally { await rm(lease, { force: true }) }
+  return true
 }
 
 async function cancelExpiry(transferId: string): Promise<void> {

@@ -8,23 +8,80 @@ import {
   SystemBoxProviderClock,
   type BoxProviderConfig,
   type BoxProviderDiagnostic,
-  type SandboxRuntimeArtifact,
 } from "@waterbox/provider-box"
+import {
+  SystemVercelProviderClock,
+  VercelSandboxProvider,
+  type VercelCompositionDiagnostic,
+  type VercelProviderConfig,
+} from "@waterbox/provider-vercel"
+import type { SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
+import { loadSandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
 import { mkdir } from "node:fs/promises"
+import { homedir } from "node:os"
 import { dirname } from "node:path"
+import { join } from "node:path"
 
+export type LocalProviderDiagnostic = BoxProviderDiagnostic | VercelCompositionDiagnostic
 export type { BoxProviderDiagnostic } from "@waterbox/provider-box"
+export type { VercelCompositionDiagnostic } from "@waterbox/provider-vercel"
 
 const EMBEDDED_ORIGIN = new URL("http://waterbox.local/")
+
+export type LocalDirectProviderSelection =
+  | { kind: "box"; config: BoxProviderConfig }
+  | { kind: "vercel"; config: VercelProviderConfig }
+
+export interface LocalConfiguredMcpBackend {
+  sqlitePath: string
+  provider: LocalDirectProviderSelection
+}
+
+/** Safe startup-only validation failure; values are never retained in messages. */
+export class LocalProviderConfigurationError extends Error {
+  constructor(message = "Waterbox local provider configuration is invalid. Set WATERBOX_PROVIDER explicitly and configure its required credentials using your MCP client's secret or environment mechanism, then restart the client. Do not provide credentials in chat or as tool arguments.") {
+    super(message)
+    this.name = "LocalProviderConfigurationError"
+  }
+}
+
+/**
+ * Explicit local provider selection. This is the sole environment-to-provider
+ * mapping; callers above composition only pass the resulting opaque selection.
+ */
+export function parseLocalProviderConfiguration(
+  environment: Record<string, string | undefined> = process.env,
+  homeDirectory = homedir(),
+): LocalConfiguredMcpBackend {
+  const provider = environment.WATERBOX_PROVIDER
+  const sqlitePath = nonEmpty(environment.WATERBOX_SQLITE_PATH) ? environment.WATERBOX_SQLITE_PATH!.trim() : join(homeDirectory, ".waterbox", "direct.sqlite")
+  if (!validSqlitePath(sqlitePath)) throw new LocalProviderConfigurationError()
+  if (provider === "box") {
+    const apiKey = required(environment.BOX_API_KEY, "BOX_API_KEY", "Box")
+    const intervalMs = positive(environment.BOX_POLL_INTERVAL_MS, 1_000), timeoutMs = positive(environment.BOX_POLL_TIMEOUT_MS, 120_000)
+    const config: BoxProviderConfig = { apiBaseUrl: environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1", apiKey, polling: { intervalMs, timeoutMs } }
+    if (timeoutMs < intervalMs || !boxOrigin(config.apiBaseUrl)) throw new LocalProviderConfigurationError()
+    return { sqlitePath, provider: { kind: "box", config } }
+  }
+  if (provider === "vercel") {
+    const token = required(environment.VERCEL_TOKEN, "VERCEL_TOKEN", "Vercel")
+    const teamId = required(environment.VERCEL_TEAM_ID, "VERCEL_TEAM_ID", "Vercel")
+    const projectId = required(environment.VERCEL_PROJECT_ID, "VERCEL_PROJECT_ID", "Vercel")
+    const intervalMs = positive(environment.VERCEL_POLL_INTERVAL_MS, 1_000), timeoutMs = positive(environment.VERCEL_POLL_TIMEOUT_MS, 120_000), requestTimeoutMs = positive(environment.VERCEL_REQUEST_TIMEOUT_MS, 30_000)
+    const config: VercelProviderConfig = { apiOrigin: environment.VERCEL_API_ORIGIN ?? "https://api.vercel.com", token, teamId, projectId, polling: { intervalMs, timeoutMs, requestTimeoutMs } }
+    if (timeoutMs < intervalMs || requestTimeoutMs > timeoutMs || !vercelOrigin(config.apiOrigin)) throw new LocalProviderConfigurationError()
+    return { sqlitePath, provider: { kind: "vercel", config } }
+  }
+  throw new LocalProviderConfigurationError()
+}
 
 export interface LocalControlPlaneConfig {
   sqlitePath: string
   accountId: string
-  provider:
-    | { kind: "box"; config: BoxProviderConfig; runtimeArtifact: SandboxRuntimeArtifact }
+  provider: (LocalDirectProviderSelection & { runtimeArtifact: SandboxRuntimeArtifact })
     | { kind: "injected"; implementation: SandboxProvider }
-  diagnostic?: (event: BoxProviderDiagnostic) => void
+  diagnostic?: (event: LocalProviderDiagnostic) => void
 }
 
 export interface LocalControlPlaneOverrides {
@@ -65,12 +122,18 @@ export async function createLocalControlPlane(
 ): Promise<LocalControlPlane> {
   validateBaseConfiguration(config, identityResolver)
 
-  // Box validates its complete configuration and already-loaded artifact before any
-  // filesystem or SQLite side effect. Test providers intentionally bypass Box.
+  // Each explicit adapter validates its complete configuration and already-loaded
+  // artifact before any filesystem or SQLite side effect. Test providers bypass
+  // external configuration only through the explicit injected selection.
   const provider = config.provider.kind === "injected"
     ? config.provider.implementation
-    : new BoxSandboxProvider(config.provider.config, {
+    : config.provider.kind === "box" ? new BoxSandboxProvider(config.provider.config, {
         clock: new SystemBoxProviderClock(),
+        artifact: config.provider.runtimeArtifact,
+        ...(config.diagnostic === undefined ? {} : { diagnostic: config.diagnostic }),
+      })
+    : new VercelSandboxProvider(config.provider.config, {
+        clock: new SystemVercelProviderClock(),
         artifact: config.provider.runtimeArtifact,
         ...(config.diagnostic === undefined ? {} : { diagnostic: config.diagnostic }),
       })
@@ -128,9 +191,23 @@ export async function createEmbeddedApiBackend(
   }
 }
 
+/**
+ * Caller-owned artifact loading happens only after strict configuration has
+ * succeeded and before a provider, SQLite database, or filesystem is touched.
+ */
+export async function createConfiguredEmbeddedApiBackend(
+  configuration: LocalConfiguredMcpBackend,
+  artifactLocation: URL,
+  diagnostic?: (event: LocalProviderDiagnostic) => void,
+): Promise<ApiBackend> {
+  validateConfiguredMcpBackend(configuration)
+  const artifact = await loadSandboxRuntimeArtifact(artifactLocation, "0.1.0")
+  return createEmbeddedApiBackend({ sqlitePath: configuration.sqlitePath, accountId: "local", provider: { ...configuration.provider, runtimeArtifact: artifact }, ...(diagnostic === undefined ? {} : { diagnostic }) })
+}
+
 function validateBaseConfiguration(config: LocalControlPlaneConfig, identityResolver: IdentityResolver): void {
   if (!config || typeof config !== "object" || !config.provider || typeof config.provider !== "object"
-    || (config.provider.kind !== "box" && config.provider.kind !== "injected")) {
+    || (config.provider.kind !== "box" && config.provider.kind !== "vercel" && config.provider.kind !== "injected")) {
     throw new TypeError("Local control-plane provider selection is invalid")
   }
   if (typeof config.sqlitePath !== "string" || config.sqlitePath.length === 0 || config.sqlitePath.includes("\0")) throw new TypeError("Local control-plane SQLite configuration is invalid")
@@ -174,3 +251,28 @@ function constantTimeEqual(left: string, right: string): boolean {
   }
   return difference === 0
 }
+
+function required(value: string | undefined, variable: string, provider: string): string {
+  if (!nonEmpty(value)) throw new LocalProviderConfigurationError(`${variable} is required for the ${provider} provider. Set WATERBOX_PROVIDER explicitly and configure ${variable} using your MCP client's secret or environment mechanism, then restart the client. Do not provide credentials in chat or as tool arguments.`)
+  return value.trim()
+}
+function nonEmpty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 16_384 }
+function positive(value: string | undefined, fallback: number): number { if (value === undefined) return fallback; if (!/^\d+$/.test(value)) throw new LocalProviderConfigurationError(); const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 1) throw new LocalProviderConfigurationError(); return parsed }
+function validSqlitePath(value: string): boolean { return value.length > 0 && !value.includes("\0") }
+function boxOrigin(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && !url.username && !url.password && !url.search && !url.hash } catch { return false } }
+function vercelOrigin(value: string): boolean { try { const url = new URL(value); return url.protocol === "https:" && url.pathname === "/" && !url.username && !url.password && !url.search && !url.hash } catch { return false } }
+function validateConfiguredMcpBackend(value: LocalConfiguredMcpBackend): void {
+  if (!value || !validSqlitePath(value.sqlitePath) || !value.provider || typeof value.provider !== "object") throw new LocalProviderConfigurationError()
+  if (value.provider.kind === "box") {
+    const config = value.provider.config
+    if (!config || !nonEmpty(config.apiKey) || !boxOrigin(config.apiBaseUrl) || !positiveNumber(config.polling?.intervalMs) || !positiveNumber(config.polling?.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs) throw new LocalProviderConfigurationError()
+    return
+  }
+  if (value.provider.kind === "vercel") {
+    const config = value.provider.config
+    if (!config || !nonEmpty(config.token) || !nonEmpty(config.teamId) || !nonEmpty(config.projectId) || !vercelOrigin(config.apiOrigin) || !positiveNumber(config.polling?.intervalMs) || !positiveNumber(config.polling?.timeoutMs) || !positiveNumber(config.polling?.requestTimeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.polling.requestTimeoutMs > config.polling.timeoutMs) throw new LocalProviderConfigurationError()
+    return
+  }
+  throw new LocalProviderConfigurationError()
+}
+function positiveNumber(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 }

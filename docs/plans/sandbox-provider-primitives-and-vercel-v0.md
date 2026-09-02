@@ -1,6 +1,6 @@
 # Sandbox Provider Primitives And Vercel Implementation V0
 
-Status: approved for implementation; Vercel capability probe complete; Phases 1-7 pending
+Status: complete; Vercel capability probe and Phases 1-7 complete
 
 This is the durable supplementary implementation plan for refactoring the current Box-specific provider implementation around a provider-neutral sandbox primitive port and then delivering a production Vercel Sandbox provider through the same shared Waterbox runtime composition.
 
@@ -139,7 +139,8 @@ This diagnosis supersedes the Phase 6 report's shorthand “adapter-local shim�
 - Create ambiguity is reconciled by one exact non-resuming lookup using deterministic identity and ownership tags. List differences never establish ownership.
 - The production Vercel adapter uses native `fetch` against the REST API and does not add `@vercel/sandbox`. Exact versioned paths, including the live `/v4` create, `/v3` snapshot, and `/v2` remaining endpoint split, stay adapter-local and are pinned by fake-server contracts. Reconsider this only after a concrete REST insufficiency and a durable-plan amendment.
 - The settled local configuration is explicit access-token mode: `WATERBOX_PROVIDER=vercel`, `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. The typed provider config also contains the fixed HTTPS API origin and bounded polling settings. OIDC support is deferred unless this plan is amended with tested local composition and refresh behavior.
-- Automatic Vercel stop snapshots are provider persistence artifacts, not public Waterbox snapshot records. Vercel create configures one-snapshot retention with immediate eviction and a finite expiration. Its bounded provider reference may carry the last automatic snapshot ID returned by a successfully persisted stop action, but cleanup never depends on reference-only updates from stable inspection. Before sandbox deletion, the adapter independently resolves and verifies the current snapshot, deletes it only when its creation method and source identity prove it is automatic and owned, then deletes the sandbox. Explicit Waterbox snapshots are never placed in or deleted through this slot.
+- Audited manual snapshot behavior may return or transition through `snapshotting`, and a bounded non-resuming lookup may terminally report the source sandbox as stopped. Vercel reports that state through the provider-neutral optional source-sandbox observation on snapshot creation; shared core applies any supplied observation to reconcile the durable source state. This does not resume the sandbox. Box may omit the observation when its snapshot creation does not change source state.
+- Automatic Vercel stop snapshots are provider persistence artifacts, not public Waterbox snapshot records. Vercel must not use provider-global `keepLastSnapshots`, because official Vercel Sandbox documentation shows it governs every snapshot, including explicit snapshots. Bounded automatic retention instead uses Waterbox-tracked, ownership-verified targeted cleanup of automatic snapshot references. Its bounded provider reference may carry the last automatic snapshot ID returned by a successfully persisted stop action, but cleanup never depends on reference-only updates from stable inspection. Before sandbox deletion, the adapter independently resolves and verifies the current snapshot, deletes it only when its creation method and source identity prove it is automatic and owned, then deletes the sandbox. It never enumerates snapshots for deletion or evicts explicit Waterbox snapshots.
 
 ## Primitive Contract
 
@@ -241,11 +242,12 @@ This primitive is for runtime artifacts, encrypted secure-transfer ciphertext, a
 ### Snapshots
 
 - Snapshot create receives the Waterbox snapshot identity so providers can derive stable owned names where needed.
-- Successful or exactly reconciled snapshot create returns an opaque non-null reference. An unresolved mutation throws ambiguity and retains the existing acknowledged no-reference recovery limitation.
+- Successful or exactly reconciled snapshot create returns an opaque non-null reference and may include `sourceSandboxObservation?: InfrastructureSandboxObservation`. A provider must include this provider-neutral optional source observation when snapshot creation establishes a source-state change; shared core reconciles every supplied observation, while its absence asserts no source-state update. An unresolved mutation throws ambiguity and retains the existing acknowledged no-reference recovery limitation.
 - Snapshot inspect is exact and side-effect free.
 - Snapshot delete accepts provider 404 or an explicit terminal deleted tombstone as deleted only after exact identity validation.
 - Source-snapshot create remains provider-affine and uses the opaque snapshot reference.
 - Explicit snapshot create accepts only a running source. It does not implicitly resume a stopped sandbox.
+- Source-state reconciliation is shared behavior, not a Vercel branch: Box may omit the optional observation when snapshot creation leaves the source unchanged.
 - Provider-generated automatic persistence snapshots are not surfaced as Waterbox snapshots.
 
 ### Inventory
@@ -293,7 +295,7 @@ The shared layer owns protocol encoding and validation. The primitive adapter ow
 
 ## Phase 1: Primitive Contract And Characterization
 
-Status: pending
+Status: complete
 
 Scope:
 
@@ -328,7 +330,7 @@ git diff --check
 
 ## Phase 2: Shared Waterbox Runtime Extraction
 
-Status: pending; depends on Phase 1
+Status: complete; depends on Phase 1
 
 Scope:
 
@@ -358,7 +360,7 @@ git diff --check
 
 ## Phase 3: Box Primitive Migration
 
-Status: pending; depends on Phase 2
+Status: complete; depends on Phase 2
 
 Scope:
 
@@ -388,7 +390,7 @@ git diff --check
 
 ## Phase 4: Box Live Regression Gate
 
-Status: pending; depends on Phase 3
+Status: complete; depends on Phase 3
 
 Scope:
 
@@ -408,7 +410,7 @@ Verification is recorded with the exact authorized commands, sanitized outcomes,
 
 ## Phase 5: Vercel Primitive Adapter
 
-Status: pending; depends on Phase 4
+Status: complete; depends on Phase 4
 
 Scope:
 
@@ -429,7 +431,8 @@ Acceptance criteria:
 - File uploads preserve exact bytes and modes required by runtime installation.
 - Stop/resume preserves durable sandbox identity while replacing session identity internally.
 - Snapshots handle transient states, running-source creation, source restore, automatic persistence artifacts, 404, and deleted tombstones.
-- Vercel create applies bounded automatic-snapshot retention. A successfully persisted stop may update the bounded automatic-snapshot reference; delete independently resolves, proves, and removes the current automatic snapshot before removing the sandbox without touching explicit Waterbox snapshots.
+- Snapshot-create contracts prove provider-neutral source-sandbox reconciliation when a manual Vercel snapshot terminally stops its source, while Box proves the optional observation can be omitted without a source-state change.
+- Vercel implements bounded automatic-snapshot retention through Waterbox-tracked, ownership-verified targeted cleanup, never provider-global `keepLastSnapshots`, enumeration-and-deletion, or explicit-snapshot eviction. A successfully persisted stop may update the bounded automatic-snapshot reference; delete independently resolves, proves, and removes the current automatic snapshot before removing the sandbox without touching explicit Waterbox snapshots. Fake contracts distinguish explicit from automatic cleanup, and Phase 7 live acceptance verifies the same safety.
 - Errors and diagnostics are secret-safe.
 - No Vercel package is imported by core, API, client, or MCP.
 
@@ -443,7 +446,7 @@ git diff --check
 
 ## Phase 6: Vercel Runtime Composition And Local Configuration
 
-Status: pending; depends on Phase 5
+Status: complete; depends on Phase 5
 
 Scope:
 
@@ -478,7 +481,7 @@ git diff --check
 
 ## Phase 7: Authorized Vercel Acceptance And Two-Provider Closure
 
-Status: pending; depends on Phase 6
+Status: complete; depends on Phase 6
 
 Scope:
 
@@ -545,18 +548,27 @@ Also run the focused provider, local composition, API, client, MCP, and separate
 
 ## Completion Checklist
 
-- [ ] Primitive provider contract accepted and covered by shared conformance tests.
-- [ ] Shared Waterbox runtime behavior extracted from Box-specific code.
-- [ ] Box uses primitives plus shared runtime with existing references preserved.
-- [ ] Authorized Box regression and exact cleanup pass.
-- [ ] Vercel primitive adapter passes credential-free conformance.
-- [ ] Vercel local composition and side-effect-free configuration behavior pass.
-- [ ] Authorized production Vercel backend smoke and exact cleanup pass.
-- [ ] Shared runtime parity passes for Box and Vercel.
-- [ ] No provider-name branch exists above composition.
-- [ ] Architecture and provider capability documentation reflect the implemented boundary.
-- [ ] Launch Phase 7 is updated with completion evidence.
+- [x] Primitive provider contract accepted and covered by shared conformance tests.
+- [x] Shared Waterbox runtime behavior extracted from Box-specific code.
+- [x] Box uses primitives plus shared runtime with existing references preserved.
+- [x] Authorized Box regression and exact cleanup pass.
+- [x] Vercel primitive adapter passes credential-free conformance.
+- [x] Vercel local composition and side-effect-free configuration behavior pass.
+- [x] Authorized production Vercel backend smoke and exact cleanup pass.
+- [x] Shared runtime parity passes for Box and Vercel.
+- [x] No provider-name branch exists above composition.
+- [x] Architecture and provider capability documentation reflect the implemented boundary.
+- [x] Launch Phase 7 is updated with completion evidence.
 
 ## Implementation Log
 
 - 2026-09-01: Plan created after the completed Vercel capability probe and follow-up provider-neutrality review. The review found a direct shared infrastructure intersection across Box and Vercel, while the current provider interface mixed native lifecycle/transport with shared Waterbox runtime behavior. The approved sequence is primitive contract, shared runtime extraction, Box migration, Box live regression, Vercel primitive implementation, configured composition, and two-provider live closure. Native `fetch` against the validated REST surface is the settled Vercel production transport; no Vercel SDK dependency is planned. No production code or live provider operation occurred while writing this plan.
+- 2026-09-01: Phase 1 complete: added the provider-neutral primitive contract, fake/conformance support, semantic full-Linux runtime profile, running-only snapshot and lifecycle ambiguity-over-abort corrections, plus Box native snapshot running revalidation. No architectural deviation was required. Independent review accepted the phase; credential-free verification passed with 469 tests, `bun run typecheck`, `bun run build:mcp`, and `git diff --check`.
+- 2026-09-01: Phase 2 complete: extracted the shared Waterbox runtime backend over provider-neutral primitives, covering verify-first preparation, canonical CLI protocol handling, ciphertext-only secure transfer, and Bash-job operations. The full-Linux profile now provides concrete paths and a narrow injected non-interactive path provisioner; the bootstrap and launcher use the CLI's real `/run/waterbox/bash-jobs` root. No architectural deviation was required. Independent review accepted the correction set; credential-free verification passed with 476 tests, `bun run typecheck`, `bun run build:mcp`, and `git diff --check`.
+- 2026-09-01: Phase 3 complete: migrated Box to `BoxSandboxInfrastructure` plus the shared `WaterboxSandboxBackend` composition. Box retains only native endpoint/authentication, state and reference mapping, polling, idempotency, snapshot reconciliation, bounded terminal/file transport, cancellation, diagnostics, and its proven non-interactive privilege provisioner; shared preparation, CLI tools, ciphertext transfer, and Bash-job behavior are no longer implemented in the adapter. Persisted `box-sandbox-v2` and `box-named-snapshot-v2` references remain unchanged. No architectural deviation was required. Independent review accepted the corrective set; credential-free focused verification passed with 179 tests, `bun run typecheck`, `bun run build:mcp`, and `git diff --check`.
+- 2026-09-01: Phase 4 complete: authorized Box verification ran `BOX_CAPABILITY_PROBE_AUTHORIZATION=… bun run scripts/box-capability-probe.ts --run` and `WATERBOX_MCP_EXPERIMENT_AUTHORIZATION=… WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT=YES bun run smoke:mcp-direct`. The capability probe passed create, replay, snapshot, restore, stop/resume, and deletion. The assembled embedded smoke passed fresh/current preparation, all seven tools, ciphertext transfer, asynchronous Bash, concurrency, running-only snapshot, stale-runtime repair, restore, and deletion through stdio MCP -> authenticated embedded Fetch API -> local control plane -> SQLite + Box. Both runs reported exact active-baseline restoration; final aggregate Box inventory was zero boxes and zero snapshots. The `api-local` listener and development API variables were not used. Corrective validation confirmed lifecycle mutation ambiguity and running-only snapshot copy; no architecture deviation was required.
+- 2026-09-02: DEVIATION — official Vercel Sandbox documentation verification established that provider-global `keepLastSnapshots` governs every snapshot, including explicit snapshots. The affected invariant is that automatic cleanup must never touch explicit Waterbox snapshots. Phase 5 therefore uses only Waterbox-tracked, ownership-verified targeted cleanup of automatic snapshot references, never provider-global retention or enumerate-and-delete behavior. Resulting verification is a fake-contract distinction between explicit and automatic cleanup plus Phase 7 live acceptance; no identifiers or secrets were retained.
+- 2026-09-02: DEVIATION — audited Vercel evidence established that manual snapshot creation may return or transition through `snapshotting`, while bounded non-resuming lookup can terminally report the source sandbox as stopped. The prior generic snapshot result could persist only the snapshot and leave the Waterbox source state running. The affected invariants are durable source-state accuracy, no implicit resume, and safe recovery from a completed snapshot whose source stopped. Snapshot creation therefore carries a provider-neutral optional source-sandbox observation that shared core applies when supplied; Box omits it when no source-state change occurs, without provider branches. Resulting verification is fake-contract coverage for stopped-source reconciliation and omitted-observation compatibility, plus a Phase 7 live manual-snapshot test; no identifiers or secrets were retained.
+- 2026-09-02: Phase 5 complete: added `@waterbox/provider-vercel`, an injected native-`fetch` direct-REST primitive adapter with no SDK. It uses named/tagged durable references with no persisted session IDs; implements exact inspect, bounded commands and file upload, stop/resume, snapshots and source-snapshot create, inventory, strict contracts, no mutation replay, and ownership-verified targeted automatic-snapshot cleanup. The two recorded deviations are retained: provider-global `keepLastSnapshots` is not used because it can evict explicit snapshots, and snapshot creation carries a provider-neutral source observation because the post-manual-snapshot source can be stopped; shared core performs that reconciliation. Independent review accepted the phase. Credential-free verification passed: `bun test packages/sandbox-core/test packages/sandbox-provider-vercel/test packages/sandbox-provider-runtime/test packages/sandbox-provider-box/test` (113 pass, 650 expectations), `bun run typecheck`, and `git diff --check`. No live Vercel operations occurred.
+- 2026-09-02: Phase 6 complete: composed Vercel as a thin facade over the shared runtime, with explicit provider selection, configuration, and artifact validation below `@waterbox/control-plane-local`. MCP, core, API, and client contain no provider imports or behavior branches. Configured fake embedded Fetch API, local control plane, SQLite, and MCP flows plus the provider-composition Node smoke passed under the default Node v24.19.0; the README configuration reference was updated. Independent review accepted the phase. Credential-free verification passed: `bun test packages/sandbox-provider-box/test packages/sandbox-provider-vercel/test packages/control-plane-local/test packages/sandbox-api/test packages/client/test packages/mcp/test` (144 pass, 833 expectations), `bun run typecheck`, `bun run build:mcp`, and `git diff --check`. `$NODE_24_15_BIN` and `$NODE_24_CURRENT_BIN` were absent, so their mandated invocations were not run and no substitute was used.
+- 2026-09-02: Phase 7 complete: the Vercel production adapter passed the embedded MCP acceptance flow for fresh/current preparation, all seven tools, ciphertext transfer, asynchronous Bash, concurrency, snapshot-source restore and stale-runtime repair, stop/resume, and native caller abort with one dispatch, kill, and terminal follow-up. Automatic snapshots used an exact owned sandbox link and automatic method with tombstone-aware cleanup; final active Vercel sandbox and snapshot counts were both zero. The direct embedded Box regression also passed with exact baseline restoration. Corrective provider-neutral, adapter-local work covered fresh-workspace pre-dispatch fallback, a full-Linux detached-Node expiry fallback where systemd is absent, and automatic-snapshot ownership proof from the exact owned sandbox's current snapshot plus automatic method because live metadata lacks copied source/tag fields. Full verification passed: `bun run test` (474 pass, 2433 expectations), `bun run typecheck`, `bun run build:mcp`, `bun run test:node-sqlite`, the default Node provider-composition smoke, and `git diff --check`. `$NODE_24_15_BIN` and `$NODE_24_CURRENT_BIN` were absent, so their named invocations were not run and no substitution was used. npm/release work remains in the launch plan.

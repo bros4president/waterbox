@@ -94,7 +94,7 @@ describe("account ownership", () => {
     await expectDomainError(service.probeSandbox(bob, sandbox.sandboxId), "not_found")
     await expectDomainError(service.getSnapshot(bob, snapshot.snapshotId), "not_found")
     await expectDomainError(service.deleteSandbox(bob, sandbox.sandboxId), "not_found")
-    expect(provider.inspectSandboxCalls).toBe(0)
+    expect(provider.inspectSandboxCalls).toBe(1)
   })
 
   test("live probe always inspects the provider and persists out-of-band state", async () => {
@@ -667,13 +667,134 @@ describe("lifecycle and optional groups", () => {
     expect(provider.deleteSnapshotCalls).toBe(1)
   })
 
-  test("snapshot creation remains available from stopped sandboxes", async () => {
+  test("persists a ready snapshot before applying its exact stopped source observation", async () => {
+    const { service, provider, sandboxes, snapshots } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    provider.createSnapshotObservation = { state: "ready", providerRef: { fakeSnapshot: "native-snapshot" }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandbox.sandboxId } } }
+    const created = await service.createSnapshot(alice, sandbox.sandboxId, {})
+    expect(created.state).toBe("ready")
+    expect((await snapshots.get(alice.accountId, created.snapshotId))?.state).toBe("ready")
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
+    expect((await service.getSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
+  })
+
+  test("keeps a concurrent source lifecycle winner while recovering snapshot source observation CAS", async () => {
+    const base = new InMemorySandboxRepository()
+    const racing = new RacingSandboxRepository(base, false)
+    const snapshots = new InMemorySnapshotRepository()
+    const provider = new FakeSandboxProvider()
+    const service = new SandboxService({
+      sandboxes: racing,
+      snapshots,
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"], ["snap_silver-forest-a1"]),
+    })
+    const sandboxId = "sbx_calm-cactus-a1" as SandboxId
+    await base.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "running"))
+    provider.sandboxStates.set(sandboxId, "running")
+    provider.createSnapshotObservation = {
+      state: "ready",
+      providerRef: { fakeSnapshot: "native-snapshot" },
+      sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } },
+    }
+    const nativeCreate = provider.snapshots!.create
+    provider.snapshots!.create = async (input) => {
+      racing.arm()
+      return nativeCreate(input)
+    }
+
+    const created = await service.createSnapshot(alice, sandboxId, {})
+
+    // The snapshot result is durable before the source CAS. A racing terminal
+    // lifecycle winner remains authoritative rather than being overwritten.
+    expect(created.state).toBe("ready")
+    expect((await snapshots.get(alice.accountId, created.snapshotId))?.state).toBe("ready")
+    expect((await base.get(alice.accountId, sandboxId))?.state).toBe("terminated")
+    expect((await service.getSandbox(alice, sandboxId)).state).toBe("terminated")
+  })
+
+  test("snapshot creation requires a running sandbox and never resumes implicitly", async () => {
     const { service, provider } = harness()
     const sandbox = await service.createSandbox(alice, {})
     await service.stopSandbox(alice, sandbox.sandboxId)
 
-    expect((await service.createSnapshot(alice, sandbox.sandboxId, {})).state).toBe("ready")
-    expect(provider.createSnapshotCalls).toBe(1)
+    await expectDomainError(service.createSnapshot(alice, sandbox.sandboxId, {}), "invalid_state")
+    expect(provider.createSnapshotCalls).toBe(0)
+    expect(provider.resumeCalls).toBe(0)
+  })
+
+  test("adapter-reported mutation ambiguity wins a racing caller abort", async () => {
+    const createProvider = new FakeSandboxProvider()
+    const createController = new AbortController()
+    createProvider.createStarted = () => createController.abort(new DOMException("cancel create", "AbortError"))
+    createProvider.createError = new ProviderError("ambiguous_execution", "create outcome unknown")
+    const create = harness({ provider: createProvider })
+    await expectDomainError(create.service.createSandbox(alice, {}, { signal: createController.signal }), "ambiguous_execution")
+
+    const provider = new FakeSandboxProvider()
+    const { service } = harness({ provider, sandboxIds: ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3"] })
+    const stopTarget = await service.createSandbox(alice, {})
+    const stopController = new AbortController()
+    provider.stopStarted = () => stopController.abort(new DOMException("cancel stop", "AbortError"))
+    provider.stopError = new ProviderError("ambiguous_execution", "stop outcome unknown")
+    await expectDomainError(service.stopSandbox(alice, stopTarget.sandboxId, stopController.signal), "ambiguous_execution")
+
+    provider.stopError = undefined
+    provider.stopStarted = undefined
+    const resumeTarget = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, resumeTarget.sandboxId)
+    const resumeController = new AbortController()
+    provider.resumeStarted = () => resumeController.abort(new DOMException("cancel resume", "AbortError"))
+    provider.resumeError = new ProviderError("ambiguous_execution", "resume outcome unknown")
+    await expectDomainError(service.resumeSandbox(alice, resumeTarget.sandboxId, resumeController.signal), "ambiguous_execution")
+
+    provider.resumeError = undefined
+    provider.resumeStarted = undefined
+    const deleteTarget = await service.createSandbox(alice, {})
+    const deleteController = new AbortController()
+    provider.deleteError = new ProviderError("ambiguous_execution", "delete outcome unknown")
+    const originalDelete = provider.deleteSandbox.bind(provider)
+    provider.deleteSandbox = async (input) => {
+      deleteController.abort(new DOMException("cancel delete", "AbortError"))
+      return originalDelete(input)
+    }
+    await expectDomainError(service.deleteSandbox(alice, deleteTarget.sandboxId, deleteController.signal), "ambiguous_execution")
+
+    const snapshotProvider = new FakeSandboxProvider()
+    const snapshot = harness({ provider: snapshotProvider })
+    const snapshotTarget = await snapshot.service.createSandbox(alice, {})
+    const snapshotController = new AbortController()
+    snapshotProvider.createSnapshotError = new ProviderError("ambiguous_execution", "snapshot outcome unknown")
+    const originalCreateSnapshot = snapshotProvider.snapshots!.create
+    snapshotProvider.snapshots!.create = async (input) => {
+      snapshotController.abort(new DOMException("cancel snapshot", "AbortError"))
+      return originalCreateSnapshot(input)
+    }
+    await expectDomainError(snapshot.service.createSnapshot(alice, snapshotTarget.sandboxId, {}, snapshotController.signal), "ambiguous_execution")
+  })
+
+  test("a canceled resume joiner retains the active adapter ambiguity", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, sandbox.sandboxId)
+    const gate = deferred()
+    const started = deferred()
+    provider.resumeBarrier = gate.promise
+    provider.resumeStarted = started.resolve
+    provider.resumeError = new ProviderError("ambiguous_execution", "resume outcome unknown")
+    const active = service.resumeSandbox(alice, sandbox.sandboxId)
+    await started.promise
+    const joiningController = new AbortController()
+    const joining = service.resumeSandbox(alice, sandbox.sandboxId, joiningController.signal)
+    joiningController.abort(new DOMException("cancel joining resume", "AbortError"))
+    gate.resolve()
+
+    await expectDomainError(active, "ambiguous_execution")
+    await expectDomainError(joining, "ambiguous_execution")
   })
 
   test("create-from-snapshot enforces ownership, readiness, relationship, and capability", async () => {
@@ -790,6 +911,7 @@ describe("execution and reconciliation", () => {
     await service.deleteSandbox(alice, sandbox.sandboxId, deleteSignal)
 
     expect(provider.lifecycleInputs).toEqual([
+      { operation: "inspect", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: snapshotSignal } },
       { operation: "stop", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: stopSignal } },
       { operation: "resume", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: resumeSignal } },
       { operation: "delete", input: { accountId: alice.accountId, providerRef: sandboxRef, signal: deleteSignal } },
@@ -893,9 +1015,9 @@ describe("execution and reconciliation", () => {
     const reason = new DOMException("cancel joining resume", "AbortError")
     joiningController.abort(reason)
 
+    gate.resolve()
     await expect(joining).rejects.toBe(reason)
     expect(provider.resumeCalls).toBe(1)
-    gate.resolve()
     expect((await initiating).state).toBe("running")
     expect(provider.resumeCalls).toBe(1)
   })
@@ -917,8 +1039,8 @@ describe("execution and reconciliation", () => {
     const reason = new DOMException("cancel initiating resume", "AbortError")
     initiatingController.abort(reason)
 
-    await expect(initiating).rejects.toBe(reason)
     gate.resolve()
+    await expect(initiating).rejects.toBe(reason)
     expect((await joining).state).toBe("running")
     expect(provider.resumeCalls).toBe(1)
     expect(provider.inspectSandboxCalls).toBe(1)
@@ -1213,9 +1335,13 @@ class SnapshotSignalProvider extends FakeSandboxProvider {
 }
 
 class RacingSandboxRepository implements SandboxRepository {
-  #race = true
+  #race: boolean
 
-  constructor(readonly base: InMemorySandboxRepository) {}
+  constructor(readonly base: InMemorySandboxRepository, race = true) {
+    this.#race = race
+  }
+
+  arm(): void { this.#race = true }
 
   createIfAbsent(record: SandboxRecord): Promise<boolean> {
     return this.base.createIfAbsent(record)

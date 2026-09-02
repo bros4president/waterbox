@@ -1,14 +1,14 @@
 # @waterbox/mcp
 
-The supported Waterbox MCP server. It runs as a local stdio process and renders `@waterbox/client` commands over an authenticated, in-process Waterbox API. Local Box mode opens no listener or daemon.
+The supported Waterbox MCP server. It runs as a local stdio process and renders `@waterbox/client` commands over an authenticated, in-process Waterbox API. Local provider modes open no listener or daemon.
 
-The first release requires Node.js 24.15.0 or newer and supports the Box provider. Waterbox Cloud is represented in configuration but is not implemented yet.
+The first release requires Node.js 24.15.0 or newer and supports explicit local Box and Vercel providers. Waterbox Cloud is represented in configuration but is not implemented yet.
 
 The configured Box account uses the plain provider image. Waterbox prepares the current packaged runtime after Box readiness; no provider system template is required.
 
 ## Install
 
-After the package is published, install it without passing provider credentials through the command line:
+After the package is published, install it without passing provider credentials through the command line. Select one local provider explicitly; MCP never auto-selects a provider:
 
 ```bash
 npx add-mcp @waterbox/mcp -g \
@@ -16,7 +16,7 @@ npx add-mcp @waterbox/mcp -g \
   --env WATERBOX_PROVIDER=box
 ```
 
-Then configure `BOX_API_KEY` using the secret or environment mechanism recommended by your MCP client. Do not put the key in chat, tool arguments, shell history, or a committed configuration file. Restart the client after providing the credential so the local MCP process receives it.
+Use `WATERBOX_PROVIDER=box` with `BOX_API_KEY`, or `WATERBOX_PROVIDER=vercel` with `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. Configure credentials only through the secret or environment mechanism recommended by your MCP client. Never put secrets in chat, tool arguments, shell history, or a committed configuration file. Restart the client after providing the selected provider's configuration so the local MCP process receives it.
 
 Installation may be completed before credentials are available. In that state the server remains connected, and lifecycle or operation calls return safe setup guidance instead of terminating the MCP connection.
 
@@ -30,7 +30,7 @@ The MCP exposes explicit resource ownership rather than a process-local selected
 - `probe_sandbox` always queries the provider for live status and reconciles the observation into Waterbox.
 - `delete_sandbox` permanently deletes a user-owned sandbox by `sandboxId`.
 - `list_snapshots` lists user-owned snapshots with optional `cursor` and `limit` pagination.
-- `create_snapshot` creates a user-owned snapshot from a running or stopped `sandboxId`.
+- `create_snapshot` creates a user-owned snapshot from a running `sandboxId`; it never implicitly resumes a sandbox.
 - `delete_snapshot` permanently deletes a user-owned snapshot by `snapshotId`.
 - `send_file_securely` encrypts and transfers an existing local file to a sandbox without placing its contents in model context or tool arguments. The source is retained; the destination is plaintext and sandbox-readable after delivery.
 - `read`, `write`, `edit`, `patch`, `glob`, `grep`, and `bash` require the target `sandboxId`.
@@ -51,11 +51,18 @@ The sandbox command deletes its uploaded ciphertext after every attempted consum
 
 | Variable | Required | Default |
 | --- | --- | --- |
-| `WATERBOX_PROVIDER` | Yes | none |
+| `WATERBOX_PROVIDER` | Yes: `box` or `vercel` | none |
 | `BOX_API_KEY` | For `box` | none |
-| `WATERBOX_SQLITE_PATH` | No | `~/.waterbox/direct.sqlite` |
 | `BOX_API_BASE_URL` | No | `https://ascii.dev/api/box/v1` |
 | `BOX_POLL_INTERVAL_MS` | No | `1000` |
 | `BOX_POLL_TIMEOUT_MS` | No | `120000` |
+| `VERCEL_TOKEN` | For `vercel` | none |
+| `VERCEL_TEAM_ID` | For `vercel` | none |
+| `VERCEL_PROJECT_ID` | For `vercel` | none |
+| `VERCEL_API_ORIGIN` | No; HTTPS origin only | `https://api.vercel.com` |
+| `VERCEL_POLL_INTERVAL_MS` | No | `1000` |
+| `VERCEL_POLL_TIMEOUT_MS` | No | `120000` |
+| `VERCEL_REQUEST_TIMEOUT_MS` | No | `30000` |
+| `WATERBOX_SQLITE_PATH` | No | `~/.waterbox/direct.sqlite` |
 
-Setting `WATERBOX_PROVIDER=waterbox` keeps the server connected and returns clear unsupported-provider setup guidance from tool calls.
+MCP does not infer a provider from available credentials. Setting `WATERBOX_PROVIDER=waterbox` keeps the server connected and returns clear unsupported-provider setup guidance from tool calls because Waterbox Cloud is not available yet.
