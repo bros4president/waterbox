@@ -4,6 +4,7 @@ import type { RepositoryDatabase } from "./database.ts"
 import {
   ErrorCodeSchema,
   ProviderNameSchema,
+  ProviderConfigurationIdSchema,
   SandboxIdSchema,
   SandboxStateSchema,
   SnapshotIdSchema,
@@ -14,6 +15,8 @@ import type {
   IdempotencyRepository,
   ListRepositoryInput,
   RepositoryPage,
+  SandboxCreationRepository,
+  SandboxCreationReservation,
   SandboxRepository,
   SnapshotRepository,
 } from "@waterbox/core/ports"
@@ -34,6 +37,7 @@ const ResourceErrorSchema = z.object({ code: ErrorCodeSchema, message: z.string(
 const BaseRecordSchema = z.object({
   accountId: z.string().min(1),
   provider: ProviderNameSchema,
+  providerConfigurationId: ProviderConfigurationIdSchema,
   providerRef: JsonValueSchema,
   version: z.number().int().positive(),
   createdAt: z.string().datetime(),
@@ -62,7 +66,6 @@ const IdempotencyRecordSchema = z.object({
   version: z.number().int().positive(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
-  expiresAt: z.string().datetime(),
   lastError: ResourceErrorSchema.optional(),
 }).strict()
 
@@ -72,7 +75,6 @@ type IdempotencyDocumentRow = {
   scope: string
   idempotency_key: string
   version: number
-  expires_at: string
   document: string
 }
 type CursorPayload = { v: 1; after: string }
@@ -107,6 +109,17 @@ function boundedLimit(limit: number): number {
     throw new RangeError(`Repository page limit must be an integer from 1 to ${SQLITE_REPOSITORY_MAX_PAGE_LIMIT}`)
   }
   return limit
+}
+
+function bindingClause(input: ListRepositoryInput): { sql: string; values: string[] } {
+  if (input.provider === undefined && input.providerConfigurationId === undefined) return { sql: "", values: [] }
+  if (input.provider === undefined || input.providerConfigurationId === undefined) {
+    throw new RangeError("Repository provider binding requires both provider and configuration ID")
+  }
+  return {
+    sql: " AND json_extract(document, '$.provider') = ? AND json_extract(document, '$.providerConfigurationId') = ?",
+    values: [input.provider, input.providerConfigurationId],
+  }
 }
 
 function parseDocument<T>(
@@ -161,8 +174,7 @@ function parseIdempotency(
     && record.accountId === row.account_id
     && record.scope === row.scope
     && record.key === row.idempotency_key
-    && record.version === row.version
-    && record.expiresAt === row.expires_at)
+    && record.version === row.version)
 }
 
 function serialize(value: unknown): string {
@@ -189,13 +201,14 @@ export class SqliteSandboxRepository implements SandboxRepository {
   async list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> {
     const limit = boundedLimit(input.limit)
     const after = this.cursors.decode(input.cursor, SandboxIdSchema)
+    const binding = bindingClause(input)
     const rows = after === undefined
       ? this.database.prepare(
-          "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, limit + 1) as ResourceDocumentRow[]
+          `SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ?${binding.sql} ORDER BY resource_id LIMIT ?`,
+        ).all(input.accountId, ...binding.values, limit + 1) as ResourceDocumentRow[]
       : this.database.prepare(
-          "SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ? AND resource_id > ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, after, limit + 1) as ResourceDocumentRow[]
+          `SELECT account_id, resource_id, version, document FROM sandbox_documents WHERE account_id = ?${binding.sql} AND resource_id > ? ORDER BY resource_id LIMIT ?`,
+        ).all(input.accountId, ...binding.values, after, limit + 1) as ResourceDocumentRow[]
     const pageRows = rows.slice(0, limit)
     const items = pageRows.map((row) => parseSandbox(row, input.accountId, row.resource_id)!)
     const last = pageRows.at(-1)
@@ -231,13 +244,14 @@ export class SqliteSnapshotRepository implements SnapshotRepository {
   async list(input: ListRepositoryInput): Promise<RepositoryPage<SnapshotRecord>> {
     const limit = boundedLimit(input.limit)
     const after = this.cursors.decode(input.cursor, SnapshotIdSchema)
+    const binding = bindingClause(input)
     const rows = after === undefined
       ? this.database.prepare(
-          "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, limit + 1) as ResourceDocumentRow[]
+          `SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ?${binding.sql} ORDER BY resource_id LIMIT ?`,
+        ).all(input.accountId, ...binding.values, limit + 1) as ResourceDocumentRow[]
       : this.database.prepare(
-          "SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ? AND resource_id > ? ORDER BY resource_id LIMIT ?",
-        ).all(input.accountId, after, limit + 1) as ResourceDocumentRow[]
+          `SELECT account_id, resource_id, version, document FROM snapshot_documents WHERE account_id = ?${binding.sql} AND resource_id > ? ORDER BY resource_id LIMIT ?`,
+        ).all(input.accountId, ...binding.values, after, limit + 1) as ResourceDocumentRow[]
     const pageRows = rows.slice(0, limit)
     const items = pageRows.map((row) => parseSnapshot(row, input.accountId, row.resource_id)!)
     const last = pageRows.at(-1)
@@ -258,13 +272,13 @@ export class SqliteIdempotencyRepository implements IdempotencyRepository {
 
   async createIfAbsent(record: IdempotencyRecord): Promise<boolean> {
     return this.database.prepare(`INSERT OR IGNORE INTO idempotency_documents
-      (account_id, scope, idempotency_key, version, expires_at, document) VALUES (?, ?, ?, ?, ?, ?)`)
-      .run(record.accountId, record.scope, record.key, record.version, record.expiresAt, serialize(record)).changes === 1
+      (account_id, scope, idempotency_key, version, document) VALUES (?, ?, ?, ?, ?)`)
+      .run(record.accountId, record.scope, record.key, record.version, serialize(record)).changes === 1
   }
 
   async get(input: IdempotencyKey): Promise<IdempotencyRecord | undefined> {
     const row = this.database.prepare(
-      `SELECT account_id, scope, idempotency_key, version, expires_at, document
+      `SELECT account_id, scope, idempotency_key, version, document
        FROM idempotency_documents WHERE account_id = ? AND scope = ? AND idempotency_key = ?`,
     ).get(input.accountId, input.scope, input.key) as IdempotencyDocumentRow | undefined
     return parseIdempotency(row ?? undefined, input.accountId, input.scope, input.key)
@@ -272,11 +286,54 @@ export class SqliteIdempotencyRepository implements IdempotencyRepository {
 
   async compareAndSwap(record: IdempotencyRecord, expectedVersion: number): Promise<boolean> {
     if (record.version !== expectedVersion + 1) return false
-    return this.database.prepare(`UPDATE idempotency_documents SET version = ?, expires_at = ?, document = ?
+    return this.database.prepare(`UPDATE idempotency_documents SET version = ?, document = ?
       WHERE account_id = ? AND scope = ? AND idempotency_key = ? AND version = ?`)
-      .run(record.version, record.expiresAt, serialize(record), record.accountId, record.scope, record.key, expectedVersion).changes === 1
+      .run(record.version, serialize(record), record.accountId, record.scope, record.key, expectedVersion).changes === 1
   }
 
+}
+
+/** SQLite's synchronous driver keeps this transaction free of provider I/O. */
+export class SqliteSandboxCreationRepository implements SandboxCreationRepository {
+  constructor(private readonly database: RepositoryDatabase) {}
+
+  async reserve(input: { sandbox: SandboxRecord; idempotency?: IdempotencyRecord }): Promise<SandboxCreationReservation> {
+    this.database.exec("BEGIN IMMEDIATE")
+    try {
+      if (input.idempotency !== undefined) {
+        const key = input.idempotency
+        const row = this.database.prepare(
+          "SELECT account_id, scope, idempotency_key, version, document FROM idempotency_documents WHERE account_id = ? AND scope = ? AND idempotency_key = ?",
+        ).get(key.accountId, key.scope, key.key) as IdempotencyDocumentRow | undefined
+        const existing = parseIdempotency(row ?? undefined, key.accountId, key.scope, key.key)
+        if (existing !== undefined) {
+          this.database.exec("COMMIT")
+          return existing.requestHash === key.requestHash
+            ? { outcome: "existing_match", reservation: existing }
+            : { outcome: "request_mismatch", reservation: existing }
+        }
+      }
+      const inserted = this.database.prepare(`INSERT OR IGNORE INTO sandbox_documents
+        (account_id, resource_id, version, document) VALUES (?, ?, ?, ?)`)
+        .run(input.sandbox.accountId, input.sandbox.sandboxId, input.sandbox.version, serialize(input.sandbox)).changes === 1
+      if (!inserted) {
+        this.database.exec("COMMIT")
+        return { outcome: "candidate_collision" }
+      }
+      if (input.idempotency !== undefined) {
+        const record = input.idempotency
+        const insertedReservation = this.database.prepare(`INSERT OR ABORT INTO idempotency_documents
+          (account_id, scope, idempotency_key, version, document) VALUES (?, ?, ?, ?, ?)`)
+          .run(record.accountId, record.scope, record.key, record.version, serialize(record)).changes === 1
+        if (!insertedReservation) throw new Error("Failed to reserve idempotency record")
+      }
+      this.database.exec("COMMIT")
+      return { outcome: "new", ...(input.idempotency === undefined ? {} : { reservation: input.idempotency }) }
+    } catch (error) {
+      try { this.database.exec("ROLLBACK") } catch {}
+      throw error
+    }
+  }
 }
 
 export interface SqliteRepositoryStoreOptions {
@@ -289,6 +346,7 @@ export class SqliteRepositoryStore {
   readonly sandboxes: SqliteSandboxRepository
   readonly snapshots: SqliteSnapshotRepository
   readonly idempotency: SqliteIdempotencyRepository
+  readonly sandboxCreations: SqliteSandboxCreationRepository
   #closed = false
 
   constructor(filename: string, options: SqliteRepositoryStoreOptions = {}) {
@@ -312,13 +370,14 @@ export class SqliteRepositoryStore {
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS idempotency_documents (
         account_id TEXT NOT NULL, scope TEXT NOT NULL, idempotency_key TEXT NOT NULL,
-        version INTEGER NOT NULL, expires_at TEXT NOT NULL, document TEXT NOT NULL,
+        version INTEGER NOT NULL, document TEXT NOT NULL,
         PRIMARY KEY (account_id, scope, idempotency_key)
       ) WITHOUT ROWID;
     `)
     this.sandboxes = new SqliteSandboxRepository(this.database, cursors)
     this.snapshots = new SqliteSnapshotRepository(this.database, cursors)
     this.idempotency = new SqliteIdempotencyRepository(this.database)
+    this.sandboxCreations = new SqliteSandboxCreationRepository(this.database)
   }
 
   close(): void {

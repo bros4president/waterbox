@@ -25,7 +25,7 @@ import type {
 import { ProviderError } from "@waterbox/core/provider"
 import { FixedClock, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { createDaemon } from "@waterbox/daemon"
-import { createLocalControlPlane } from "@waterbox/control-plane-local"
+import { createLocalControlPlane, deriveProviderConfigurationId } from "@waterbox/control-plane-local"
 import { fixedDevelopmentIdentityResolver, loadDevelopmentRuntimeArtifact } from "../src/app.ts"
 import { LocalConfigurationError, parseLocalApiConfig, type LocalApiConfig } from "../src/config.ts"
 import { startLocalServer } from "../src/server.ts"
@@ -200,7 +200,7 @@ describe("local API composition", () => {
     const plane = await createLocalControlPlane({
       sqlitePath: config.sqlitePath,
       accountId: config.accountId,
-      provider: { kind: "box", config: config.box, runtimeArtifact: artifact },
+      provider: { kind: "box", config: config.box, providerConfigurationId: deriveProviderConfigurationId({ kind: "box", config: config.box }), runtimeArtifact: artifact },
     }, fixedDevelopmentIdentityResolver(config.developmentApiKey, config.accountId))
     try { expect((await plane.fetch(new Request("http://local.test/health"))).status).toBe(200) }
     finally { plane.close(); await rm(directory, { recursive: true, force: true }) }

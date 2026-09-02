@@ -24,17 +24,17 @@ export async function runBoxSmoke(config: SmokeConfig, deps: SmokeDependencies =
   let failure: unknown
   try {
     const first = await api.createSandbox({}, `${config.runId}-first`); sandboxes.add(first.sandboxId); await api.waitSandbox(first.sandboxId, "running")
-    await api.tool(first.sandboxId, "write", { filePath: "/workspace/smoke.txt", content: "alpha\n" })
-    await api.tool(first.sandboxId, "read", { filePath: "/workspace/smoke.txt" })
-    await api.tool(first.sandboxId, "edit", { filePath: "/workspace/smoke.txt", oldString: "alpha", newString: "beta" })
-    await api.tool(first.sandboxId, "patch", { patchText: "*** Begin Patch\n*** Add File: /workspace/patched.txt\n+patched\n*** End Patch" })
-    await api.tool(first.sandboxId, "glob", { pattern: "*.txt", path: "/workspace" }); await api.tool(first.sandboxId, "grep", { pattern: "beta", path: "/workspace" })
+    await api.tool(first.sandboxId, "write", { filePath: "/home/user/workspace/smoke.txt", content: "alpha\n" })
+    await api.tool(first.sandboxId, "read", { filePath: "/home/user/workspace/smoke.txt" })
+    await api.tool(first.sandboxId, "edit", { filePath: "/home/user/workspace/smoke.txt", oldString: "alpha", newString: "beta" })
+    await api.tool(first.sandboxId, "patch", { patchText: "*** Begin Patch\n*** Add File: /home/user/workspace/patched.txt\n+patched\n*** End Patch" })
+    await api.tool(first.sandboxId, "glob", { pattern: "*.txt", path: "/home/user/workspace" }); await api.tool(first.sandboxId, "grep", { pattern: "beta", path: "/home/user/workspace" })
     await api.tool(first.sandboxId, "bash", { command: "printf first; sleep 1; printf second" }, true)
     await api.post(`/v1/sandboxes/${first.sandboxId}/stop`); await api.waitSandbox(first.sandboxId, "stopped")
-    await api.tool(first.sandboxId, "read", { filePath: "/workspace/smoke.txt" }); await api.waitSandbox(first.sandboxId, "running")
+    await api.tool(first.sandboxId, "read", { filePath: "/home/user/workspace/smoke.txt" }); await api.waitSandbox(first.sandboxId, "running")
     const snapshot = await api.createSnapshot(first.sandboxId, marker); snapshots.add(snapshot.snapshotId); await api.waitSnapshot(snapshot.snapshotId, "ready")
     const second = await api.createSandbox({ sourceSnapshotId: snapshot.snapshotId }, `${config.runId}-second`); sandboxes.add(second.sandboxId); await api.waitSandbox(second.sandboxId, "running")
-    await api.tool(second.sandboxId, "grep", { pattern: "beta", path: "/workspace/smoke.txt" })
+    await api.tool(second.sandboxId, "grep", { pattern: "beta", path: "/home/user/workspace/smoke.txt" })
   } catch (error) { failure = error }
   finally {
     const cleanup: string[] = []

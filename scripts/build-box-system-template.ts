@@ -79,11 +79,11 @@ export function createTemplateRequest(runId: string): { body: { noEnv: true; env
 }
 
 export function installCommand(): string {
-  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace\nsudo -n install -d -m 0700 /run/waterbox/bash-jobs\ncd /workspace\nexec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/node /usr/local/lib/waterbox-cli.js "$@"\n`
+  const launcher = `#!/bin/sh\nset -eu\nsudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /home/user/workspace\nsudo -n install -d -m 0700 /run/waterbox/bash-jobs\ncd /home/user/workspace\nexec sudo -n env WORKSPACE_ROOT=/home/user/workspace /usr/local/bin/node /usr/local/lib/waterbox-cli.js "$@"\n`
   return [
     "set -eu",
     "sudo -n true",
-    "sudo install -d -m 0755 -o \"$(id -u)\" -g \"$(id -g)\" /workspace",
+    "sudo install -d -m 0755 -o \"$(id -u)\" -g \"$(id -g)\" /home/user/workspace",
     "test -x /usr/local/bin/node",
     "sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep ca-certificates && sudo rm -rf /var/lib/apt/lists/*",
     "sudo install -d -m 0755 /usr/local/lib",

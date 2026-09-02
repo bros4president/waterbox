@@ -181,8 +181,8 @@ describe("shared Waterbox runtime backend", () => {
       throw new Error("unexpected command")
     })
     const runtimeProfile = {
-      workspacePath: "/workspace", artifactMode: 0o640 as const,
-      persistentPaths: { runtimeDirectory: "/runtime/waterbox", cliPath: "/runtime/waterbox/cli.js", launcherPath: "/runtime/waterbox/launch", manifestPath: "/runtime/waterbox/manifest.json", workspace: "/workspace" },
+      workspacePath: "/home/user/workspace", artifactMode: 0o640 as const,
+      persistentPaths: { runtimeDirectory: "/runtime/waterbox", cliPath: "/runtime/waterbox/cli.js", launcherPath: "/runtime/waterbox/launch", manifestPath: "/runtime/waterbox/manifest.json", workspace: "/home/user/workspace" },
       ephemeralPaths: { uploadStagingDirectory: "/staging", jobsDirectory: "/run/waterbox/bash-jobs" },
       requires: ["node-24", "rg", "absolute-workspace", "persistent-files", "detached-jobs"] as const,
       executableDiscovery: "PATH then adapter-validated absolute executable" as const,
@@ -193,6 +193,8 @@ describe("shared Waterbox runtime backend", () => {
     const bootstrap = infrastructure.commands.find(command => command.script.includes("waterbox-bootstrap-installed"))?.script
     expect(bootstrap).toContain("prepare-owned /runtime/waterbox /run/waterbox/bash-jobs")
     expect(bootstrap).toContain("'/runtime/waterbox/cli.js'")
+    const launcher = Buffer.from(bootstrap?.match(/printf %s '([A-Za-z0-9+/=]+)' \| base64 -d > '\/runtime\/waterbox\/launch'/)?.[1] ?? "", "base64").toString("utf8")
+    expect(launcher).toContain("cd '/home/user/workspace'")
     expect(infrastructure.writes[0]?.path).toMatch(/^\/staging\/waterbox-runtime-/)
   })
 })

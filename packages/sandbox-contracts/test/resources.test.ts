@@ -63,7 +63,7 @@ describe("public resources", () => {
   })
 
   test("public DTOs reject ownership and provider-internal data", () => {
-    for (const forbidden of ["accountId", "providerRef", "providerSecrets", "protectedUrl", "token"]) {
+    for (const forbidden of ["accountId", "providerRef", "providerConfigurationId", "providerSecrets", "protectedUrl", "token"]) {
       expect(SandboxSchema.safeParse({ ...sandbox, [forbidden]: "secret" }).success).toBe(false)
       expect(SnapshotSchema.safeParse({ ...snapshot, [forbidden]: "secret" }).success).toBe(false)
     }

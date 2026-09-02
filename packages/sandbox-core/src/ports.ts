@@ -1,4 +1,4 @@
-import type { SandboxId, SnapshotId } from "@waterbox/contracts"
+import type { ProviderConfigurationId, SandboxId, SnapshotId } from "@waterbox/contracts"
 import type { IdempotencyRecord, SandboxRecord, SnapshotRecord } from "./records.ts"
 
 export type OpaqueCursor = string
@@ -10,6 +10,9 @@ export interface RepositoryPage<T> {
 
 export interface ListRepositoryInput {
   accountId: string
+  /** Filters at the storage boundary before cursor pagination. */
+  provider?: string
+  providerConfigurationId?: ProviderConfigurationId
   cursor?: OpaqueCursor
   limit: number
 }
@@ -38,6 +41,23 @@ export interface IdempotencyRepository {
   createIfAbsent(record: IdempotencyRecord): Promise<boolean>
   get(input: IdempotencyKey): Promise<IdempotencyRecord | undefined>
   compareAndSwap(record: IdempotencyRecord, expectedVersion: number): Promise<boolean>
+}
+
+/**
+ * The allocation boundary deliberately owns both documents.  Provider calls
+ * happen only after this method has returned `new`.
+ */
+export type SandboxCreationReservation =
+  | { outcome: "new"; reservation?: IdempotencyRecord }
+  | { outcome: "existing_match"; reservation: IdempotencyRecord }
+  | { outcome: "request_mismatch"; reservation: IdempotencyRecord }
+  | { outcome: "candidate_collision" }
+
+export interface SandboxCreationRepository {
+  reserve(input: {
+    sandbox: SandboxRecord
+    idempotency?: IdempotencyRecord
+  }): Promise<SandboxCreationReservation>
 }
 
 export interface Clock {

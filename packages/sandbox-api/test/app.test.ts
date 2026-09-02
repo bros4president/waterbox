@@ -199,6 +199,7 @@ describe("Waterbox API", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(),
     })
@@ -213,7 +214,7 @@ describe("Waterbox API", () => {
       probeProvisioning: "sbx_probe-cloud-a1",
     } as const
     const record = (sandboxId: string, state: "provisioning" | "preparing" | "running" | "failed", providerRef?: null | { privateSandboxId: string }) => ({
-      accountId: "acct_test", sandboxId: sandboxId as SandboxId, provider: "fake", providerRef: providerRef === undefined ? { privateSandboxId: sandboxId } : providerRef, state,
+      accountId: "acct_test", sandboxId: sandboxId as SandboxId, provider: "fake", providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: providerRef === undefined ? { privateSandboxId: sandboxId } : providerRef, state,
       version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
       ...(state === "failed" ? { lastError: { code: "provider_failure" as const, message: "A prior operation failed" } } : {}),
     })
@@ -259,13 +260,14 @@ describe("Waterbox API", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(),
     })
     const ids = ["sbx_get-failure-a1", "sbx_probe-failure-a1"] as const
     for (const sandboxId of ids) {
       await sandboxes.createIfAbsent({
-        accountId: "acct_test", sandboxId, provider: "fake", providerRef: { privateSandboxId: sandboxId }, state: "provisioning",
+        accountId: "acct_test", sandboxId, provider: "fake", providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: { privateSandboxId: sandboxId }, state: "provisioning",
         version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z",
       })
       provider.sandboxStates.set(sandboxId, "running")
@@ -421,6 +423,16 @@ describe("Waterbox API", () => {
     const text = await response.text()
     expect(text).not.toContain(secret)
     expect(JSON.parse(text)).toEqual({ error: { code: "not_found", message: "The resource was not found", requestId: "req_test" } })
+  })
+
+  test("renders provider configuration mismatch as a safe conflict", async () => {
+    const secret = "old-provider-configuration-private"
+    const { app } = api({ getSandbox: async () => { throw new DomainError("provider_configuration_mismatch", secret) } })
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth })
+    expect(response.status).toBe(409)
+    const text = await response.text()
+    expect(text).not.toContain(secret)
+    expect(JSON.parse(text)).toEqual({ error: { code: "provider_configuration_mismatch", message: "The resource belongs to a different provider configuration", requestId: "req_test" } })
   })
 
   test("redacts internal SyntaxError instead of treating it as malformed request JSON", async () => {

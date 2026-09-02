@@ -34,12 +34,12 @@ The builder creates a temporary `noEnv` Box, uploads the Node bundle, and instal
 - the `waterbox` launcher at `/usr/local/bin/waterbox`
 - `ripgrep`
 
-The launcher recreates `/workspace` after snapshot restore and creates
-`/run/waterbox/bash-jobs` with mode `0700`. It uses `/workspace` as the default for relative
-paths and shell commands. The CLI runs as root and accepts absolute paths,
+The launcher recreates `/home/user/workspace` after snapshot restore and creates
+`/run/waterbox/bash-jobs` with mode `0700`. It uses that snapshot-durable workspace for
+relative paths and shell commands. The CLI runs as root and accepts absolute paths,
 workspace traversal, and normal symbolic links across the entire Box filesystem. The Box
 itself is the security boundary; Waterbox does not impose a second filesystem boundary
-inside an agent-owned sandbox. Box does not preserve `/workspace` in a named snapshot.
+inside an agent-owned sandbox. Box named snapshots preserve the `/home/user` workspace.
 
 Each invocation is sent independently through Box's command endpoint. Waterbox does not
 queue, serialize, throttle, deduplicate, or retry commands; provider concurrency behavior

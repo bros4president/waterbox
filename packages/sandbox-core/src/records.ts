@@ -2,6 +2,7 @@ import type {
   ErrorCode,
   SandboxId,
   SandboxState,
+  ProviderConfigurationId,
   SnapshotId,
   SnapshotState,
 } from "@waterbox/contracts"
@@ -17,6 +18,7 @@ export interface SandboxRecord {
   accountId: string
   sandboxId: SandboxId
   provider: string
+  providerConfigurationId: ProviderConfigurationId
   providerRef: JsonValue
   state: SandboxState
   sourceSnapshotId?: SnapshotId
@@ -32,6 +34,7 @@ export interface SnapshotRecord {
   name?: string
   description?: string
   provider: string
+  providerConfigurationId: ProviderConfigurationId
   providerRef: JsonValue
   sourceSandboxId: SandboxId
   state: SnapshotState
@@ -53,6 +56,5 @@ export interface IdempotencyRecord {
   version: number
   createdAt: string
   updatedAt: string
-  expiresAt: string
   lastError?: ResourceErrorRecord
 }

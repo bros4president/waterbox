@@ -13,6 +13,8 @@ import type {
   IdempotencyRepository,
   ListRepositoryInput,
   RepositoryPage,
+  SandboxCreationRepository,
+  SandboxCreationReservation,
   SandboxRepository,
   SnapshotRepository,
 } from "./ports.ts"
@@ -64,6 +66,7 @@ export class InMemorySandboxRepository implements SandboxRepository {
   async list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> {
     const records = [...this.#records.values()]
       .filter((record) => record.accountId === input.accountId)
+      .filter((record) => input.provider === undefined || (record.provider === input.provider && record.providerConfigurationId === input.providerConfigurationId))
       .sort((left, right) => left.sandboxId.localeCompare(right.sandboxId))
     return page(records, input)
   }
@@ -96,6 +99,7 @@ export class InMemorySnapshotRepository implements SnapshotRepository {
   async list(input: ListRepositoryInput): Promise<RepositoryPage<SnapshotRecord>> {
     const records = [...this.#records.values()]
       .filter((record) => record.accountId === input.accountId)
+      .filter((record) => input.provider === undefined || (record.provider === input.provider && record.providerConfigurationId === input.providerConfigurationId))
       .sort((left, right) => left.snapshotId.localeCompare(right.snapshotId))
     return page(records, input)
   }
@@ -133,6 +137,44 @@ export class InMemoryIdempotencyRepository implements IdempotencyRepository {
     return true
   }
 
+}
+
+/** A serial transaction analogue for core concurrency tests. */
+export class InMemorySandboxCreationRepository implements SandboxCreationRepository {
+  #tail: Promise<void> = Promise.resolve()
+
+  constructor(
+    private readonly sandboxes: SandboxRepository,
+    private readonly idempotency: IdempotencyRepository,
+  ) {}
+
+  async reserve(input: { sandbox: SandboxRecord; idempotency?: IdempotencyRecord }): Promise<SandboxCreationReservation> {
+    let release!: () => void
+    const previous = this.#tail
+    this.#tail = new Promise<void>((resolve) => { release = resolve })
+    await previous
+    try {
+      if (input.idempotency !== undefined) {
+        const existing = await this.idempotency.get({
+          accountId: input.idempotency.accountId,
+          scope: input.idempotency.scope,
+          key: input.idempotency.key,
+        })
+        if (existing !== undefined) return existing.requestHash === input.idempotency.requestHash
+          ? { outcome: "existing_match", reservation: existing }
+          : { outcome: "request_mismatch", reservation: existing }
+      }
+      if (!await this.sandboxes.createIfAbsent(input.sandbox)) return { outcome: "candidate_collision" }
+      if (input.idempotency !== undefined) {
+        // No awaitable work separates these mutations beyond the in-memory map
+        // operations; the lock makes the pair one observable reservation.
+        if (!await this.idempotency.createIfAbsent(input.idempotency)) throw new Error("In-memory reservation changed unexpectedly")
+      }
+      return { outcome: "new", ...(input.idempotency === undefined ? {} : { reservation: input.idempotency }) }
+    } finally {
+      release()
+    }
+  }
 }
 
 export class FixedClock {
@@ -192,12 +234,14 @@ export class FakeSandboxProvider implements SandboxProvider {
   createError?: unknown
   prepareBarrier?: Promise<void>
   prepareError?: unknown
+  inspectSandboxError?: unknown
   stopBarrier?: Promise<void>
   stopError?: unknown
   resumeBarrier?: Promise<void>
   resumeError?: unknown
   deleteError?: unknown
   createSnapshotError?: unknown
+  inspectSnapshotError?: unknown
   createSnapshotObservation?: ProviderSnapshotObservation
   createStarted?: () => void
   prepareStarted?: () => void
@@ -261,6 +305,7 @@ export class FakeSandboxProvider implements SandboxProvider {
   async inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     this.inspectSandboxCalls++
     this.lifecycleInputs.push({ operation: "inspect", input })
+    if (this.inspectSandboxError !== undefined) throw this.inspectSandboxError
     const id = refId(input.providerRef)
     return { state: this.sandboxStates.get(id) ?? "provisioning", providerRef: input.providerRef }
   }
@@ -307,6 +352,7 @@ export class FakeSandboxProvider implements SandboxProvider {
   protected async inspectSnapshot(input: ProviderSnapshotOperationInput): Promise<ProviderSnapshotObservation> {
     this.inspectSnapshotCalls++
     this.snapshotInputs.push({ operation: "inspect", input })
+    if (this.inspectSnapshotError !== undefined) throw this.inspectSnapshotError
     const id = refId(input.providerRef)
     return { state: this.snapshotStates.get(id) ?? "creating", providerRef: input.providerRef }
   }

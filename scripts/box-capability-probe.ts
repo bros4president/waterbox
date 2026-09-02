@@ -2,7 +2,7 @@ import { posix } from "node:path"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
 const DEFAULT_BASE_URL = "https://ascii.dev/api/box/v1"
-const MARKER_PATH = "/home/user/waterbox-capability-probe-marker"
+const MARKER_PATH = "/home/user/workspace/waterbox-capability-probe-marker"
 const MAX_RESPONSE_BYTES = 1_048_576
 const BOX_STATES = ["init", "provisioning", "provisioned", "cloning", "ready", "idle", "running", "archiving", "archived", "error"] as const
 const SNAPSHOT_STATES = ["saving", "ready", "failed"] as const

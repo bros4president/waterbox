@@ -42,6 +42,35 @@ describe("Box primitive contracts", () => {
     expect(requests[0]!.headers.get("idempotency-key")).toBe("create-once")
   })
 
+  test("sends ttlSeconds only for a configured automatic stop", async () => {
+    const requests: Request[] = []
+    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, {
+      clock: new Clock(),
+      fetch: async (input, init) => {
+        const request = new Request(input, init); requests.push(request)
+        return request.method === "POST"
+          ? Response.json({ ok: true, type: "box.created", status: "provisioning", box: { id: "bx_23456789", state: "provisioning" } }, { status: 202 })
+          : box("ready")
+      },
+    })
+    await value.create({ accountId: "account", sandboxId: "sbx_calm-cactus-7k3m" as never, idempotencyKey: "create-auto-stop", signal: signal() })
+    expect(await requests[0]!.json()).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" }, ttlSeconds: 5_400 })
+  })
+
+  test("maps a longest Friendly Words snapshot ID to its stable truncated and hashed Box name", async () => {
+    const snapshotId = "snap_quintessential-quintessential-gigantspinosaurus" as never
+    let name: string | undefined
+    const { value } = infrastructure(async request => {
+      if (request.method === "GET") return box("ready")
+      const body = await request.json() as { name: string }
+      name = body.name
+      return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name: body.name, sourceBoxId: sandboxRef.boxId, status: "saving" } }, { status: 202 })
+    })
+    await expect(value.snapshots.create({ accountId: "account", snapshotId, providerRef: sandboxRef, expectedState: "running", signal: signal() })).resolves.toMatchObject({ state: "creating" })
+    const hash = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 12)
+    expect(name).toBe(`waterbox-account-${hash("account")}-snap-qui-${hash(snapshotId)}`)
+  })
+
   test("keeps exact inspection side-effect free and preserves persisted references", async () => {
     const { value, requests } = infrastructure(() => Response.json({ code: "not_found" }, { status: 404 }))
     await expect(value.inspect({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "terminated", providerRef: sandboxRef })
@@ -228,13 +257,14 @@ describe("Box primitive contracts", () => {
     const sandboxes = new InMemorySandboxRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" })
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" })
     const service = new SandboxService({
       sandboxes,
       snapshots: new InMemorySnapshotRepository(),
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       clock: new FixedClock(),
       ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]),
     })
@@ -259,8 +289,8 @@ describe("assembled Box compatibility", () => {
     const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]) })
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]) })
 
     const created = await service.createSnapshot(identity, sandboxId, {})
     expect(created).toMatchObject({ state: "ready" })
@@ -292,8 +322,8 @@ describe("assembled Box compatibility", () => {
       "#!/bin/sh",
       "set -eu",
       "test -d '/run/waterbox/bash-jobs'",
-      "cd '/workspace'",
-      "exec sudo -n env WORKSPACE_ROOT='/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"",
+      "cd '/home/user/workspace'",
+      "exec sudo -n env WORKSPACE_ROOT='/home/user/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"",
       "",
     ].join("\n"))
     expect(installer).toContain("install -m 0644 '/tmp/waterbox-runtime-")
@@ -332,12 +362,14 @@ describe("assembled Box compatibility", () => {
     expect(BOX_RUNTIME_PATH_PROVISIONER.provision(profile)).toBe([
       "uid=$(id -u); gid=$(id -g)",
       "sudo -n true",
-      "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/workspace'",
+      "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/home/user/workspace'",
       "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/usr/local/lib'",
       "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/usr/local/bin'",
       "sudo -n install -d -m 0700 '/run/waterbox/bash-jobs'",
     ].join("\n"))
-    expect(BOX_RUNTIME_PATH_PROVISIONER.launch?.(profile)).toBe("sudo -n env WORKSPACE_ROOT='/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"" )
+    expect(profile.workspacePath).toBe("/home/user/workspace")
+    expect(profile.persistentPaths.workspace).toBe("/home/user/workspace")
+    expect(BOX_RUNTIME_PATH_PROVISIONER.launch?.(profile)).toBe("sudo -n env WORKSPACE_ROOT='/home/user/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"" )
   })
 
   test("routes canonical MCP tool invocations, ciphertext transfer, and Bash observation through the configured Box composition", async () => {
@@ -362,7 +394,7 @@ describe("assembled Box compatibility", () => {
         { type: "result", title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
         { type: "result", title: "glob", output: "", metadata: { pattern: "*", path: ".", count: 0, truncated: false } },
         { type: "result", title: "grep", output: "", metadata: { pattern: "x", path: ".", matches: 0, truncated: false } },
-        { type: "result", title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
+        { type: "result", title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/home/user/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
       ]
       return command(JSON.stringify(events[toolIndex++]) + "\n")
     })

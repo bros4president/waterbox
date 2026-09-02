@@ -1,6 +1,6 @@
 # Local Launch Lifecycle Polish V0
 
-Status: not started
+Status: complete
 
 This is the standalone implementation plan for the remaining local Waterbox launch work around provider-bound resources, provider workspace durability, automatic stop configuration, request-time state convergence, model-visible lifecycle control, provider-default snapshot retention, and readable resource identifiers.
 
@@ -333,7 +333,7 @@ Provider binding selects which records are operable. Provider reference identifi
 
 ## Phase 1: Provider Binding Derivation
 
-Status: not started
+Status: complete
 
 ### Scope
 
@@ -361,7 +361,7 @@ Implement one shared, tested derivation path used by persisted setup and environ
 
 ## Phase 2: Bound Resource Persistence And Lookup
 
-Status: not started
+Status: complete
 
 Prerequisite: Phase 1.
 
@@ -397,7 +397,7 @@ Existing unpublished records lack a trustworthy provider binding. Do not silentl
 
 ## Phase 3: Provider-Switch Onboarding Safety
 
-Status: not started
+Status: complete
 
 Prerequisites: Phases 1-2.
 
@@ -426,7 +426,7 @@ Make setup changes explicit and reversible without pretending to manage inactive
 
 ## Phase 4: Provider Workspace Durability
 
-Status: not started
+Status: complete
 
 ### Scope
 
@@ -452,7 +452,7 @@ Use provider-selected snapshot-durable workspaces and remove the universal `/wor
 
 ## Phase 5: Automatic-Stop Configuration And Snapshot Defaults
 
-Status: not started
+Status: complete
 
 Prerequisite: Phase 1, because operational settings must be proven not to affect binding.
 
@@ -490,7 +490,7 @@ Run live behavior probes only with separate authorization. Confirm configured du
 
 ## Phase 6: Request-Time State Convergence
 
-Status: not started
+Status: complete
 
 Prerequisite: Phase 2.
 
@@ -530,7 +530,7 @@ This phase applies where an actionable provider reference already exists. It doe
 
 ## Phase 7: MCP Stop Sandbox
 
-Status: not started
+Status: complete
 
 Prerequisite: Phase 6.
 
@@ -556,7 +556,7 @@ Expose semantic early stop to agents that already possess a sandbox ID.
 
 ## Phase 8: Atomic Collision-Safe Allocation
 
-Status: not started
+Status: complete
 
 ### Scope
 
@@ -590,7 +590,7 @@ The currently persisted 24-hour `expiresAt` is not enforced. This plan does not 
 
 ## Phase 9: Friendly Words IDs
 
-Status: not started
+Status: complete
 
 Prerequisite: Phase 8.
 
@@ -623,7 +623,7 @@ Vendor the corpus and replace the current small-word-plus-suffix generator.
 
 ## Phase 10: Documentation And Full Verification
 
-Status: not started
+Status: complete
 
 Prerequisites: Phases 1-9.
 
@@ -698,3 +698,73 @@ Append entries in this format when a phase is completed:
 ```
 
 Do not mark a phase complete based on intent or partial implementation.
+
+### 2026-09-02 - Phase 1
+
+- Implemented: added a validated internal provider-configuration ID, canonical SHA-256 binding derivation for Box and Vercel, normalized local composition inputs, and binding hydration through MCP and local API composition.
+- Verification: `bun test apps/api-local/test/integration.test.ts packages/control-plane-local/test/control-plane-local.test.ts packages/mcp/test/config.test.ts` passed (26 tests); `bun run typecheck` passed; `bun test` passed (506 tests); `git diff --check` passed.
+- Live evidence: not run; no live provider mutation is authorized for this phase.
+- Deviations: none.
+
+### 2026-09-02 - Phase 2
+
+- Implemented: bound every new sandbox and snapshot to the active provider name and configuration ID; made SQLite records strict about that binding; filtered repository pages by active binding before cursor pagination; and rejected inactive direct resources, including restore source snapshots, before provider access. Added the safe `provider_configuration_mismatch` contract/API rendering without exposing bindings publicly.
+- Verification: focused regression tests passed (65 tests); `bun test` passed (512 tests); `bun run test:node-sqlite` passed; `bun run typecheck` passed after restoring the frozen workspace dependencies; `git diff --check` passed.
+- Live evidence: not run; no live provider mutation is authorized for this phase.
+- Deviations: none.
+
+### 2026-09-02 - Phase 3
+
+- Implemented: setup now accepts validated, canonical Box API base URLs and Vercel API origins; derives prospective and current provider bindings through the shared Phase 1 path; requires explicit confirmation before a resource-scope change; retains inactive-provider credentials; and preserves prior local configuration and both credentials on decline or failure. Logout/status wording now distinguishes local credentials/configuration from remote resources and SQLite records.
+- Verification: `bun test packages/mcp/test/onboarding.test.ts packages/mcp/test/config.test.ts packages/control-plane-local/test/control-plane-local.test.ts` passed (38 tests); `bun run typecheck` passed; `bun test` passed (517 tests); `bun run test:node-sqlite` passed; `git diff --check` passed.
+- Live evidence: not run; no live provider mutation is authorized for this phase.
+- Deviations: none.
+
+### 2026-09-02 - Phase 4
+
+- Implemented: moved Box's provider runtime profile and template launcher workspace to `/home/user/workspace` while retaining Box runtime installation paths under `/usr/local`; kept the shared runtime profile-driven; updated the authorized Box snapshot marker flow; and replaced MCP and launch-document universal workspace claims with provider-neutral semantics. Vercel retains `/workspace`.
+- Verification: `bun test packages/sandbox-provider-runtime/test/runtime.test.ts packages/sandbox-provider-box/test/provider.test.ts packages/sandbox-provider-vercel/test/infrastructure.test.ts packages/mcp/test/server.test.ts scripts/build-box-system-template.test.ts scripts/box-capability-probe.test.ts scripts/control-plane-box-smoke.test.ts` passed (95 tests); `bun run typecheck` passed; `bun test` passed (517 tests); `bun run test:node-sqlite` passed; `git diff --check` passed.
+- Live evidence: not run; no live provider mutation is authorized for this phase.
+- Deviations: none.
+
+### 2026-09-02 - Phase 5
+
+- Implemented: added strict shared `WATERBOX_AUTO_STOP` parsing and optional persisted setup/environment hydration; carried canonical milliseconds only through provider configuration; mapped configured values to Box `ttlSeconds` and Vercel session `timeout`; and removed the Waterbox-defined Vercel `snapshotExpiration` override.
+- Verification: `bun test packages/control-plane-local/test/control-plane-local.test.ts packages/mcp/test/onboarding.test.ts packages/sandbox-provider-box/test/provider.test.ts packages/sandbox-provider-vercel/test/infrastructure.test.ts` passed (85 tests); `bun test` passed (522 tests); `bun run test:node-sqlite` passed; `bun run typecheck` passed; `git diff --check` passed.
+- Live evidence: not run; this phase prohibits provider mutation absent separate authorization.
+- Deviations: none.
+
+### 2026-09-02 - Phase 6
+
+- Implemented: added a redacted provider-known-observation boundary; made stop, resume, sandbox delete, and snapshot delete converge known/exact outcomes while preserving uncertain workflow checkpoints; and added one bounded state inspection for failed existing-resource operations. Definite pre-dispatch rejections restore their prior stable checkpoint while still surfacing the canonical error. Tool streams, secure transfer, and Bash-job failures now learn exact sandbox state without replaying the original operation.
+- Verification: `bun test packages/sandbox-core/test/service.test.ts` passed (71 tests); `bun run typecheck` passed; `bun test` passed (528 tests); `bun run test:node-sqlite` passed; `git diff --check` passed.
+- Live evidence: not run; no live provider mutation is authorized for this phase.
+- Deviations: none.
+
+### 2026-09-02 - Phase 7
+
+- Implemented: added the canonical client `stopSandbox` request and exposed MCP `stop_sandbox` with the existing strict sandbox-ID schema. The model-visible description distinguishes a provider-dependent resumable compute stop from permanent sandbox deletion; no list or explicit resume tool was added.
+- Verification: `bun test packages/client/test/client.test.ts packages/mcp/test/server.test.ts` passed (41 tests); `bun run typecheck` passed; `bun test` passed (530 tests); `bun run test:node-sqlite` passed; `git diff --check` passed.
+- Live evidence: not run; no live provider mutation is authorized for this phase.
+- Deviations: none.
+
+### 2026-09-02 - Phase 8
+
+- Implemented: added a SQLite transaction-backed sandbox-creation reservation that owns an optional idempotency record and sandbox row together, with explicit new, matching, request-mismatch, and candidate-collision outcomes. Sandbox and snapshot allocation now regenerate candidates within a bounded pre-dispatch loop, preserving an accepted row ID through creation and recovery. Removed the previously inert idempotency `expiresAt` field rather than silently reusing or deleting expired records; unpublished old local state is intentionally subject to the existing prelaunch reset boundary.
+- Verification: `bun test packages/sandbox-core/test/service.test.ts packages/sandbox-repository-sqlite/test/repositories.test.ts` passed (101 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed; `bun test` passed (538 tests); `git diff --check` passed.
+- Live evidence: not run; this phase authorizes no live provider mutation.
+- Deviations: none.
+
+### 2026-09-02 - Phase 9
+
+- Implemented: vendored the exact Glitch Friendly Words predicate and object lists from commit `f94b4639c71c26875f7684fa86a214c7f30deaad`; replaced the small-word-plus-suffix generator with `predicate-predicate-object` IDs selected with uint32 rejection sampling; and retained Phase 8's bounded repository allocation as the collision authority. Added root and MCP-package MIT notices, bundled the corpus into the MCP artifact, and added a release verifier for the bundle and tarball contents.
+- Verification: `bun test packages/control-plane-local/test/friendly-words.test.ts packages/sandbox-provider-box/test/provider.test.ts packages/sandbox-provider-vercel/test/infrastructure.test.ts` passed (55 tests); `bun test` passed (544 tests); `bun run test:node-sqlite` passed; `bun run typecheck` passed; `bun run build:mcp && bun run scripts/verify-mcp-package.ts` passed; `git diff --check` passed.
+- Live evidence: not run; this phase has no live-provider behavior to exercise.
+- Deviations: none.
+
+### 2026-09-02 - Phase 10
+
+- Implemented: documented registered-resource ownership, inactive provider bindings and retained credentials, no-cleanup remote-cost warning, provider-controlled snapshot retention, optional non-guaranteed automatic stop, provider-selected workspaces, and MCP stop-only lifecycle visibility in the supported MCP README. Updated this plan's status only.
+- Verification: `bun run check:release` passed: `bun run typecheck`, `bun test` (544 passed), `bun run test:node-sqlite` (1 passed), merge-base/worktree/index diff checks, MCP build, and installed-artifact/tarball verification for the Friendly Words corpus and notices. A final `git diff --check` passed.
+- Live evidence: no live calls ran. `BOX_API_KEY`, `BOX_API_BASE_URL`, `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`, `WATERBOX_PROVIDER`, and `WATERBOX_AUTO_STOP` were absent, and the supported `/root` persisted configuration/keyring lookup reported `configured:false`; no scoped provider account or project was available for safe mutation or cleanup reconciliation.
+- Deviations: none.

@@ -12,6 +12,7 @@ function sandbox(version = 1): SandboxRecord {
     accountId: "acct-node",
     sandboxId: "sbx_calm-cactus-node",
     provider: "fake",
+    providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     providerRef: {},
     state: version === 1 ? "running" : "stopped",
     version,

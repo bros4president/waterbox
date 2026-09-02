@@ -24,7 +24,7 @@ import {
 } from "@waterbox/provider-runtime"
 
 export interface BoxProviderClock { now(): Date; sleep(milliseconds: number, signal: AbortSignal): Promise<void> }
-export interface BoxProviderConfig { apiBaseUrl: string; apiKey: string; polling: { intervalMs: number; timeoutMs: number } }
+export interface BoxProviderConfig { apiBaseUrl: string; apiKey: string; polling: { intervalMs: number; timeoutMs: number }; automaticStopMs?: number }
 export type { SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 export type BoxProviderFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 export type BoxProviderDiagnostic = RuntimeDiagnostic | { type: "tool-http-error"; status: number }
@@ -42,16 +42,16 @@ const READY = new Set<BoxState>(["ready", "idle"])
 const MAX_JSON_BYTES = 1_048_576
 const MAX_COMMAND_JSON_BYTES = 8_388_608
 
-/** Box's established runtime paths remain externally usable by Bash jobs. */
+/** Box snapshots retain /home/user; runtime files stay outside the user workspace. */
 export const BOX_RUNTIME_PROFILE: FullLinuxRuntimeProfile = {
-  workspacePath: "/workspace",
+  workspacePath: "/home/user/workspace",
   artifactMode: 0o640,
   persistentPaths: {
     runtimeDirectory: "/usr/local/lib",
     cliPath: "/usr/local/lib/waterbox-cli.js",
     launcherPath: "/usr/local/bin/waterbox",
     manifestPath: "/usr/local/lib/waterbox-bootstrap.json",
-    workspace: "/workspace",
+    workspace: "/home/user/workspace",
   },
   ephemeralPaths: { uploadStagingDirectory: "/tmp", jobsDirectory: "/run/waterbox/bash-jobs" },
   requires: ["node-24", "rg", "absolute-workspace", "persistent-files", "detached-jobs"],
@@ -109,11 +109,11 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   readonly #diagnostic?: (event: BoxProviderDiagnostic) => void
 
   constructor(config: BoxProviderConfig, dependencies: BoxInfrastructureDependencies) {
-    if (!exact(config, ["apiBaseUrl", "apiKey", "polling"]) || !exact(config.polling, ["intervalMs", "timeoutMs"]) || !nonempty(config.apiKey) || !Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs < 1 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs) throw new TypeError("Box provider configuration is invalid")
+    if (!exact(config, ["apiBaseUrl", "apiKey", "polling"], ["automaticStopMs"]) || !exact(config.polling, ["intervalMs", "timeoutMs"]) || !nonempty(config.apiKey) || !Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs < 1 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.automaticStopMs !== undefined && !automaticStopMilliseconds(config.automaticStopMs)) throw new TypeError("Box provider configuration is invalid")
     if (!exact(dependencies, ["clock"], ["fetch", "diagnostic"]) || !dependencies.clock || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function" || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function")) throw new TypeError("Box provider dependencies are invalid")
     const now = dependencies.clock.now()
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new TypeError("Box provider dependencies are invalid")
-    this.#config = { apiBaseUrl: url(config.apiBaseUrl), apiKey: config.apiKey, polling: { ...config.polling } }
+    this.#config = { apiBaseUrl: url(config.apiBaseUrl), apiKey: config.apiKey, polling: { ...config.polling }, ...(config.automaticStopMs === undefined ? {} : { automaticStopMs: config.automaticStopMs }) }
     this.#fetch = dependencies.fetch ?? fetch
     this.#clock = dependencies.clock
     this.#diagnostic = dependencies.diagnostic
@@ -122,7 +122,7 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async create(input: InfrastructureCreateInput): Promise<InfrastructureSandboxObservation> {
     assertCreateInput(input); input.signal.throwIfAborted()
     const source = input.sourceSnapshotRef === undefined ? {} : { from: snapshotRef(input.sourceSnapshotRef).name }
-    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId } }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
+    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId }, ...(this.#config.automaticStopMs === undefined ? {} : { ttlSeconds: this.#config.automaticStopMs / 1_000 }) }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
     return observation(mapSandboxState(ready.state), { kind: "box-sandbox-v2", boxId: ready.id })
   }
 
@@ -329,6 +329,7 @@ function meaningfulStderr(value: string): string { return value.replace(/^sh: 0:
 function segment(value: string): string { return encodeURIComponent(value) }
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value === value.trim() }
 function url(value: unknown): string { if (!nonempty(value)) throw new TypeError("Box provider configuration is invalid"); try { const parsed = new URL(value); if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(); return parsed.href.replace(/\/+$/, "") } catch { throw new TypeError("Box provider configuration is invalid") } }
+function automaticStopMilliseconds(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value % 60_000 === 0 }
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value) }
 function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, any> { return object(value) && required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key)) }
 function media(response: Response): void { if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw new Error("invalid media type") }

@@ -7,7 +7,7 @@ import { access, mkdtemp, rm, stat } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createEmbeddedApiBackend, createLocalControlPlane, parseLocalProviderConfiguration, type LocalControlPlaneConfig } from "../src/index.ts"
+import { createEmbeddedApiBackend, createLocalControlPlane, deriveProviderConfigurationId, parseAutomaticStopDuration, parseLocalProviderConfiguration, type LocalControlPlaneConfig } from "../src/index.ts"
 
 const accountId = "acct_local_control_plane_test"
 const sandboxId = "sbx_calm-cactus-7k3m"
@@ -27,24 +27,28 @@ function config(sqlitePath: string, provider = new FakeSandboxProvider()): Local
 }
 
 function boxConfig(sqlitePath: string): LocalControlPlaneConfig {
+  const providerConfig = { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } }
   return {
     sqlitePath,
     accountId,
     provider: {
       kind: "box",
-      config: { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } },
+      config: providerConfig,
+      providerConfigurationId: deriveProviderConfigurationId({ kind: "box", config: providerConfig }),
       runtimeArtifact: { bytes: new Uint8Array([1]), sha256: "0".repeat(64), cliProtocolVersion: 2, artifactVersion: "test" },
     },
   }
 }
 
 function vercelConfig(sqlitePath: string): LocalControlPlaneConfig {
+  const providerConfig = { apiOrigin: "https://vercel.invalid", token: "test-placeholder", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } }
   return {
     sqlitePath,
     accountId,
     provider: {
       kind: "vercel",
-      config: { apiOrigin: "https://vercel.invalid", token: "test-placeholder", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } },
+      config: providerConfig,
+      providerConfigurationId: deriveProviderConfigurationId({ kind: "vercel", config: providerConfig }),
       runtimeArtifact: { bytes: new TextEncoder().encode("#!/usr/bin/env node\n"), sha256: createHash("sha256").update("#!/usr/bin/env node\n").digest("hex"), cliProtocolVersion: 2, artifactVersion: "test" },
     },
   }
@@ -65,6 +69,44 @@ function authenticated(path: string, init: RequestInit = {}): Request {
 }
 
 describe("local control-plane composition", () => {
+  test("derives canonical provider bindings from identity scope only", () => {
+    const vercel = {
+      kind: "vercel" as const,
+      config: { apiOrigin: "https://api.vercel.com/", token: "first-token", teamId: " team ", projectId: " project ", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } },
+    }
+    const reorderedVercel = {
+      config: { polling: { requestTimeoutMs: 99, timeoutMs: 100, intervalMs: 3 }, projectId: "project", token: "rotated-token", apiOrigin: "https://api.vercel.com", teamId: "team" },
+      kind: "vercel" as const,
+    }
+    const vercelId = deriveProviderConfigurationId(vercel)
+    expect(vercelId).toBe(deriveProviderConfigurationId(reorderedVercel))
+    expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, teamId: "other-team" } }))
+    expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, projectId: "other-project" } }))
+    expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, apiOrigin: "https://vercel.invalid" } }))
+    expect(vercelId).toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, automaticStopMs: 86_400_000 } }))
+
+    const box = { kind: "box" as const, config: { apiBaseUrl: "https://ascii.dev/api/box/v1/", apiKey: "box-key", polling: { intervalMs: 1, timeoutMs: 2 } } }
+    const reorderedBox = { config: { polling: { timeoutMs: 100, intervalMs: 3 }, apiKey: "box-key", apiBaseUrl: "https://ascii.dev/api/box/v1" }, kind: "box" as const }
+    const boxId = deriveProviderConfigurationId(box)
+    expect(boxId).toBe(deriveProviderConfigurationId(reorderedBox))
+    expect(boxId).not.toContain("box-key")
+    expect(boxId).not.toBe(deriveProviderConfigurationId({ ...box, config: { ...box.config, apiKey: "rotated-box-key" } }))
+    expect(boxId).not.toBe(deriveProviderConfigurationId({ ...box, config: { ...box.config, apiBaseUrl: "https://box.invalid/v1" } }))
+    expect(boxId).toBe(deriveProviderConfigurationId({ ...box, config: { ...box.config, automaticStopMs: 1_800_000 } }))
+  })
+
+  test("parses the operator automatic-stop duration strictly before composition", () => {
+    expect(parseAutomaticStopDuration("30m")).toBe(1_800_000)
+    expect(parseAutomaticStopDuration("90m")).toBe(5_400_000)
+    expect(parseAutomaticStopDuration("2h")).toBe(7_200_000)
+    expect(parseAutomaticStopDuration("24h")).toBe(86_400_000)
+    expect(parseAutomaticStopDuration(undefined)).toBeUndefined()
+    expect(parseAutomaticStopDuration("", { allowBlank: true })).toBeUndefined()
+    for (const value of ["", " ", "0m", "-1m", "1.5h", "1h30m", "30s", "1d", "30M", "9007199254740992m"]) expect(() => parseAutomaticStopDuration(value)).toThrow("WATERBOX_AUTO_STOP")
+    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "key", WATERBOX_AUTO_STOP: "30m" }, "/users/test").provider.config).toMatchObject({ automaticStopMs: 1_800_000 })
+    expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "key", WATERBOX_AUTO_STOP: "1.5h" }, "/users/test")).toThrow("WATERBOX_AUTO_STOP")
+  })
+
   test("raw API authentication is enforced without a listener", async () => {
     const plane = await createLocalControlPlane(config(":memory:"), resolver)
     cleanup.push(() => plane.close())

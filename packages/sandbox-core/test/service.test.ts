@@ -11,6 +11,7 @@ import type { SandboxRecord, SnapshotRecord } from "@waterbox/core/records"
 import {
   FakeSandboxProvider,
   FixedClock,
+  InMemorySandboxCreationRepository,
   InMemoryIdempotencyRepository,
   InMemorySandboxRepository,
   InMemorySnapshotRepository,
@@ -19,12 +20,15 @@ import {
 
 const alice: Identity = { accountId: "acct-alice" }
 const bob: Identity = { accountId: "acct-bob" }
+const binding = "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 function harness(options: {
   sandboxIds?: string[]
   snapshotIds?: string[]
   provider?: FakeSandboxProvider
   idempotency?: InMemoryIdempotencyRepository
+  providerConfigurationId?: string
+  serviceConfig?: { allocationAttempts?: number }
 } = {}) {
   const sandboxes = new InMemorySandboxRepository()
   const snapshots = new InMemorySnapshotRepository()
@@ -34,14 +38,16 @@ function harness(options: {
     sandboxes,
     snapshots,
     idempotency,
+    sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
     providers: new Map([[provider.name, provider]]),
     defaultProvider: provider.name,
+    providerConfigurationId: options.providerConfigurationId ?? binding,
     clock: new FixedClock(),
     ids: new SequenceIdGenerator(
       options.sandboxIds ?? ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3"],
       options.snapshotIds ?? ["snap_silver-forest-a1", "snap_warm-meadow-b2"],
     ),
-  })
+  }, options.serviceConfig)
   return { service, sandboxes, snapshots, idempotency, provider }
 }
 
@@ -127,6 +133,73 @@ describe("account ownership", () => {
   })
 })
 
+describe("provider configuration binding", () => {
+  test("persists the active binding and lets the same binding operate registered resources", async () => {
+    const { service, sandboxes, snapshots } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    const snapshot = await service.createSnapshot(alice, sandbox.sandboxId, {})
+
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.providerConfigurationId).toBe(binding)
+    expect((await snapshots.get(alice.accountId, snapshot.snapshotId))?.providerConfigurationId).toBe(binding)
+    expect((await service.getSandbox(alice, sandbox.sandboxId)).sandboxId).toBe(sandbox.sandboxId)
+    expect((await service.getSnapshot(alice, snapshot.snapshotId)).snapshotId).toBe(snapshot.snapshotId)
+  })
+
+  test("different provider and stale binding reject direct access before provider I/O", async () => {
+    const { service, sandboxes, provider } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    const persisted = await sandboxes.get(alice.accountId, sandbox.sandboxId)
+    await sandboxes.compareAndSwap({ ...persisted!, providerConfigurationId: "pcfg_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", version: persisted!.version + 1 }, persisted!.version)
+
+    await expectDomainError(service.probeSandbox(alice, sandbox.sandboxId), "provider_configuration_mismatch")
+    expect(provider.inspectSandboxCalls).toBe(0)
+
+    const otherProvider = new FakeSandboxProvider({ name: "other" })
+    const alternate = new SandboxService({
+      sandboxes,
+      snapshots: new InMemorySnapshotRepository(),
+      idempotency: new InMemoryIdempotencyRepository(),
+      providers: new Map([[otherProvider.name, otherProvider]]),
+      defaultProvider: otherProvider.name,
+      providerConfigurationId: binding,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })
+    await expectDomainError(alternate.getSandbox(alice, sandbox.sandboxId), "provider_configuration_mismatch")
+    expect(otherProvider.inspectSandboxCalls).toBe(0)
+  })
+
+  test("switching back to the exact binding restores access", async () => {
+    const { service, sandboxes, snapshots, idempotency, provider } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+    const switched = new SandboxService({
+      sandboxes,
+      snapshots,
+      idempotency,
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      providerConfigurationId: "pcfg_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(),
+    })
+    await expectDomainError(switched.getSandbox(alice, sandbox.sandboxId), "provider_configuration_mismatch")
+    expect((await service.getSandbox(alice, sandbox.sandboxId)).sandboxId).toBe(sandbox.sandboxId)
+  })
+
+  test("failed idempotency replay rejects an inactive registered sandbox before surfacing its prior failure", async () => {
+    const provider = new FakeSandboxProvider()
+    provider.prepareError = new ProviderError("failure", "private initial failure")
+    const { service, sandboxes } = harness({ provider })
+    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "failed-inactive" }), "provider_failure")
+    const sandbox = await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1" as SandboxId)
+    await sandboxes.compareAndSwap({ ...sandbox!, providerConfigurationId: "pcfg_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB", version: sandbox!.version + 1 }, sandbox!.version)
+    const prepares = provider.prepareCalls
+
+    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "failed-inactive" }), "provider_configuration_mismatch")
+    expect(provider.prepareCalls).toBe(prepares)
+  })
+})
+
 describe("secure file transfer", () => {
   test("preserves account, provider reference, signal, and ciphertext without persistence", async () => {
     const { service, provider, sandboxes } = harness()
@@ -179,6 +252,61 @@ describe("secure file transfer", () => {
 })
 
 describe("durable create idempotency", () => {
+  test("regenerates a colliding sandbox ID before exactly one provider dispatch", async () => {
+    const { service, sandboxes, provider, idempotency } = harness({ sandboxIds: ["sbx_taken-cactus-a1", "sbx_fresh-river-b2"] })
+    await sandboxes.createIfAbsent({
+      accountId: alice.accountId,
+      sandboxId: "sbx_taken-cactus-a1",
+      provider: provider.name,
+      providerConfigurationId: binding,
+      providerRef: null,
+      state: "provisioning",
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })
+
+    const created = await service.createSandbox(alice, {}, { idempotencyKey: "collision-key" })
+    expect(created.sandboxId).toBe("sbx_fresh-river-b2")
+    expect(provider.createCalls).toBe(1)
+    expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "collision-key" }))?.resourceId).toBe(created.sandboxId)
+  })
+
+  test("allocation exhaustion performs no provider mutation", async () => {
+    const { service, sandboxes, provider } = harness({
+      sandboxIds: ["sbx_taken-cactus-a1", "sbx_taken-river-b2"],
+      serviceConfig: { allocationAttempts: 2 },
+    })
+    for (const sandboxId of ["sbx_taken-cactus-a1", "sbx_taken-river-b2"] as SandboxId[]) {
+      await sandboxes.createIfAbsent({ accountId: alice.accountId, sandboxId, provider: provider.name, providerConfigurationId: binding, providerRef: null, state: "provisioning", version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" })
+    }
+    await expectDomainError(service.createSandbox(alice, {}), "internal_error")
+    expect(provider.createCalls).toBe(0)
+  })
+
+  test("regenerates a colliding snapshot ID before snapshot dispatch", async () => {
+    const { service, snapshots, provider } = harness({
+      sandboxIds: ["sbx_source-cactus-a1"],
+      snapshotIds: ["snap_taken-forest-a1", "snap_fresh-meadow-b2"],
+    })
+    const source = await service.createSandbox(alice, {})
+    await snapshots.createIfAbsent({
+      accountId: alice.accountId,
+      snapshotId: "snap_taken-forest-a1",
+      provider: provider.name,
+      providerConfigurationId: binding,
+      providerRef: null,
+      sourceSandboxId: source.sandboxId,
+      state: "creating",
+      version: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    })
+    const created = await service.createSnapshot(alice, source.sandboxId, {})
+    expect(created.snapshotId).toBe("snap_fresh-meadow-b2")
+    expect(provider.createSnapshotCalls).toBe(1)
+    expect((await snapshots.get(alice.accountId, created.snapshotId))?.snapshotId).toBe(created.snapshotId)
+  })
   test("persists the provider reference as preparing before preparation starts", async () => {
     const gate = deferred()
     const started = deferred()
@@ -208,6 +336,7 @@ describe("durable create idempotency", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
     })
@@ -362,6 +491,7 @@ describe("durable create idempotency", () => {
       idempotency: first.idempotency,
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(),
     })
@@ -419,6 +549,7 @@ describe("durable create idempotency", () => {
       idempotency,
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
     })
@@ -447,6 +578,7 @@ describe("durable create idempotency", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
     })
@@ -526,6 +658,7 @@ describe("lifecycle and optional groups", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[unsupported.name, unsupported]]),
       defaultProvider: unsupported.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(),
     })).toThrow("does not implement sandbox preparation")
@@ -616,11 +749,11 @@ describe("lifecycle and optional groups", () => {
     const sandbox = await service.createSandbox(alice, {})
 
     expect((await service.stopSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
-    await expectDomainError(service.stopSandbox(alice, sandbox.sandboxId), "invalid_state")
+    expect((await service.stopSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
     expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
-    await expectDomainError(service.resumeSandbox(alice, sandbox.sandboxId), "invalid_state")
+    expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
     expect((await service.deleteSandbox(alice, sandbox.sandboxId)).state).toBe("terminated")
-    await expectDomainError(service.deleteSandbox(alice, sandbox.sandboxId), "invalid_state")
+    expect((await service.deleteSandbox(alice, sandbox.sandboxId)).state).toBe("terminated")
     expect(provider.stopCalls).toBe(1)
     expect(provider.resumeCalls).toBe(1)
     expect(provider.deleteCalls).toBe(1)
@@ -662,7 +795,7 @@ describe("lifecycle and optional groups", () => {
 
     expect(snapshot.state).toBe("ready")
     expect((await service.deleteSnapshot(alice, snapshot.snapshotId)).state).toBe("deleted")
-    await expectDomainError(service.deleteSnapshot(alice, snapshot.snapshotId), "invalid_state")
+    expect((await service.deleteSnapshot(alice, snapshot.snapshotId)).state).toBe("deleted")
     expect(provider.createSnapshotCalls).toBe(1)
     expect(provider.deleteSnapshotCalls).toBe(1)
   })
@@ -689,6 +822,7 @@ describe("lifecycle and optional groups", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"], ["snap_silver-forest-a1"]),
     })
@@ -724,7 +858,7 @@ describe("lifecycle and optional groups", () => {
     await base.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "running"))
     provider.sandboxStates.set(sandboxId, "running")
     provider.createSnapshotObservation = { state: "ready", providerRef: { privateSnapshotId: "snap_silver-forest-a1" }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } } }
-    const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-a1"]) }
+    const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: binding, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-a1"]) }
     const service = new SandboxService(dependencies, { metadataConflictRetries: 1 })
 
     const created = await service.createSnapshot(alice, sandboxId, {})
@@ -747,7 +881,7 @@ describe("lifecycle and optional groups", () => {
     await base.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "running"))
     provider.sandboxStates.set(sandboxId, "running")
     provider.createSnapshotObservation = { state: "failed", providerRef: { privateSnapshotId: snapshotId }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } } }
-    const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], [snapshotId]) }
+    const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: binding, clock: new FixedClock(), ids: new SequenceIdGenerator([], [snapshotId]) }
 
     expect((await new SandboxService(dependencies).createSnapshot(alice, sandboxId, {})).state).toBe("creating")
     expect((await snapshots.get(alice.accountId, snapshotId))?.providerRef).toEqual({ privateSnapshotId: snapshotId })
@@ -873,7 +1007,7 @@ describe("lifecycle and optional groups", () => {
     expect(provider.createCalls).toBe(0)
   })
 
-  test("create from snapshot dispatches to the snapshot's owning provider", async () => {
+  test("create from an inactive provider snapshot is rejected before provider create dispatch", async () => {
     const sourceProvider = new FakeSandboxProvider({ name: "source" })
     const defaultProvider = new FakeSandboxProvider({ name: "default" })
     const snapshots = new InMemorySnapshotRepository()
@@ -888,15 +1022,14 @@ describe("lifecycle and optional groups", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[defaultProvider.name, defaultProvider], [sourceProvider.name, sourceProvider]]),
       defaultProvider: defaultProvider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(["sbx_restored-cloud-a1"]),
     })
 
-    const restored = await service.createSandbox(alice, { sourceSnapshotId: snapshotId })
-
-    expect(restored.provider).toBe(sourceProvider.name)
+    await expectDomainError(service.createSandbox(alice, { sourceSnapshotId: snapshotId }), "provider_configuration_mismatch")
     expect(defaultProvider.createCalls).toBe(0)
-    expect(sourceProvider.createInputs[0]?.sourceSnapshotRef).toEqual({ privateSnapshotId: snapshotId })
+    expect(sourceProvider.createCalls).toBe(0)
   })
 
   test("create from snapshot rejects an owning provider without snapshots before allocation or persistence", async () => {
@@ -916,13 +1049,14 @@ describe("lifecycle and optional groups", () => {
       idempotency,
       providers: new Map([[defaultProvider.name, defaultProvider], [sourceProvider.name, sourceProvider]]),
       defaultProvider: defaultProvider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(),
     })
 
     await expectDomainError(
       service.createSandbox(alice, { sourceSnapshotId: snapshotId }, { idempotencyKey: "restore" }),
-      "unsupported_capability",
+      "provider_configuration_mismatch",
     )
 
     expect(sourceProvider.createCalls).toBe(0)
@@ -933,6 +1067,165 @@ describe("lifecycle and optional groups", () => {
 })
 
 describe("execution and reconciliation", () => {
+  test("a first tool failure learns an automatic stop without replaying the tool", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(sandbox.sandboxId, "stopped")
+    provider.executeError = new ProviderError("failure", "provider rejected the command")
+
+    await expectDomainError(collect(await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" })), "provider_failure")
+    expect(provider.executeCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(1)
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
+
+    provider.executeError = undefined
+    expect(await collect(await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" }))).toHaveLength(1)
+    expect(provider.resumeCalls).toBe(1)
+    expect(provider.executeCalls).toBe(2)
+  })
+
+  test("stream-time command ambiguity learns state but never turns a write into success", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(sandbox.sandboxId, "terminated")
+    provider.executeError = new ProviderError("ambiguous_execution", "write response lost")
+
+    await expectDomainError(collect(await service.executeTool(alice, sandbox.sandboxId, "write", { filePath: "note.txt", content: "text" })), "ambiguous_execution")
+    expect(provider.executeCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(1)
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("terminated")
+  })
+
+  test("secure transfer and Bash job failures learn exact sandbox state without retrying their operation", async () => {
+    class OperationalProvider extends FakeSandboxProvider {
+      override readonly secureFileTransfer = {
+        initiate: async () => { throw new ProviderError("failure", "transfer unavailable") },
+        consume: async () => { throw new ProviderError("ambiguous_execution", "transfer response lost") },
+      }
+      readonly bashJobs = {
+        observe: async () => { throw new ProviderError("failure", "job unavailable") },
+        cleanup: async () => { throw new ProviderError("ambiguous_execution", "cleanup response lost") },
+      }
+    }
+    const provider = new OperationalProvider()
+    const { service, sandboxes } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    const jobId = `job_${"a".repeat(32)}`
+    provider.sandboxStates.set(sandbox.sandboxId, "stopped")
+
+    await expectDomainError(service.initiateSecureFileTransfer(alice, sandbox.sandboxId), "provider_failure")
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
+    // Bash observations do not resume, and their failed read still learns the
+    // already-stopped state once rather than replaying the job operation.
+    await expectDomainError(service.observeBashJob(alice, sandbox.sandboxId, jobId, 0, 64), "provider_failure")
+    expect(provider.inspectSandboxCalls).toBe(2)
+  })
+
+  test("lifecycle investigation converges idempotent outcomes and retains ambiguous old states", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes, snapshots } = harness({
+      provider,
+      sandboxIds: ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3", "sbx_warm-meadow-d4"],
+    })
+    const stopTarget = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(stopTarget.sandboxId, "stopped")
+    provider.stopError = new ProviderError("known_state", "already stopped", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "stopped", providerRef: { privateSandboxId: stopTarget.sandboxId } },
+      },
+    })
+    expect((await service.stopSandbox(alice, stopTarget.sandboxId)).state).toBe("stopped")
+    expect(provider.stopCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(0)
+    provider.stopError = undefined
+
+    const resumeTarget = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, resumeTarget.sandboxId)
+    provider.sandboxStates.set(resumeTarget.sandboxId, "running")
+    provider.resumeError = new ProviderError("failure", "already running")
+    expect((await service.resumeSandbox(alice, resumeTarget.sandboxId)).state).toBe("running")
+    expect(provider.resumeCalls).toBe(1)
+    provider.resumeError = undefined
+
+    const deleteTarget = await service.createSandbox(alice, {})
+    provider.deleteError = new ProviderError("ambiguous_execution", "delete response lost")
+    // The exact read sees the old state: preserve terminating because delayed
+    // provider deletion remains possible.
+    await expectDomainError(service.deleteSandbox(alice, deleteTarget.sandboxId), "ambiguous_execution")
+    expect((await sandboxes.get(alice.accountId, deleteTarget.sandboxId))?.state).toBe("terminating")
+    expect(provider.deleteCalls).toBe(1)
+    provider.deleteError = undefined
+
+    const snapshotSource = await service.createSandbox(alice, {})
+    const snapshot = await service.createSnapshot(alice, snapshotSource.sandboxId, {})
+    provider.snapshotStates.set(snapshot.snapshotId, "deleted")
+    const originalDelete = provider.snapshots!.delete
+    provider.snapshots!.delete = async () => { throw new ProviderError("failure", "already deleted") }
+    expect((await service.deleteSnapshot(alice, snapshot.snapshotId)).state).toBe("deleted")
+    expect(provider.deleteSnapshotCalls).toBe(0)
+    expect((await snapshots.get(alice.accountId, snapshot.snapshotId))?.state).toBe("deleted")
+    provider.snapshots!.delete = originalDelete
+  })
+
+  test("definite lifecycle rejections restore stable state but still surface the provider error", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes, snapshots } = harness({
+      provider,
+      sandboxIds: ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3", "sbx_warm-meadow-d4"],
+    })
+
+    const stopTarget = await service.createSandbox(alice, {})
+    provider.stopError = new ProviderError("failure", "stop rejected")
+    await expectDomainError(service.stopSandbox(alice, stopTarget.sandboxId), "provider_failure")
+    expect((await sandboxes.get(alice.accountId, stopTarget.sandboxId))?.state).toBe("running")
+    expect(provider.stopCalls).toBe(1)
+    provider.stopError = undefined
+
+    const resumeTarget = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, resumeTarget.sandboxId)
+    provider.resumeError = new ProviderError("failure", "resume rejected")
+    await expectDomainError(service.resumeSandbox(alice, resumeTarget.sandboxId), "provider_failure")
+    expect((await sandboxes.get(alice.accountId, resumeTarget.sandboxId))?.state).toBe("stopped")
+    expect(provider.resumeCalls).toBe(1)
+    provider.resumeError = undefined
+
+    const deleteTarget = await service.createSandbox(alice, {})
+    provider.deleteError = new ProviderError("failure", "delete rejected")
+    await expectDomainError(service.deleteSandbox(alice, deleteTarget.sandboxId), "provider_failure")
+    expect((await sandboxes.get(alice.accountId, deleteTarget.sandboxId))?.state).toBe("running")
+    expect(provider.deleteCalls).toBe(1)
+    provider.deleteError = undefined
+
+    const source = await service.createSandbox(alice, {})
+    const snapshot = await service.createSnapshot(alice, source.sandboxId, {})
+    const originalDelete = provider.snapshots!.delete
+    let snapshotDeleteAttempts = 0
+    provider.snapshots!.delete = async () => {
+      snapshotDeleteAttempts++
+      throw new ProviderError("failure", "snapshot delete rejected")
+    }
+    await expectDomainError(service.deleteSnapshot(alice, snapshot.snapshotId), "provider_failure")
+    expect((await snapshots.get(alice.accountId, snapshot.snapshotId))?.state).toBe("ready")
+    expect(snapshotDeleteAttempts).toBe(1)
+    provider.snapshots!.delete = originalDelete
+  })
+
+  test("a failed investigation preserves the original safe error and transition", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    provider.stopError = new ProviderError("failure", "dispatch rejected")
+    provider.inspectSandboxError = new ProviderError("failure", "inspection rejected")
+
+    await expectDomainError(service.stopSandbox(alice, sandbox.sandboxId), "provider_failure")
+    expect(provider.stopCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(1)
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopping")
+  })
+
   test("maps lifecycle and snapshot operations with exact account, provider reference, and signal continuity", async () => {
     const { service, provider } = harness()
     const createSignal = new AbortController().signal
@@ -1282,6 +1575,7 @@ describe("records and compare-and-swap", () => {
     expect(serialized).not.toContain("accountId")
     expect(serialized).not.toContain("acct-alice")
     expect(serialized).not.toContain("providerRef")
+    expect(serialized).not.toContain("providerConfigurationId")
     expect(serialized).not.toContain("privateSandboxId")
     expect(serialized).not.toContain("privateSnapshotId")
   })
@@ -1313,6 +1607,7 @@ describe("records and compare-and-swap", () => {
       idempotency: new InMemoryIdempotencyRepository(),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: binding,
       clock: new FixedClock(),
       ids: new SequenceIdGenerator(),
     })
@@ -1466,6 +1761,7 @@ function sandboxRecord(accountId: string, sandboxId: SandboxId, state: SandboxRe
     accountId,
     sandboxId,
     provider: "fake",
+    providerConfigurationId: binding,
     providerRef: { privateSandboxId: sandboxId },
     state,
     version: 1,
@@ -1484,6 +1780,7 @@ function snapshotRecord(
     accountId,
     snapshotId,
     provider: "fake",
+    providerConfigurationId: binding,
     providerRef: { privateSnapshotId: snapshotId },
     sourceSandboxId,
     state,

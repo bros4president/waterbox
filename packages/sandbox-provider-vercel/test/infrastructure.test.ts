@@ -5,7 +5,7 @@ import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, I
 import { WaterboxSandboxBackend, type SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 import { createHash } from "node:crypto"
 import { gunzipSync } from "node:zlib"
-import { VercelSandboxInfrastructure, VercelSandboxProvider, type VercelProviderClock } from "../src/index.ts"
+import { VERCEL_RUNTIME_PROFILE, VercelSandboxInfrastructure, VercelSandboxProvider, type VercelProviderClock } from "../src/index.ts"
 
 const signal = () => new AbortController().signal
 class Clock implements VercelProviderClock { now(): number { return 0 }; async sleep(_milliseconds: number, value: AbortSignal): Promise<void> { value.throwIfAborted() } }
@@ -47,6 +47,11 @@ describe("Vercel primitive REST adapter", () => {
     })
     const prepared = await provider.prepareSandbox({ accountId: "account", providerRef, signal: signal() })
     expect(prepared).toMatchObject({ state: "running" })
+    expect(VERCEL_RUNTIME_PROFILE.workspacePath).toBe("/workspace")
+    expect(VERCEL_RUNTIME_PROFILE.persistentPaths.workspace).toBe("/workspace")
+    const installer = scripts.find(script => script.includes("base64 -d > '/workspace/.waterbox/waterbox'"))
+    const launcher = Buffer.from(installer?.match(/printf %s '([A-Za-z0-9+/=]+)' \| base64 -d > '\/workspace\/\.waterbox\/waterbox'/)?.[1] ?? "", "base64").toString("utf8")
+    expect(launcher).toContain("cd '/workspace'")
     expect(scripts.some(script => script.includes("if test \"$uid\" = 0"))).toBeTrue()
     expect(scripts.every(script => !script.includes("Vercel"))).toBeTrue()
   })
@@ -62,8 +67,43 @@ describe("Vercel primitive REST adapter", () => {
     expect(JSON.stringify(result.providerRef)).not.toContain("session-1")
     expect(new URL(requests[0]!.url).pathname).toBe("/v4/sandboxes")
     const body = await requests[0]!.json() as Record<string, unknown>
-    expect(body).toMatchObject({ name: name(), projectId: "project", persistent: true, snapshotExpiration: 86_400_000 })
+    expect(body).toMatchObject({ name: name(), projectId: "project", persistent: true })
+    expect(body).not.toHaveProperty("snapshotExpiration")
+    expect(body).not.toHaveProperty("timeout")
     expect(body).not.toHaveProperty("keepLastSnapshots")
+  })
+
+  test("sends exact timeout milliseconds only for a configured automatic stop", async () => {
+    const requests: Request[] = []
+    const value = new VercelSandboxInfrastructure({ ...config, automaticStopMs: 7_200_000 }, {
+      clock: new Clock(),
+      fetch: async (input, init) => {
+        const request = new Request(input, init); requests.push(request)
+        return created((await request.clone().json() as { name: string }).name)
+      },
+    })
+    await value.create(createInput)
+    const body = await requests[0]!.json() as Record<string, unknown>
+    expect(body).toMatchObject({ timeout: 7_200_000 })
+    expect(body).not.toHaveProperty("snapshotExpiration")
+  })
+
+  test("keeps a longest Friendly Words sandbox ID deterministic and within Vercel's native name bound", async () => {
+    const friendlyId = "sbx_quintessential-quintessential-gigantspinosaurus"
+    const sandboxId = friendlyId as never
+    const idempotencyKey = "friendly-words-longest"
+    let body: { name: string; tags: Record<string, string> } | undefined
+    const value = new VercelSandboxInfrastructure(config, {
+      clock: new Clock(),
+      fetch: async (_input, init) => {
+        body = await new Request("https://vercel.test", init).json() as { name: string; tags: Record<string, string> }
+        return Response.json({ sandbox: { name: body.name, currentSessionId: "session-1", status: "running", tags: body.tags }, session: { id: "session-1", projectId: "project" } })
+      },
+    })
+    await value.create({ accountId: "account", sandboxId, idempotencyKey, signal: signal() })
+    const owner = createHash("sha256").update(`account:${sandboxId}:${idempotencyKey}`).digest("hex").slice(0, 24)
+    expect(body?.name).toBe(`waterbox-${friendlyId.replace(/[^a-z0-9-]/g, "-").slice(0, 42)}-${owner.slice(0, 12)}`)
+    expect(body?.name.length).toBeLessThanOrEqual(64)
   })
 
   test("reconciles only a response-lost create by exact owned non-resuming name lookup", async () => {
@@ -285,8 +325,8 @@ describe("Vercel primitive REST adapter", () => {
     const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-river-a1" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_calm-river-a5"]) })
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_calm-river-a5"]) })
 
     const snapshot = await service.createSnapshot(identity, sandboxId, {})
 
