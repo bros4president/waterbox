@@ -2,7 +2,7 @@
 
 The supported Waterbox MCP server. It runs as a local stdio process and renders `@waterbox/client` commands over an authenticated, in-process Waterbox API. Local provider modes open no listener or daemon.
 
-The first release requires Node.js 24.15.0 or newer and supports explicit local Box and Vercel providers. Waterbox Cloud is represented in configuration but is not implemented yet.
+The first release requires Node.js 24.15.0 or newer and supports explicit local Box and Vercel providers. Run `waterbox setup` for an interactive local setup that stores only the provider secret in the operating-system keyring and non-secret settings in `~/.waterbox/config.json`. Waterbox Cloud is represented in configuration but is not implemented yet.
 
 The configured Box account uses the plain provider image. Waterbox prepares the current packaged runtime after Box readiness; no provider system template is required.
 
@@ -12,11 +12,20 @@ After the package is published, install it without passing provider credentials 
 
 ```bash
 npx add-mcp @waterbox/mcp -g \
-  --name waterbox \
-  --env WATERBOX_PROVIDER=box
+  --name waterbox
 ```
 
-Use `WATERBOX_PROVIDER=box` with `BOX_API_KEY`, or `WATERBOX_PROVIDER=vercel` with `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. Configure credentials only through the secret or environment mechanism recommended by your MCP client. Never put secrets in chat, tool arguments, shell history, or a committed configuration file. Restart the client after providing the selected provider's configuration so the local MCP process receives it.
+For this scoped pre-launch package, run onboarding commands with npm's package selector:
+
+```bash
+npx @waterbox/mcp setup
+npx @waterbox/mcp status
+npx @waterbox/mcp logout
+```
+
+The future unscoped `waterbox` package name remains deferred. Setup selects Box or Vercel interactively. Status reports configuration and credential availability without printing a credential; logout removes local configuration and both stored provider credentials. If the native keyring is unavailable (including a headless Linux Secret Service/keyutils setup), use environment-only configuration: `WATERBOX_PROVIDER=box` with `BOX_API_KEY`, or `WATERBOX_PROVIDER=vercel` with `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, and `VERCEL_PROJECT_ID`. Never put secrets in chat, tool arguments, shell history, or a committed configuration file. Restart the client after configuration changes.
+
+Persisted setup uses only the official Box endpoint and Vercel origin with approved polling defaults. Custom endpoints and timing values are advanced environment-only overrides.
 
 Installation may be completed before credentials are available. In that state the server remains connected, and lifecycle or operation calls return safe setup guidance instead of terminating the MCP connection.
 
@@ -65,4 +74,4 @@ The sandbox command deletes its uploaded ciphertext after every attempted consum
 | `VERCEL_REQUEST_TIMEOUT_MS` | No | `30000` |
 | `WATERBOX_SQLITE_PATH` | No | `~/.waterbox/direct.sqlite` |
 
-MCP does not infer a provider from available credentials. Setting `WATERBOX_PROVIDER=waterbox` keeps the server connected and returns clear unsupported-provider setup guidance from tool calls because Waterbox Cloud is not available yet.
+MCP does not infer a provider from available credentials. `WATERBOX_PROVIDER`, when set, resolves the selected provider entirely from environment variables and never mixes with local keyring/configuration data. Provider-specific variables without `WATERBOX_PROVIDER` are rejected with setup guidance. Waterbox never loads `.env` implicitly. Setting `WATERBOX_PROVIDER=waterbox` keeps the server connected and returns clear unsupported-provider setup guidance from tool calls because Waterbox Cloud is not available yet.

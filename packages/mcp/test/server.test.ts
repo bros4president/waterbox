@@ -90,7 +90,8 @@ describe("Waterbox MCP client renderer", () => {
 
   test("keeps every tool side-effect free while setup is incomplete or unsupported", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-mcp-setup-")); const sqlitePath = join(directory, "must-not-exist.sqlite")
-    try { for (const environment of [{}, { WATERBOX_PROVIDER: "waterbox" }, { WATERBOX_PROVIDER: "box" }]) { const commands = await createStartupClient({ ...environment, WATERBOX_SQLITE_PATH: sqlitePath }); const connection = await connected(commands); try { const response = await connection.client.callTool({ name: "send_file_securely", arguments: { sandboxId: sandbox.sandboxId, sourcePath: join(directory, "missing"), targetPath: "/root/secret" } }); expect(response).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("WATERBOX_PROVIDER") }] }); expect(existsSync(sqlitePath)).toBeFalse() } finally { await connection.close() } } }
+    const storage = { async read() { return undefined }, async write() {}, async remove() {} }, credentials = { async get() { return undefined }, async set() {}, async delete() { return false } }
+    try { for (const environment of [{}, { WATERBOX_PROVIDER: "waterbox" }, { WATERBOX_PROVIDER: "box" }]) { const commands = await createStartupClient({ ...environment, WATERBOX_SQLITE_PATH: sqlitePath }, undefined, { storage, credentials }); const connection = await connected(commands); try { const response = await connection.client.callTool({ name: "send_file_securely", arguments: { sandboxId: sandbox.sandboxId, sourcePath: join(directory, "missing"), targetPath: "/root/secret" } }); expect(response).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("WATERBOX_PROVIDER") }] }); expect(existsSync(sqlitePath)).toBeFalse() } finally { await connection.close() } } }
     finally { await rm(directory, { recursive: true, force: true }) }
   })
 

@@ -34,7 +34,7 @@ and receive a valid local stdio MCP configuration whose process:
 - Runs on Node.js 24 without Bun installed locally.
 - Connects successfully even before a provider is configured.
 - Explains provider setup without accepting secrets through model-visible tool arguments.
-- Uses an explicitly selected user-owned provider after credentials are supplied through the MCP client's environment or secret mechanism.
+- Uses an explicitly selected user-owned provider after credentials are supplied through native-keyring onboarding or the MCP client's environment or secret mechanism.
 - Creates a fresh sandbox with either explicitly configured launch provider, Box or Vercel Sandbox, without a Waterbox system snapshot.
 - Reinstalls the current Waterbox one-shot CLI when creating from a supported provider user snapshot where that provider advertises snapshots.
 - Persists the provider resource identity before preparation/bootstrap starts, while retaining the acknowledged provider-return/result-persistence failure interval.
@@ -54,7 +54,8 @@ The launch command installs configuration. It does not silently choose a provide
 - `@waterbox/control-plane-local` owns embedded core, repository, and provider composition. Its embedded bearer is process-private; synthetic URLs are in-process Fetch routing, not network traffic. A remote `ApiBackend` seam does not imply hosted Waterbox exists.
 - Waterbox remains provider-neutral. Box and Vercel Sandbox are the launch-supported providers, neither is an implicit default.
 - Missing provider configuration is a connected setup state, not a process startup failure.
-- Provider credentials are supplied by the user through environment or client-specific secret facilities.
+- Provider credentials are supplied by the user through environment or client-specific secret facilities, or by the bounded native-keyring onboarding flow: `waterbox setup`, `waterbox status`, and `waterbox logout`.
+- Native onboarding stores only Box API keys and Vercel tokens under keyring service `waterbox`; strict versioned non-secret provider settings are atomically stored in `~/.waterbox/config.json`. Persisted records allow only `https://ascii.dev/api/box/v1` and `https://api.vercel.com/` with approved defaults, preventing redirected keyring credentials; custom endpoints remain environment-only. Environment-only configuration remains the sole fallback, `.env` is never loaded implicitly, and headless Linux Secret Service/keyutils availability remains an operational durability caveat.
 - Credentials are never accepted through MCP tool arguments, returned in MCP content, or written to ordinary diagnostics.
 
 ### Runtime
@@ -93,7 +94,8 @@ Do not add in this launch:
 - A managed Waterbox Cloud provider.
 - A hosted streamable-HTTP or SSE MCP transport.
 - Provider-specific browser authentication embedded in the generic MCP.
-- A Waterbox credential vault or cross-platform keychain abstraction.
+- Custom OS-specific credential-store adapters or a general-purpose Waterbox credential vault.
+- Plaintext credential persistence or a fallback credential file.
 - Secret entry through chat, MCP tools, shell arguments, or committed configuration.
 - An npm alias or forwarding package for `@waterbox/mcp`.
 - A public library API from the `waterbox` package.
@@ -211,7 +213,7 @@ The npm bin file must begin with:
 #!/usr/bin/env node
 ```
 
-The bin entry invokes MCP `main()` unconditionally. It must not depend on direct-entry equality between `import.meta.url` and npm's symlinked `process.argv[1]`.
+With zero arguments, the bin entry invokes MCP `main()` and must not depend on direct-entry equality between `import.meta.url` and npm's symlinked `process.argv[1]`. Explicit supported arguments dispatch terminal-only onboarding commands (`setup`, `status`, and `logout`) instead; unknown arguments never start MCP.
 
 The executable emits no non-MCP stdout. Startup errors and optional diagnostics use stderr only and never include credentials, provider references, commands, local file content, response bodies, or protected URLs.
 
@@ -244,13 +246,14 @@ The completed Vercel audit established official external-hosting access-token co
 
 ### Configuration Precedence
 
-V0 configuration is environment-based:
+V0 configuration is either explicit environment configuration or bounded local native-keyring onboarding:
 
-1. Explicit process environment supplied by the MCP client.
-2. Documented non-secret defaults for provider endpoints and timing only.
-3. No provider selection default.
+1. When `WATERBOX_PROVIDER` is explicit, resolve that provider entirely from process environment; never mix persisted fields or a keyring secret.
+2. When it is absent, resolve the strictly validated persisted provider settings plus that provider's keyring secret.
+3. Provider-specific environment variables without `WATERBOX_PROVIDER` are a selection error, not an implicit provider or a mixed configuration.
+4. Documented non-secret defaults for provider endpoints and timing only; `WATERBOX_SQLITE_PATH` remains global.
 
-Waterbox does not read provider CLI login state, browser cookies, unrelated dotfiles, local files, or provider-specific credential stores in V0.
+Waterbox does not read provider CLI login state, browser cookies, unrelated dotfiles, or provider-specific credential stores in V0. It reads only its dedicated `waterbox` keyring entries and versioned non-secret configuration file.
 
 Provider selection is parsed before provider-specific fields. Unknown providers receive a stable unsupported-provider message. Missing credentials leave the MCP connected and produce setup guidance. Malformed non-secret configuration may reject provider initialization but must not corrupt MCP stdout.
 
@@ -929,6 +932,7 @@ Scope:
 - Add Apache-2.0 licensing and exact bundle closure notices, including Hono/OpenAPI/API/client dependencies.
 - Rewrite package and root documentation for the Fetch-backed local architecture and both providers.
 - Remove supported-path system-template documentation and scripts only after full Phase 4 live acceptance, including snapshot-sourced reinstall.
+- This phase now includes bounded native-keyring onboarding only: exact-pinned `@napi-rs/keyring@2.0.0` remains external to the bundle and is lazy-loaded; interactive setup never accepts CLI credential arguments; config is atomically persisted without secrets; and status/logout have safe missing-versus-inaccessible-store behavior. This does not complete the remaining package rename, legal, or broad documentation scope.
 
 Acceptance criteria:
 
@@ -936,6 +940,8 @@ Acceptance criteria:
 - The tarball contains only approved files; private workspace internals are bundled, not public APIs or source packages.
 - Package metadata, legal notices, and documentation are factual for Box and Vercel Sandbox, optional capabilities, and no hosted mode.
 - `server.json` is either valid for an owned namespace or omitted from the release tarball and explicitly deferred.
+- `waterbox` is the sole public executable: zero arguments remain stdio MCP with no non-MCP stdout, and explicit `setup`, `status`, and `logout` use terminal I/O. Missing configuration, native binding, or keyring access keeps MCP connected with provider-neutral setup guidance before local/provider activity.
+- Verification includes injected credential-store/config/prompt tests, native package platform and installed-tarball tests, and confirmation that no config/output/error contains a secret. Legal notice closure remains pending with the rest of Phase 8.
 
 Verification:
 

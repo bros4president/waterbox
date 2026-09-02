@@ -3,6 +3,7 @@ import { createRemoteApiBackend, WaterboxClient } from "@waterbox/client"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
 import { createMcpClient, type LocalProviderDiagnostic } from "./composition.ts"
 import { createWaterboxMcpServer } from "./server.ts"
+import type { ConfigStorage, CredentialStore } from "./onboarding.ts"
 
 export async function main(): Promise<void> {
   const diagnostics = process.env.WATERBOX_MCP_DIAGNOSTICS === "1"
@@ -40,9 +41,9 @@ function diagnosticMessage(error: unknown): string {
   return `Waterbox MCP diagnostic: ${messages.join(" <- ")}`
 }
 
-export async function createStartupClient(environment: Record<string, string | undefined> = process.env, diagnostic?: (event: LocalProviderDiagnostic) => void): Promise<WaterboxClient> {
+export async function createStartupClient(environment: Record<string, string | undefined> = process.env, diagnostic?: (event: LocalProviderDiagnostic) => void, onboarding: { storage?: ConfigStorage; credentials?: CredentialStore } = {}): Promise<WaterboxClient> {
   try {
-    return await createMcpClient(parseMcpConfig(environment), diagnostic)
+    return await createMcpClient(await parseMcpConfig(environment, undefined, onboarding), diagnostic)
   } catch (error) {
     if (!(error instanceof McpConfigurationError) && !(error instanceof Error && error.name === "UnsupportedMcpProviderError")) throw error
     return unavailableClient(error)
