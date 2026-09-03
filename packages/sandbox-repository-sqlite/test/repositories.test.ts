@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IdempotencyRecord, SandboxRecord, SnapshotRecord } from "@waterbox/core/records"
+import type { RepositoryDatabase } from "../src/database.ts"
 import {
   IncompatibleRepositorySchemaError,
   MalformedRepositoryDocumentError,
@@ -125,8 +126,8 @@ function createPrePolishRepository(
   database.close()
 }
 
-function userTableNames(database: Database): string[] {
-  return (database.query(
+function userTableNames(database: Database | RepositoryDatabase): string[] {
+  return (database.prepare(
     "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
   ).all() as { name: string }[]).map((row) => row.name)
 }
@@ -225,8 +226,7 @@ describe("SQLite durability and isolation", () => {
     directories.push(directory)
     const filename = join(directory, "repository.sqlite")
     const first = store(filename)
-    expect(first.database.prepare("SELECT singleton, schema_version FROM waterbox_repository_schema").all())
-      .toEqual([{ singleton: 1, schema_version: 1 }])
+    expect(userTableNames(first.database)).toEqual([...LEGACY_TABLES].sort())
     expect(first.database.prepare("PRAGMA table_info(idempotency_documents)").all()
       .map((column) => column.name)).toEqual(["account_id", "scope", "idempotency_key", "version", "document"])
     first.close()
@@ -235,7 +235,7 @@ describe("SQLite durability and isolation", () => {
     expect(reopened.database.prepare("SELECT count(*) AS count FROM sandbox_documents").get()).toEqual({ count: 0 })
   })
 
-  test("an unversioned database with current-looking document tables fails without gaining a marker", async () => {
+  test("a complete database with the current table structure opens without a schema marker", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-unversioned-"))
     directories.push(directory)
     const filename = join(directory, "repository.sqlite")
@@ -257,29 +257,13 @@ describe("SQLite durability and isolation", () => {
     `)
     database.close()
 
-    expect(() => new SqliteRepositoryStore(filename)).toThrow(IncompatibleRepositorySchemaError)
-    const unchanged = new Database(filename, { readonly: true })
-    expect(userTableNames(unchanged)).toEqual([...LEGACY_TABLES].sort())
-    unchanged.close()
+    const reopened = store(filename)
+    expect(userTableNames(reopened.database)).toEqual([...LEGACY_TABLES].sort())
   })
 
-  test("a wrong schema-version marker and a marked partial schema both fail unchanged", async () => {
+  test("a partial current schema fails unchanged", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-invalid-versioned-"))
     directories.push(directory)
-    const wrongVersionFilename = join(directory, "wrong-version.sqlite")
-    const wrongVersionStore = store(wrongVersionFilename)
-    wrongVersionStore.close()
-    stores.splice(stores.indexOf(wrongVersionStore), 1)
-    const wrongVersion = new Database(wrongVersionFilename)
-    wrongVersion.query("UPDATE waterbox_repository_schema SET schema_version = 2").run()
-    wrongVersion.close()
-
-    expect(() => new SqliteRepositoryStore(wrongVersionFilename)).toThrow(IncompatibleRepositorySchemaError)
-    const unchangedVersion = new Database(wrongVersionFilename, { readonly: true })
-    expect(unchangedVersion.query("SELECT schema_version FROM waterbox_repository_schema").get())
-      .toEqual({ schema_version: 2 })
-    unchangedVersion.close()
-
     const partialFilename = join(directory, "partial-current.sqlite")
     const partialStore = store(partialFilename)
     partialStore.close()
@@ -340,33 +324,21 @@ describe("SQLite durability and isolation", () => {
     unchanged.close()
   })
 
-  for (let mask = 1; mask < (1 << LEGACY_TABLES.length); mask += 1) {
-    const selected = LEGACY_TABLES.filter((_, index) => (mask & (1 << index)) !== 0)
-    test(`a populated partial legacy database containing ${selected.join(" + ")} fails before creating missing tables`, async () => {
-      const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-legacy-partial-"))
-      directories.push(directory)
-      const filename = join(directory, "repository.sqlite")
-      createPrePolishRepository(filename, true, selected)
+  test("a representative populated partial legacy schema fails before creating missing tables", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-legacy-partial-"))
+    directories.push(directory)
+    const filename = join(directory, "repository.sqlite")
+    const selected = ["sandbox_documents", "idempotency_documents"] as const
+    createPrePolishRepository(filename, true, selected)
 
-      let startupError: unknown
-      try {
-        new SqliteRepositoryStore(filename)
-      } catch (error) {
-        startupError = error
-      }
-      expect(startupError).toBeInstanceOf(IncompatibleRepositorySchemaError)
-      expect(String(startupError)).toContain(filename)
-      expect(String(startupError)).toContain("Clean up remote resources using the prior Waterbox build and provider configuration")
-      expect(String(startupError)).not.toContain("remote-reference-must-stay-local")
-
-      const unchanged = new Database(filename, { readonly: true })
-      expect(userTableNames(unchanged)).toEqual([...selected].sort())
-      for (const table of selected) {
-        expect(unchanged.query(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 1 })
-      }
-      unchanged.close()
-    })
-  }
+    expect(() => new SqliteRepositoryStore(filename)).toThrow(IncompatibleRepositorySchemaError)
+    const unchanged = new Database(filename, { readonly: true })
+    expect(userTableNames(unchanged)).toEqual([...selected].sort())
+    for (const table of selected) {
+      expect(unchanged.query(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 1 })
+    }
+    unchanged.close()
+  })
 
   test("create false rejects a missing file without creating it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-create-"))

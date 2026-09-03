@@ -139,45 +139,19 @@ export class InMemoryIdempotencyRepository implements IdempotencyRepository {
 
 }
 
-type InMemorySandboxCreationBoundary = { tail: Promise<void> }
-
-const inMemorySandboxCreationBoundaries = new WeakMap<
-  SandboxRepository,
-  WeakMap<IdempotencyRepository, InMemorySandboxCreationBoundary>
->()
-
-function sandboxCreationBoundary(
-  sandboxes: SandboxRepository,
-  idempotency: IdempotencyRepository,
-): InMemorySandboxCreationBoundary {
-  let byIdempotency = inMemorySandboxCreationBoundaries.get(sandboxes)
-  if (byIdempotency === undefined) {
-    byIdempotency = new WeakMap()
-    inMemorySandboxCreationBoundaries.set(sandboxes, byIdempotency)
-  }
-  let boundary = byIdempotency.get(idempotency)
-  if (boundary === undefined) {
-    boundary = { tail: Promise.resolve() }
-    byIdempotency.set(idempotency, boundary)
-  }
-  return boundary
-}
-
-/** A repository-pair-scoped serial transaction analogue for core tests. */
+/** An explicitly shared, per-instance serial transaction analogue for tests. */
 export class InMemorySandboxCreationRepository implements SandboxCreationRepository {
-  readonly #boundary: InMemorySandboxCreationBoundary
+  #tail = Promise.resolve()
 
   constructor(
     private readonly sandboxes: SandboxRepository,
     private readonly idempotency: IdempotencyRepository,
-  ) {
-    this.#boundary = sandboxCreationBoundary(sandboxes, idempotency)
-  }
+  ) {}
 
   async reserve(input: { sandbox: SandboxRecord; idempotency?: IdempotencyRecord }): Promise<SandboxCreationReservation> {
     let release!: () => void
-    const previous = this.#boundary.tail
-    this.#boundary.tail = new Promise<void>((resolve) => { release = resolve })
+    const previous = this.#tail
+    this.#tail = new Promise<void>((resolve) => { release = resolve })
     await previous
     try {
       if (input.idempotency !== undefined) {

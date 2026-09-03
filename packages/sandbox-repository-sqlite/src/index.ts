@@ -89,16 +89,8 @@ type IdempotencyDocumentRow = {
 type CursorPayload = { v: 1; after: string }
 type TableColumnRow = { name: string; type: string; notnull: number | bigint; pk: number | bigint }
 type TableListRow = { name: string; ncol: number | bigint; wr: number | bigint; strict: number | bigint }
-type SchemaVersionRow = { singleton: number | bigint; schema_version: number | bigint }
-
-const REPOSITORY_SCHEMA_VERSION = 1
-const REPOSITORY_SCHEMA_TABLE = "waterbox_repository_schema"
 
 const REPOSITORY_TABLE_COLUMNS = {
-  [REPOSITORY_SCHEMA_TABLE]: [
-    ["singleton", "INTEGER", 1, 1],
-    ["schema_version", "INTEGER", 1, 0],
-  ],
   sandbox_documents: [
     ["account_id", "TEXT", 1, 1],
     ["resource_id", "TEXT", 1, 2],
@@ -253,14 +245,7 @@ function hasCurrentRepositorySchema(database: RepositoryDatabase): boolean {
         && Number(column.pk) === expectedColumn[3]
     })
   })
-  if (!hasCurrentTables) return false
-
-  const versions = database.prepare(
-    `SELECT singleton, schema_version FROM ${REPOSITORY_SCHEMA_TABLE}`,
-  ).all() as SchemaVersionRow[]
-  return versions.length === 1
-    && Number(versions[0]?.singleton) === 1
-    && Number(versions[0]?.schema_version) === REPOSITORY_SCHEMA_VERSION
+  return hasCurrentTables
 }
 
 function waterboxTableNames(database: RepositoryDatabase): Set<string> {
@@ -281,12 +266,6 @@ function initializeFreshRepositorySchema(database: RepositoryDatabase): boolean 
       return current
     }
     database.exec(`
-      CREATE TABLE ${REPOSITORY_SCHEMA_TABLE} (
-        singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
-        schema_version INTEGER NOT NULL
-      ) WITHOUT ROWID;
-      INSERT INTO ${REPOSITORY_SCHEMA_TABLE} (singleton, schema_version)
-        VALUES (1, ${REPOSITORY_SCHEMA_VERSION});
       CREATE TABLE sandbox_documents (
         account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
         PRIMARY KEY (account_id, resource_id)

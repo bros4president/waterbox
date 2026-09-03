@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { assertCompleteFriendlyWords, assertSameBytes, assertTarballIdentity, captureTarballIdentity, inspectInstalledArtifacts, resolveOnlyPackedTarball } from "./verify-mcp-package.ts"
@@ -39,9 +39,9 @@ describe("MCP installed-artifact verifier", () => {
   test("accepts an installed executable through an aliased temporary parent", async () => {
     const { installDirectory, installedPackage, executableTarget } = await installedFixture()
     const artifacts = await inspectInstalledArtifacts(installDirectory, installedPackage)
-    expect(artifacts.executableTarget).toBe(executableTarget)
-    expect(artifacts.canonicalInstallDirectory).not.toBe(installDirectory)
-    expect(artifacts.canonicalInstalledPackage).not.toBe(installedPackage)
+    expect(artifacts.executableTarget).toBe(await realpath(executableTarget))
+    expect(artifacts.canonicalInstallDirectory).toBe(await realpath(installDirectory))
+    expect(artifacts.canonicalInstalledPackage).toBe(await realpath(installedPackage))
   })
 
   test("rejects an installed executable without executable mode", async () => {
