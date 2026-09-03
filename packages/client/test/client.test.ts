@@ -79,21 +79,22 @@ describe("remote backend", () => {
 
 describe("simple commands", () => {
   test("use canonical methods, paths, bodies, query and idempotency", async () => {
-    const replies = [sandbox(), sandbox("preparing"), sandbox("terminated"), { items: [snapshot] }, snapshot, { ...snapshot, state: "deleted" }]
-    const backend = new FakeBackend((_, index) => json(replies[index], index === 0 || index === 4 ? 201 : 200))
+    const replies = [sandbox(), sandbox("preparing"), sandbox("stopped"), sandbox("terminated"), { items: [snapshot] }, snapshot, { ...snapshot, state: "deleted" }]
+    const backend = new FakeBackend((_, index) => json(replies[index], index === 0 || index === 5 ? 201 : 200))
     const client = new WaterboxClient(backend)
     await client.createSandbox({}, { idempotencyKey: "key-1", signal })
     await client.probeSandbox({ sandboxId }, { signal })
+    expect((await client.stopSandbox({ sandboxId }, { signal })).state).toBe("stopped")
     await client.deleteSandbox({ sandboxId }, { signal })
     await client.listSnapshots({ cursor: "next value", limit: 3 }, { signal })
     await client.createSnapshot({ sandboxId, name: "checkpoint" }, { signal })
     await client.deleteSnapshot({ snapshotId }, { signal })
     expect(backend.requests.map(request => `${request.method} ${new URL(request.url).pathname}${new URL(request.url).search}`)).toEqual([
-      "POST /v1/sandboxes", `POST /v1/sandboxes/${sandboxId}/probe`, `DELETE /v1/sandboxes/${sandboxId}`,
+      "POST /v1/sandboxes", `POST /v1/sandboxes/${sandboxId}/probe`, `POST /v1/sandboxes/${sandboxId}/stop`, `DELETE /v1/sandboxes/${sandboxId}`,
       "GET /v1/snapshots?cursor=next+value&limit=3", `POST /v1/sandboxes/${sandboxId}/snapshots`, `DELETE /v1/snapshots/${snapshotId}`,
     ])
     expect(backend.requests[0]!.headers.get("idempotency-key")).toBe("key-1")
-    expect(await backend.requests[4]!.json()).toEqual({ name: "checkpoint" })
+    expect(await backend.requests[5]!.json()).toEqual({ name: "checkpoint" })
   })
 
   test("close calls its backend exactly once", async () => {
@@ -185,6 +186,21 @@ describe("safe errors and cancellation", () => {
     controller.abort(reason)
     expect(await pending.catch(value => value)).toBe(reason)
     expect(backend.requests).toHaveLength(1)
+  })
+
+  test("stop validates its response, preserves API errors, and propagates cancellation", async () => {
+    const apiError = { error: { code: "provider_failure", message: "Stopping failed", requestId: "req-stop" } }
+    const backend = new FakeBackend((_, index) => index === 0 ? json({ invalid: true }) : json(apiError, 502))
+    const client = new WaterboxClient(backend)
+    await expect(client.stopSandbox({ sandboxId }, { signal })).rejects.toBeInstanceOf(WaterboxClientError)
+    await expect(client.stopSandbox({ sandboxId }, { signal })).rejects.toMatchObject({ status: 502, code: "provider_failure", message: "Stopping failed" })
+
+    const controller = new AbortController()
+    const reason = new DOMException("stop cancelled", "AbortError")
+    const cancelled = new WaterboxClient(new FakeBackend(request => new Promise((_, reject) => request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true }))))
+      .stopSandbox({ sandboxId }, { signal: controller.signal })
+    controller.abort(reason)
+    expect(await cancelled.catch(value => value)).toBe(reason)
   })
 
   test("redacts transport failures", async () => {
@@ -342,6 +358,7 @@ describe("bounded parsing", () => {
     const cases: Array<(client: WaterboxClient) => Promise<unknown>> = [
       client => client.createSandbox({}, { idempotencyKey: "key", signal }),
       client => client.probeSandbox({ sandboxId }, { signal }),
+      client => client.stopSandbox({ sandboxId }, { signal }),
       client => client.deleteSandbox({ sandboxId }, { signal }),
       client => client.listSnapshots({}, { signal }),
       client => client.createSnapshot({ sandboxId }, { signal }),

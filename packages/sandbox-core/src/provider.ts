@@ -26,6 +26,15 @@ export interface ProviderSnapshotObservation {
   sourceSandbox?: ProviderSandboxObservation
 }
 
+/**
+ * A provider may attach an exact, resource-scoped observation to a rejected
+ * operation.  This deliberately carries no transport status or response body:
+ * adapters translate those details before crossing the provider boundary.
+ */
+export type ProviderKnownObservation =
+  | { resource: "sandbox"; observation: ProviderSandboxObservation }
+  | { resource: "snapshot"; observation: ProviderSnapshotObservation }
+
 export interface ProviderOperationInput {
   accountId: string
   providerRef: JsonValue
@@ -70,15 +79,24 @@ export interface ProviderConsumeSecureTransferInput extends ProviderOperationInp
   transferId: SecureTransferId
 }
 
-export type ProviderErrorKind = "failure" | "limit" | "ambiguous_execution" | "expired" | "consumed"
+/**
+ * Existing-resource lifecycle adapters use `failure` and `limit` only when
+ * they can prove that the requested mutation did not execute. Any transport
+ * loss, 5xx response, or invalid result after dispatch is
+ * `ambiguous_execution`. `known_state` and `exact_absence` communicate an
+ * exact observation, but do not by themselves establish dispatch certainty.
+ */
+export type ProviderErrorKind = "failure" | "limit" | "ambiguous_execution" | "expired" | "consumed" | "known_state" | "exact_absence"
 
 export class ProviderError extends Error {
   readonly kind: ProviderErrorKind
+  readonly knownObservation?: ProviderKnownObservation
 
-  constructor(kind: ProviderErrorKind, message: string, options?: ErrorOptions) {
+  constructor(kind: ProviderErrorKind, message: string, options?: ErrorOptions & { knownObservation?: ProviderKnownObservation }) {
     super(message, options)
     this.name = "ProviderError"
     this.kind = kind
+    this.knownObservation = options?.knownObservation
   }
 }
 

@@ -176,23 +176,29 @@ describe("shared Waterbox runtime backend", () => {
 
   test("uses an injected non-interactive path provisioner without a provider branch", async () => {
     const { infrastructure, backend } = await backendWith(input => {
+      if (input.script.startsWith("prepare-workspace")) return line("")
       if (input.script.includes("waterbox-bootstrap-installed")) return line("waterbox-bootstrap-installed\n")
       if (input.script.includes("waterbox-bootstrap")) return line(infrastructure.writes.length === 0 ? "waterbox-bootstrap-incomplete\n" : "waterbox-bootstrap-ok\n")
       throw new Error("unexpected command")
     })
     const runtimeProfile = {
-      workspacePath: "/workspace", artifactMode: 0o640 as const,
-      persistentPaths: { runtimeDirectory: "/runtime/waterbox", cliPath: "/runtime/waterbox/cli.js", launcherPath: "/runtime/waterbox/launch", manifestPath: "/runtime/waterbox/manifest.json", workspace: "/workspace" },
+      workspacePath: "/home/user/workspace", artifactMode: 0o640 as const,
+      persistentPaths: { runtimeDirectory: "/runtime/waterbox", cliPath: "/runtime/waterbox/cli.js", launcherPath: "/runtime/waterbox/launch", manifestPath: "/runtime/waterbox/manifest.json", workspace: "/home/user/workspace" },
       ephemeralPaths: { uploadStagingDirectory: "/staging", jobsDirectory: "/run/waterbox/bash-jobs" },
       requires: ["node-24", "rg", "absolute-workspace", "persistent-files", "detached-jobs"] as const,
       executableDiscovery: "PATH then adapter-validated absolute executable" as const,
       privilegeStrategy: "adapter-provided non-interactive capability" as const,
     }
-    const configured = new WaterboxSandboxBackend(infrastructure, { artifact, runtimeProfile, pathProvisioner: { provision: profile => `prepare-owned ${profile.persistentPaths.runtimeDirectory} ${profile.ephemeralPaths.jobsDirectory}` } })
+    const configured = new WaterboxSandboxBackend(infrastructure, { artifact, runtimeProfile, pathProvisioner: { prepareWorkspace: profile => `prepare-workspace ${profile.workspacePath}`, provision: profile => `prepare-owned ${profile.persistentPaths.runtimeDirectory} ${profile.ephemeralPaths.jobsDirectory}` } })
     await configured.prepareSandbox(sandboxInput)
+    expect(infrastructure.commands[0]).toMatchObject({ script: "prepare-workspace /home/user/workspace" })
+    expect(infrastructure.commands[0]?.cwd).toBe("/")
+    expect(infrastructure.commands.slice(1).every(command => command.cwd === "/home/user/workspace")).toBeTrue()
     const bootstrap = infrastructure.commands.find(command => command.script.includes("waterbox-bootstrap-installed"))?.script
     expect(bootstrap).toContain("prepare-owned /runtime/waterbox /run/waterbox/bash-jobs")
     expect(bootstrap).toContain("'/runtime/waterbox/cli.js'")
+    const launcher = Buffer.from(bootstrap?.match(/printf %s '([A-Za-z0-9+/=]+)' \| base64 -d > '\/runtime\/waterbox\/launch'/)?.[1] ?? "", "base64").toString("utf8")
+    expect(launcher).toContain("cd '/home/user/workspace'")
     expect(infrastructure.writes[0]?.path).toMatch(/^\/staging\/waterbox-runtime-/)
   })
 })

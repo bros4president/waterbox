@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto"
 import { type SandboxState, type SnapshotState } from "@waterbox/contracts"
-import { ProviderError, type SandboxProvider } from "@waterbox/core/provider"
+import { ProviderError, type ProviderSandboxObservation, type SandboxProvider } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
 import {
   WaterboxSandboxBackend,
@@ -24,7 +25,7 @@ import {
 } from "@waterbox/provider-runtime"
 
 export interface BoxProviderClock { now(): Date; sleep(milliseconds: number, signal: AbortSignal): Promise<void> }
-export interface BoxProviderConfig { apiBaseUrl: string; apiKey: string; polling: { intervalMs: number; timeoutMs: number } }
+export interface BoxProviderConfig { apiBaseUrl: string; apiKey: string; polling: { intervalMs: number; timeoutMs: number }; automaticStopMs?: number }
 export type { SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 export type BoxProviderFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 export type BoxProviderDiagnostic = RuntimeDiagnostic | { type: "tool-http-error"; status: number }
@@ -42,16 +43,16 @@ const READY = new Set<BoxState>(["ready", "idle"])
 const MAX_JSON_BYTES = 1_048_576
 const MAX_COMMAND_JSON_BYTES = 8_388_608
 
-/** Box's established runtime paths remain externally usable by Bash jobs. */
+/** Box snapshots retain /home/user; runtime files stay outside the user workspace. */
 export const BOX_RUNTIME_PROFILE: FullLinuxRuntimeProfile = {
-  workspacePath: "/workspace",
+  workspacePath: "/home/user/workspace",
   artifactMode: 0o640,
   persistentPaths: {
     runtimeDirectory: "/usr/local/lib",
     cliPath: "/usr/local/lib/waterbox-cli.js",
     launcherPath: "/usr/local/bin/waterbox",
     manifestPath: "/usr/local/lib/waterbox-bootstrap.json",
-    workspace: "/workspace",
+    workspace: "/home/user/workspace",
   },
   ephemeralPaths: { uploadStagingDirectory: "/tmp", jobsDirectory: "/run/waterbox/bash-jobs" },
   requires: ["node-24", "rg", "absolute-workspace", "persistent-files", "detached-jobs"],
@@ -109,11 +110,11 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   readonly #diagnostic?: (event: BoxProviderDiagnostic) => void
 
   constructor(config: BoxProviderConfig, dependencies: BoxInfrastructureDependencies) {
-    if (!exact(config, ["apiBaseUrl", "apiKey", "polling"]) || !exact(config.polling, ["intervalMs", "timeoutMs"]) || !nonempty(config.apiKey) || !Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs < 1 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs) throw new TypeError("Box provider configuration is invalid")
+    if (!exact(config, ["apiBaseUrl", "apiKey", "polling"], ["automaticStopMs"]) || !exact(config.polling, ["intervalMs", "timeoutMs"]) || !nonempty(config.apiKey) || !Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs < 1 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.automaticStopMs !== undefined && !automaticStopMilliseconds(config.automaticStopMs)) throw new TypeError("Box provider configuration is invalid")
     if (!exact(dependencies, ["clock"], ["fetch", "diagnostic"]) || !dependencies.clock || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function" || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function")) throw new TypeError("Box provider dependencies are invalid")
     const now = dependencies.clock.now()
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new TypeError("Box provider dependencies are invalid")
-    this.#config = { apiBaseUrl: url(config.apiBaseUrl), apiKey: config.apiKey, polling: { ...config.polling } }
+    this.#config = { apiBaseUrl: url(config.apiBaseUrl), apiKey: config.apiKey, polling: { ...config.polling }, ...(config.automaticStopMs === undefined ? {} : { automaticStopMs: config.automaticStopMs }) }
     this.#fetch = dependencies.fetch ?? fetch
     this.#clock = dependencies.clock
     this.#diagnostic = dependencies.diagnostic
@@ -122,14 +123,18 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async create(input: InfrastructureCreateInput): Promise<InfrastructureSandboxObservation> {
     assertCreateInput(input); input.signal.throwIfAborted()
     const source = input.sourceSnapshotRef === undefined ? {} : { from: snapshotRef(input.sourceSnapshotRef).name }
-    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId } }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
+    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId }, ...(this.#config.automaticStopMs === undefined ? {} : { ttlSeconds: this.#config.automaticStopMs / 1_000 }) }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
     return observation(mapSandboxState(ready.state), { kind: "box-sandbox-v2", boxId: ready.id })
   }
 
   async inspect(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    try { return observation(mapSandboxState(infoBox(await this.#json("GET", `/boxes/${segment(ref.boxId)}`, input.signal, { statuses: [200] }), ref.boxId).state), ref) }
+    try {
+      const initial = infoBox(await this.#json("GET", `/boxes/${segment(ref.boxId)}`, input.signal, { statuses: [200] }), ref.boxId)
+      const settled = initial.state === "archiving" ? await this.#waitStableInspection(initial, input.signal) : initial
+      return observation(mapSandboxState(settled.state), ref)
+    }
     catch (error) { if (error instanceof BoxHttpError && error.status === 404) return observation("terminated", ref); throw error }
   }
 
@@ -173,14 +178,24 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async #stop(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    const state = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/stop`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.stopping"))
-    return observation(mapSandboxState(state.state), ref)
+    const accepted = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/stop`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.stopping"))
+    try {
+      const stopped = await this.#waitStopped(accepted, input.signal, ref)
+      return observation(mapSandboxState(stopped.state), ref)
+    } catch (error) {
+      throw postDispatchStopError(error, ref)
+    }
   }
   async #resume(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    const state = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"), input.signal))
-    return observation(mapSandboxState(state.state), ref)
+    const accepted = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"))
+    try {
+      const ready = await this.#waitReady(accepted, input.signal, ref)
+      return observation(mapSandboxState(ready.state), ref)
+    } catch (error) {
+      throw postDispatchResumeError(error, ref)
+    }
   }
   async delete(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
@@ -195,7 +210,7 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   }
   async #createSnapshot(input: InfrastructureCreateSnapshotInput): Promise<InfrastructureSnapshotObservation> {
     const sandbox = sandboxRef(input.providerRef)
-    const name = await snapshotName(input.accountId, input.snapshotId)
+    const name = snapshotName(input.accountId, input.snapshotId)
     const source = infoBox(await this.#json("GET", `/boxes/${segment(sandbox.boxId)}`, input.signal, { statuses: [200] }), sandbox.boxId)
     if (mapSandboxState(source.state) !== "running") throw new ProviderError("failure", "The snapshot source is not running")
     try {
@@ -229,11 +244,39 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
     } catch (error) { if (error instanceof BoxHttpError && error.status === 404) return snapshotObservation("deleted", ref); throw error }
   }
 
-  async #waitReady(initial: BoxDto, signal: AbortSignal): Promise<BoxDto> {
+  async #waitReady(initial: BoxDto, signal: AbortSignal, resumeRef?: SandboxRef): Promise<BoxDto> {
     let current = initial
     const deadline = this.#now() + this.#config.polling.timeoutMs
     while (!READY.has(current.state)) {
-      if (current.state === "error" || current.state === "archived" || this.#now() >= deadline) throw new ProviderError("failure", "Box could not become ready")
+      if (current.state === "error" || current.state === "archived") {
+        if (resumeRef !== undefined) {
+          const observed = coreObservation(mapSandboxState(current.state), resumeRef)
+          throw new ProviderError(current.state === "error" ? "known_state" : "ambiguous_execution", "Box resume did not become ready", { knownObservation: { resource: "sandbox", observation: observed } })
+        }
+        throw new ProviderError("failure", "Box could not become ready")
+      }
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Box could not become ready")
+      await this.#clock.sleep(this.#config.polling.intervalMs, signal)
+      current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
+    }
+    return current
+  }
+  async #waitStopped(initial: BoxDto, signal: AbortSignal, ref: SandboxRef): Promise<BoxDto> {
+    let current = initial
+    const deadline = this.#now() + this.#config.polling.timeoutMs
+    while (current.state !== "archived") {
+      if (current.state === "error") throw new ProviderError("known_state", "Box could not stop", { knownObservation: { resource: "sandbox", observation: coreObservation("failed", ref) } })
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Box could not stop")
+      await this.#clock.sleep(this.#config.polling.intervalMs, signal)
+      current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
+    }
+    return current
+  }
+  async #waitStableInspection(initial: BoxDto, signal: AbortSignal): Promise<BoxDto> {
+    let current = initial
+    const deadline = this.#now() + this.#config.polling.timeoutMs
+    while (current.state === "archiving") {
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Box inspection did not settle")
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
       current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
     }
@@ -320,19 +363,39 @@ function deletion(value: unknown, type: string, target: string, expected?: strin
 function commandResult(value: unknown): { exitCode: number | null; stdout: string; stderr: string; timedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean } { if (!object(value) || value.ok !== true || value.type !== "command.finished" || typeof value.success !== "boolean" || (typeof value.exitCode !== "number" && value.exitCode !== null) || (value.success !== (value.exitCode === 0)) || typeof value.stdout !== "string" || typeof value.stderr !== "string" || typeof value.timedOut !== "boolean" || (value.stdoutTruncated !== undefined && typeof value.stdoutTruncated !== "boolean") || (value.stderrTruncated !== undefined && typeof value.stderrTruncated !== "boolean")) throw ambiguous(); return { exitCode: value.exitCode as number | null, stdout: value.stdout, stderr: value.stderr, timedOut: value.timedOut, stdoutTruncated: value.stdoutTruncated === true, stderrTruncated: value.stderrTruncated === true } }
 function writtenFile(value: unknown, path: string, size: number): void { const result = envelope(value, "file.written"); if (result.success !== true || typeof result.path !== "string" || new URL(result.path, "file:///home/user/").pathname !== path || result.encoding !== "base64" || result.size !== size) throw new ProviderError("failure", "Box returned an invalid file upload response") }
 function observation(state: SandboxState, providerRef: SandboxRef): InfrastructureSandboxObservation { return { state, providerRef } }
+function coreObservation(state: SandboxState, providerRef: SandboxRef): ProviderSandboxObservation { return { state, providerRef } }
 function snapshotObservation(state: SnapshotState, providerRef: SnapshotRef): InfrastructureSnapshotObservation { return { state, providerRef } }
 function mapSandboxState(state: BoxState): SandboxState { return READY.has(state) || state === "running" ? "running" : ["init", "provisioning", "provisioned", "cloning"].includes(state) ? "provisioning" : state === "archiving" ? "stopping" : state === "archived" ? "stopped" : "failed" }
 function mapSnapshotState(state: SnapshotStatus): SnapshotState { return state === "saving" ? "creating" : state }
 function ambiguous(): ProviderError { return new ProviderError("ambiguous_execution", "Box command outcome is unknown") }
 function ambiguousMutation(): ProviderError { return new ProviderError("ambiguous_execution", "Box mutation outcome is unknown") }
+function postDispatchStopError(error: unknown, ref: SandboxRef): ProviderError {
+  if (error instanceof ProviderError && error.knownObservation !== undefined) return error
+  if (error instanceof BoxHttpError && error.status === 404) {
+    return new ProviderError("exact_absence", "Box sandbox is absent after accepted stop", { knownObservation: { resource: "sandbox", observation: coreObservation("terminated", ref) } })
+  }
+  return new ProviderError("ambiguous_execution", "Box stop outcome is unknown")
+}
+function postDispatchResumeError(error: unknown, ref: SandboxRef): ProviderError {
+  if (error instanceof ProviderError && error.knownObservation !== undefined) return error
+  if (error instanceof BoxHttpError && error.status === 404) {
+    return new ProviderError("exact_absence", "Box sandbox is absent after accepted resume", { knownObservation: { resource: "sandbox", observation: coreObservation("terminated", ref) } })
+  }
+  return new ProviderError("ambiguous_execution", "Box resume outcome is unknown")
+}
 function meaningfulStderr(value: string): string { return value.replace(/^sh: 0: getcwd\(\) failed: No such file or directory\n?/, "") }
 function segment(value: string): string { return encodeURIComponent(value) }
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value === value.trim() }
 function url(value: unknown): string { if (!nonempty(value)) throw new TypeError("Box provider configuration is invalid"); try { const parsed = new URL(value); if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(); return parsed.href.replace(/\/+$/, "") } catch { throw new TypeError("Box provider configuration is invalid") } }
+function automaticStopMilliseconds(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value % 60_000 === 0 }
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value) }
 function exact(value: unknown, required: readonly string[], optional: readonly string[] = []): value is Record<string, any> { return object(value) && required.every(key => Object.hasOwn(value, key)) && Object.keys(value).every(key => required.includes(key) || optional.includes(key)) }
 function media(response: Response): void { if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw new Error("invalid media type") }
 async function safeError(response: Response, signal: AbortSignal): Promise<{ code: string; message: string }> { try { media(response); const value = await json(response, signal, MAX_JSON_BYTES); return object(value) && typeof value.code === "string" ? { code: value.code, message: typeof value.message === "string" ? value.message : "" } : { code: "", message: "" } } catch { return { code: "", message: "" } } }
 async function json(response: Response, signal: AbortSignal, maximum: number): Promise<unknown> { if (!response.body) throw new Error("missing body"); const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let length = 0, done = false; try { while (true) { signal.throwIfAborted(); const next = await reader.read(); if (next.done) { done = true; break } length += next.value.byteLength; if (length > maximum) throw new Error("response too large"); chunks.push(next.value) } } finally { if (!done) await reader.cancel().catch(() => undefined); reader.releaseLock() } const bytes = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength } return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
-async function snapshotName(accountId: string, snapshotId: string): Promise<string> { const hash = async (value: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).slice(0, 6)].map(byte => byte.toString(16).padStart(2, "0")).join(""); const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 8) || "id"; return `waterbox-${slug(accountId)}-${await hash(accountId)}-${slug(snapshotId)}-${await hash(snapshotId)}` }
+function snapshotName(accountId: string, snapshotId: string): string {
+  const hint = snapshotId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "snapshot"
+  const digest = createHash("sha256").update(accountId).update("\u0000").update(snapshotId).digest("hex").slice(0, 32)
+  return `waterbox-${hint}-${digest}`
+}
 export { loadSandboxRuntimeArtifact } from "@waterbox/provider-runtime"

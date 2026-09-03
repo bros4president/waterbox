@@ -1,7 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { SandboxSchema } from "../packages/sandbox-contracts/src/index.ts"
-import { createConfiguredEmbeddedApiBackend, parseLocalProviderConfiguration } from "../packages/control-plane-local/src/index.ts"
+import { parseAutomaticStopDuration, parseLocalProviderConfiguration } from "../packages/control-plane-local/src/index.ts"
 import { SystemVercelProviderClock, VercelSandboxInfrastructure, type VercelProviderConfig, type VercelProviderFetch } from "../packages/sandbox-provider-vercel/src/index.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -17,7 +16,7 @@ type Environment = Record<string, string | undefined>
 
 const runtime: McpRuntimeLayout = {
   workdir: "/workspace",
-  markerPath: "/workspace/vercel-direct-marker",
+  markerPath: "vercel-direct-marker",
   runtimeLauncher: "/workspace/.waterbox/waterbox",
   staleRuntimeCommand: "rm -f /workspace/.waterbox/waterbox-cli.js",
   restoredRuntimeCheck: "test -s /workspace/.waterbox/waterbox-cli.js && test -f /workspace/.waterbox/manifest.json",
@@ -62,6 +61,8 @@ export async function reconcileVercelBaseline(environment: Environment, baseline
 export async function runVercelMcpSmoke(environment: Environment = process.env): Promise<{ ok: true; flow: "vercel-mcp-smoke" }> {
   assertVercelMcpSmokeAuthorized(environment)
   required(environment.VERCEL_TOKEN, "VERCEL_TOKEN"); required(environment.VERCEL_TEAM_ID, "VERCEL_TEAM_ID"); required(environment.VERCEL_PROJECT_ID, "VERCEL_PROJECT_ID")
+  const automaticStopMs = parseAutomaticStopDuration(environment.WATERBOX_AUTO_STOP)
+  if (automaticStopMs === undefined) throw new Error("The Vercel MCP smoke requires WATERBOX_AUTO_STOP")
   const baseline = await readVercelBaseline(environment)
   const directory = await mkdtemp(join(tmpdir(), "waterbox-vercel-mcp-"))
   const localSecretPath = join(directory, "local-secret.bin")
@@ -78,7 +79,7 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
   const client = new Client({ name: "waterbox-vercel-smoke", version: "1" })
   try {
     await client.connect(transport)
-    await runDirectMcpProductFlow(client as DirectSmokeClient, { localSecretPath, runtime, log: console.log })
+    await runDirectMcpProductFlow(client as DirectSmokeClient, { localSecretPath, automaticStopMs, runtime, secrets: [environment.VERCEL_TOKEN!], log: console.log })
   } catch (error) {
     failure = error
   } finally {
@@ -87,7 +88,6 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
   try {
     if (failure === undefined) {
       const lifecycleEnvironment = { ...environment, WATERBOX_PROVIDER: "vercel", WATERBOX_SQLITE_PATH: join(directory, "lifecycle.sqlite") }
-      await runVercelStopResumeSmoke(lifecycleEnvironment)
       await runVercelNativeLifecycleSmoke(lifecycleEnvironment)
     }
   } catch (error) {
@@ -104,34 +104,6 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
   }
   if (failure !== undefined) throw new Error("Vercel MCP smoke failed; tracked cleanup or baseline reconciliation requires review")
   return { ok: true, flow: "vercel-mcp-smoke" }
-}
-
-/** Runs the optional lifecycle group through the configured embedded API. */
-export async function runVercelStopResumeSmoke(environment: Environment): Promise<void> {
-  const configured = parseLocalProviderConfiguration(environment)
-  const backend = await createConfiguredEmbeddedApiBackend(configured, new URL("../packages/mcp/dist/waterbox-cli.js", import.meta.url))
-  let sandboxId: string | undefined
-  try {
-    const signal = new AbortController().signal
-    const created = SandboxSchema.parse(await responseJson(await backend.fetch(new Request(new URL("/v1/sandboxes", backend.origin), { method: "POST", headers: { "content-type": "application/json", "idempotency-key": `vercel-lifecycle-${crypto.randomUUID()}` }, body: "{}", signal })), 201))
-    sandboxId = created.sandboxId
-    console.log(JSON.stringify({ stage: "stop-resume-created", running: created.state === "running" }))
-    const stopped = SandboxSchema.parse(await responseJson(await backend.fetch(new Request(new URL(`/v1/sandboxes/${encodeURIComponent(sandboxId)}/stop`, backend.origin), { method: "POST", signal })), 200))
-    if (stopped.state !== "stopped") throw new Error("Vercel stop result was invalid")
-    console.log(JSON.stringify({ stage: "stop-resume-stopped", stopped: true }))
-    const resumed = SandboxSchema.parse(await responseJson(await backend.fetch(new Request(new URL(`/v1/sandboxes/${encodeURIComponent(sandboxId)}/resume`, backend.origin), { method: "POST", signal })), 200))
-    if (resumed.state !== "running") throw new Error("Vercel resume result was invalid")
-    console.log(JSON.stringify({ stage: "stop-resume", stopped: true, resumed: true, automaticSnapshotCleanup: true }))
-  } finally {
-    if (sandboxId !== undefined) {
-      try {
-        const result = await backend.fetch(new Request(new URL(`/v1/sandboxes/${encodeURIComponent(sandboxId)}`, backend.origin), { method: "DELETE" }))
-        if (result.status !== 200) throw new Error("Vercel lifecycle tracked deletion failed")
-        console.log(JSON.stringify({ stage: "cleanup", lifecycleSandboxDeleted: true }))
-      } catch { throw new Error("Vercel lifecycle tracked cleanup requires review") }
-    }
-    await backend.close().catch(() => {})
-  }
 }
 
 /**
@@ -306,10 +278,6 @@ async function boundedJson(response: Response): Promise<unknown> {
   return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes))
 }
 
-async function responseJson(response: Response, status: number): Promise<unknown> {
-  if (response.status !== status) { const actual = response.status; await response.body?.cancel().catch(() => {}); throw new Error(`Embedded lifecycle request failed (${actual})`) }
-  return boundedJson(response)
-}
 function equal(left: Set<string>, right: Set<string>): boolean { return left.size === right.size && [...left].every(value => right.has(value)) }
 function required(value: string | undefined, key: string): string { if (typeof value !== "string" || value.trim() === "") throw new Error(`${key} is required`); return value }
 function positive(value: string | undefined, fallback: number): number { if (value === undefined) return fallback; const number = Number(value); if (!Number.isSafeInteger(number) || number < 1) throw new Error("Vercel smoke reconciliation configuration is invalid"); return number }

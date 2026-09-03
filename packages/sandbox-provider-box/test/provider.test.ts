@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId } from "@waterbox/contracts"
 import { SandboxService } from "@waterbox/core"
-import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { decodeInvocation } from "@waterbox/cli/protocol"
 import { createHash } from "node:crypto"
 import { BOX_RUNTIME_PATH_PROVISIONER, BOX_RUNTIME_PROFILE, BoxSandboxInfrastructure, BoxSandboxProvider, type BoxProviderClock } from "../src/index.ts"
@@ -42,11 +42,95 @@ describe("Box primitive contracts", () => {
     expect(requests[0]!.headers.get("idempotency-key")).toBe("create-once")
   })
 
+  test("sends ttlSeconds only for a configured automatic stop", async () => {
+    const requests: Request[] = []
+    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, {
+      clock: new Clock(),
+      fetch: async (input, init) => {
+        const request = new Request(input, init); requests.push(request)
+        return request.method === "POST"
+          ? Response.json({ ok: true, type: "box.created", status: "provisioning", box: { id: "bx_23456789", state: "provisioning" } }, { status: 202 })
+          : box("ready")
+      },
+    })
+    await value.create({ accountId: "account", sandboxId: "sbx_calm-cactus-7k3m" as never, idempotencyKey: "create-auto-stop", signal: signal() })
+    expect(await requests[0]!.json()).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" }, ttlSeconds: 5_400 })
+  })
+
+  test("maps a longest Friendly Words snapshot ID to one readable 128-bit composite Box name", async () => {
+    const snapshotId = "snap_quintessential-quintessential-gigantspinosaurus" as never
+    let name: string | undefined
+    const { value } = infrastructure(async request => {
+      if (request.method === "GET") return box("ready")
+      const body = await request.json() as { name: string }
+      name = body.name
+      return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name: body.name, sourceBoxId: sandboxRef.boxId, status: "saving" } }, { status: 202 })
+    })
+    await expect(value.snapshots.create({ accountId: "account", snapshotId, providerRef: sandboxRef, expectedState: "running", signal: signal() })).resolves.toMatchObject({ state: "creating" })
+    const digest = createHash("sha256").update("account").update("\u0000").update(snapshotId).digest("hex").slice(0, 32)
+    expect(name).toBe(`waterbox-snap-quintes-${digest}`)
+    expect(name).toMatch(/^[a-z0-9][a-z0-9-]{0,62}$/)
+    expect(name!.length).toBeLessThanOrEqual(63)
+  })
+
+  test("binds Box snapshot names to the account and full ID beyond their shared readable hint", async () => {
+    const firstId = "snap_quintessential-quintessential-gigantspinosaurus" as never
+    const secondId = "snap_quintessential-quintessential-giganotosaurus" as never
+    const names: string[] = []
+    const { value } = infrastructure(async request => {
+      if (request.method === "GET") return box("ready")
+      const body = await request.json() as { name: string }
+      names.push(body.name)
+      return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name: body.name, sourceBoxId: sandboxRef.boxId, status: "saving" } }, { status: 202 })
+    })
+    await value.snapshots.create({ accountId: "account", snapshotId: firstId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    await value.snapshots.create({ accountId: "account", snapshotId: secondId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    await value.snapshots.create({ accountId: "other-account", snapshotId: firstId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    expect(new Set(names).size).toBe(3)
+    expect(names.every(name => name.startsWith("waterbox-snap-quintes-"))).toBeTrue()
+  })
+
+  test("reconciles a lost Box snapshot response through the same name persisted for inspect and delete", async () => {
+    const snapshotId = "snap_silver-forest-2p9x" as never
+    const paths: string[] = []
+    let expectedName = ""
+    const { value } = infrastructure(async request => {
+      const path = new URL(request.url).pathname
+      paths.push(`${request.method} ${path}`)
+      if (request.method === "GET" && path.includes("/boxes/")) return box("ready")
+      if (request.method === "POST") {
+        expectedName = (await request.json() as { name: string }).name
+        throw new TypeError("snapshot response lost")
+      }
+      if (request.method === "GET") return Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name: expectedName, sourceBoxId: sandboxRef.boxId, status: "ready", snapshotId: "native-snapshot" } })
+      if (request.method === "DELETE") return Response.json({ ok: true, type: "snapshot.named.deleted", name: expectedName, status: "deleted" })
+      throw new Error("unexpected request")
+    })
+    const created = await value.snapshots.create({ accountId: "account", snapshotId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    expect(created).toEqual({ state: "ready", providerRef: { kind: "box-named-snapshot-v2", name: expectedName } })
+    await expect(value.snapshots.inspect({ accountId: "account", snapshotId, providerRef: created.providerRef, signal: signal() })).resolves.toMatchObject({ state: "ready" })
+    await expect(value.snapshots.delete({ accountId: "account", snapshotId, providerRef: created.providerRef, signal: signal() })).resolves.toMatchObject({ state: "deleted" })
+    const encoded = encodeURIComponent(expectedName)
+    expect(paths.filter(path => path.endsWith(`/named-snapshots/${encoded}`))).toEqual([
+      `GET /v1/named-snapshots/${encoded}`,
+      `GET /v1/named-snapshots/${encoded}`,
+      `DELETE /v1/named-snapshots/${encoded}`,
+    ])
+  })
+
   test("keeps exact inspection side-effect free and preserves persisted references", async () => {
     const { value, requests } = infrastructure(() => Response.json({ code: "not_found" }, { status: 404 }))
     await expect(value.inspect({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "terminated", providerRef: sandboxRef })
     expect(requests).toHaveLength(1)
     expect(requests[0]!.method).toBe("GET")
+  })
+
+  test("waits through automatic archiving during exact inspection", async () => {
+    let polls = 0
+    const { value, requests } = infrastructure(() => box(++polls === 1 ? "archiving" : "archived"))
+
+    await expect(value.inspect({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "stopped", providerRef: sandboxRef })
+    expect(requests.map(request => request.method)).toEqual(["GET", "GET"])
   })
 
   test("reports lost responses for every dispatched sandbox mutation as ambiguous without changing read failures", async () => {
@@ -73,6 +157,62 @@ describe("Box primitive contracts", () => {
     await expect(stopped.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     await expect(resumed.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     await expect(deleted.delete({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
+  })
+
+  test("polls an accepted stop to exact archived completion", async () => {
+    const { value, requests } = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+      : box("archived"))
+
+    await expect(value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "stopped", providerRef: sandboxRef })
+    expect(requests.map(request => request.method)).toEqual(["POST", "GET"])
+  })
+
+  test("distinguishes definite stop rejection from polling failures after acceptance", async () => {
+    for (const status of [400, 429]) {
+      const rejected = infrastructure(() => Response.json({ code: "rejected" }, { status }))
+      await expect(rejected.value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `pre-dispatch ${status}`).rejects.toMatchObject({ kind: "failure" })
+      expect(rejected.requests, `pre-dispatch ${status}`).toHaveLength(1)
+
+      const accepted = infrastructure(request => request.method === "POST"
+        ? Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+        : Response.json({ code: "poll_rejected" }, { status }))
+      await expect(accepted.value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `post-dispatch ${status}`).rejects.toMatchObject({ kind: "ambiguous_execution" })
+      expect(accepted.requests.map(request => request.method), `post-dispatch ${status}`).toEqual(["POST", "GET"])
+    }
+  })
+
+  test("distinguishes definite resume rejection from polling failures after acceptance", async () => {
+    for (const status of [400, 429]) {
+      const rejected = infrastructure(() => Response.json({ code: "rejected" }, { status }))
+      await expect(rejected.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `pre-dispatch ${status}`).rejects.toMatchObject({ kind: "failure" })
+      expect(rejected.requests, `pre-dispatch ${status}`).toHaveLength(1)
+
+      const accepted = infrastructure(request => request.method === "POST"
+        ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+        : Response.json({ code: "poll_rejected" }, { status }))
+      await expect(accepted.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `post-dispatch ${status}`).rejects.toMatchObject({ kind: "ambiguous_execution" })
+      expect(accepted.requests.map(request => request.method), `post-dispatch ${status}`).toEqual(["POST", "GET"])
+    }
+
+    const terminalFailure = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      : box("error"))
+    await expect(terminalFailure.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "known_state", knownObservation: { resource: "sandbox", observation: { state: "failed", providerRef: sandboxRef } } })
+
+    const terminalAbsence = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      : Response.json({}, { status: 404 }))
+    await expect(terminalAbsence.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "exact_absence", knownObservation: { resource: "sandbox", observation: { state: "terminated", providerRef: sandboxRef } } })
+  })
+
+  test("uses only bounded native readiness polling after accepted resume", async () => {
+    const { value, requests } = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      : box("ready"))
+
+    await expect(value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "running", providerRef: sandboxRef })
+    expect(requests.map(request => request.method)).toEqual(["POST", "GET"])
   })
 
   test("classifies every dispatched lifecycle response that cannot prove its result as ambiguous without retrying", async () => {
@@ -226,15 +366,19 @@ describe("Box primitive contracts", () => {
     })
     const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository()
+    const snapshots = new InMemorySnapshotRepository()
+    const idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" })
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" })
     const service = new SandboxService({
       sandboxes,
-      snapshots: new InMemorySnapshotRepository(),
-      idempotency: new InMemoryIdempotencyRepository(),
+      snapshots,
+      idempotency,
+      sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
+      providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       clock: new FixedClock(),
       ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]),
     })
@@ -245,6 +389,92 @@ describe("Box primitive contracts", () => {
 })
 
 describe("assembled Box compatibility", () => {
+  test("returns exact stopped completion and enables one subsequent delete", async () => {
+    let stopDispatches = 0
+    let deleteDispatches = 0
+    const operationId = `bdop_${"a".repeat(32)}`
+    const { fetch } = infrastructure(request => {
+      const path = new URL(request.url).pathname
+      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/stop`)) {
+        stopDispatches++
+        return Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+      }
+      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) return box("archived")
+      if (request.method === "DELETE" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) {
+        deleteDispatches++
+        return Response.json({ ok: true, type: "box.deleting", operation: { id: operationId, kind: "box", targetId: sandboxRef.boxId, status: "pending" } }, { status: 202 })
+      }
+      if (request.method === "GET" && path.endsWith(`/deletion-operations/${operationId}`)) return Response.json({ ok: true, type: "deletion.operation", operation: { id: operationId, kind: "box", targetId: sandboxRef.boxId, status: "completed" } })
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.stopSandbox(identity, sandboxId)).resolves.toMatchObject({ state: "stopped" })
+    await expect(service.deleteSandbox(identity, sandboxId)).resolves.toMatchObject({ state: "terminated" })
+    expect(stopDispatches).toBe(1)
+    expect(deleteDispatches).toBe(1)
+  })
+
+  test("retains stopping after accepted stop polling ambiguity without redispatch", async () => {
+    let stopDispatches = 0
+    let reads = 0
+    const { fetch } = infrastructure(request => {
+      const path = new URL(request.url).pathname
+      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/stop`)) {
+        stopDispatches++
+        return Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+      }
+      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) {
+        reads++
+        return reads === 1 ? Response.json({ code: "rate_limited" }, { status: 429 }) : box("ready")
+      }
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.stopSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "ambiguous_execution" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("stopping")
+    await expect(service.stopSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "invalid_state" })
+    expect(stopDispatches).toBe(1)
+  })
+
+  test("retains resuming after an accepted resume hits a polling limit without redispatch", async () => {
+    let resumeDispatches = 0
+    let reads = 0
+    const { fetch } = infrastructure(request => {
+      if (request.method === "POST" && new URL(request.url).pathname.endsWith(`/boxes/${sandboxRef.boxId}/resume`)) {
+        resumeDispatches++
+        return Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      }
+      if (request.method === "GET") {
+        reads++
+        return reads === 1 ? Response.json({ code: "rate_limited" }, { status: 429 }) : box("archived")
+      }
+      throw new Error("unexpected Box request")
+    })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "stopped", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.resumeSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "ambiguous_execution" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("resuming")
+    expect((await service.getSandbox(identity, sandboxId)).state).toBe("resuming")
+    expect(resumeDispatches).toBe(1)
+  })
+
   test("maps an omitted native snapshot source observation without changing the durable source", async () => {
     const { fetch } = infrastructure(async request => {
       const path = new URL(request.url).pathname
@@ -256,11 +486,11 @@ describe("assembled Box compatibility", () => {
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
-    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository()
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]) })
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]) })
 
     const created = await service.createSnapshot(identity, sandboxId, {})
     expect(created).toMatchObject({ state: "ready" })
@@ -292,8 +522,8 @@ describe("assembled Box compatibility", () => {
       "#!/bin/sh",
       "set -eu",
       "test -d '/run/waterbox/bash-jobs'",
-      "cd '/workspace'",
-      "exec sudo -n env WORKSPACE_ROOT='/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"",
+      "cd '/home/user/workspace'",
+      "exec sudo -n env WORKSPACE_ROOT='/home/user/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"",
       "",
     ].join("\n"))
     expect(installer).toContain("install -m 0644 '/tmp/waterbox-runtime-")
@@ -332,12 +562,14 @@ describe("assembled Box compatibility", () => {
     expect(BOX_RUNTIME_PATH_PROVISIONER.provision(profile)).toBe([
       "uid=$(id -u); gid=$(id -g)",
       "sudo -n true",
-      "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/workspace'",
+      "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/home/user/workspace'",
       "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/usr/local/lib'",
       "sudo -n install -d -m 0755 -o \"$uid\" -g \"$gid\" '/usr/local/bin'",
       "sudo -n install -d -m 0700 '/run/waterbox/bash-jobs'",
     ].join("\n"))
-    expect(BOX_RUNTIME_PATH_PROVISIONER.launch?.(profile)).toBe("sudo -n env WORKSPACE_ROOT='/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"" )
+    expect(profile.workspacePath).toBe("/home/user/workspace")
+    expect(profile.persistentPaths.workspace).toBe("/home/user/workspace")
+    expect(BOX_RUNTIME_PATH_PROVISIONER.launch?.(profile)).toBe("sudo -n env WORKSPACE_ROOT='/home/user/workspace' /usr/local/bin/node '/usr/local/lib/waterbox-cli.js' \"$@\"" )
   })
 
   test("routes canonical MCP tool invocations, ciphertext transfer, and Bash observation through the configured Box composition", async () => {
@@ -362,7 +594,7 @@ describe("assembled Box compatibility", () => {
         { type: "result", title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
         { type: "result", title: "glob", output: "", metadata: { pattern: "*", path: ".", count: 0, truncated: false } },
         { type: "result", title: "grep", output: "", metadata: { pattern: "x", path: ".", matches: 0, truncated: false } },
-        { type: "result", title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
+        { type: "result", title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/home/user/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
       ]
       return command(JSON.stringify(events[toolIndex++]) + "\n")
     })

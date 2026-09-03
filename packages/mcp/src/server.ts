@@ -20,18 +20,19 @@ const SendFileInputSchema = z.object({ sandboxId: SandboxIdSchema, sourcePath: z
 const tools: Tool[] = [
   tool("create_sandbox", "Creates a Waterbox sandbox. Reuse idempotencyKey to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
   tool("probe_sandbox", "Queries the provider for live sandbox status and reconciles the observed state into Waterbox.", SandboxInputSchema),
+  tool("stop_sandbox", "Ends current compute while preserving resumable sandbox state, subject to provider behavior.", SandboxInputSchema),
   tool("delete_sandbox", "Permanently deletes a user-owned Waterbox sandbox.", SandboxInputSchema),
   tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", CursorPaginationRequestSchema),
   tool("create_snapshot", "Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.", CreateSnapshotInputSchema),
   tool("delete_snapshot", "Permanently deletes a user-owned Waterbox snapshot.", SnapshotInputSchema),
   tool("send_file_securely", "Encrypts and transfers an existing local file to a sandbox without placing its contents in model context or tool arguments. The destination file is decrypted and readable inside the sandbox; avoid reading sensitive destination contents back into model context. The source file is not modified or deleted.", SendFileInputSchema),
-  tool("read", "Reads any file or lists any directory in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.read),
-  tool("write", "Writes complete file contents anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.write),
-  tool("edit", "Replaces exact text in any file in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.edit),
-  tool("patch", "Applies a Begin Patch formatted patch anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.patch),
-  tool("glob", "Finds paths by glob pattern anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.glob),
-  tool("grep", "Searches file contents anywhere in the specified Waterbox sandbox. Relative paths start at /workspace.", ARGUMENT_SCHEMAS.grep),
-  tool("bash", "Runs unrestricted bash as root in the specified Waterbox sandbox, never on the local machine. The default working directory is /workspace.", ARGUMENT_SCHEMAS.bash, BashToolResultSchema),
+  tool("read", "Reads any file or lists any directory in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.read),
+  tool("write", "Writes complete file contents anywhere in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.write),
+  tool("edit", "Replaces exact text in any file in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.edit),
+  tool("patch", "Applies a Begin Patch formatted patch anywhere in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.patch),
+  tool("glob", "Finds paths by glob pattern anywhere in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.glob),
+  tool("grep", "Searches file contents anywhere in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.grep),
+  tool("bash", "Runs unrestricted bash as root in the specified Waterbox sandbox, never on the local machine. The default working directory is the sandbox workspace.", ARGUMENT_SCHEMAS.bash, BashToolResultSchema),
 ]
 
 export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: () => void }, options: { onError?: (error: unknown) => void } = {}): Server {
@@ -45,6 +46,7 @@ export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: (
       } }) }
       if (request.params.name === "create_sandbox") { const { idempotencyKey, ...input } = CreateSandboxInputSchema.parse(request.params.arguments ?? {}); return text(SandboxSchema.parse(await client.createSandbox(input, { ...context, idempotencyKey }))) }
       if (request.params.name === "probe_sandbox") return text(SandboxSchema.parse(await client.probeSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
+      if (request.params.name === "stop_sandbox") return text(SandboxSchema.parse(await client.stopSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "delete_sandbox") return text(SandboxSchema.parse(await client.deleteSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "list_snapshots") return text(SnapshotPageSchema.parse(await client.listSnapshots(CursorPaginationRequestSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "create_snapshot") return text(SnapshotSchema.parse(await client.createSnapshot(CreateSnapshotInputSchema.parse(request.params.arguments ?? {}), context)))

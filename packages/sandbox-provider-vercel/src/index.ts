@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { gzipSync } from "node:zlib"
-import { ProviderError, type SandboxProvider } from "@waterbox/core/provider"
+import { ProviderError, type ProviderSandboxObservation, type SandboxProvider } from "@waterbox/core/provider"
 import {
   FULL_LINUX_RUNTIME_PROFILE,
   MAX_COMMAND_OUTPUT_BYTES,
@@ -36,6 +36,7 @@ export interface VercelProviderConfig {
   teamId: string
   projectId: string
   polling: { intervalMs: number; timeoutMs: number; requestTimeoutMs: number }
+  automaticStopMs?: number
 }
 export interface VercelInfrastructureDependencies { fetch?: VercelProviderFetch; clock: VercelProviderClock; diagnostic?: (event: VercelProviderDiagnostic) => void }
 export type VercelProviderDiagnostic = { type: "http"; operation: "read" | "mutation"; status: number } | { type: "command-log-invalid" }
@@ -56,6 +57,14 @@ export const VERCEL_RUNTIME_PROFILE: FullLinuxRuntimeProfile = FULL_LINUX_RUNTIM
  * than a provider conditional in the shared runtime.
  */
 export const VERCEL_RUNTIME_PATH_PROVISIONER: RuntimePathProvisioner = {
+  prepareWorkspace(profile) {
+    return [
+      "set -eu",
+      "uid=$(id -u); gid=$(id -g)",
+      "if test \"$uid\" = 0; then install_bin=install; else sudo -n true; install_bin='sudo -n install'; fi",
+      `$install_bin -d -m 0755 -o \"$uid\" -g \"$gid\" ${quote(profile.workspacePath)}`,
+    ].join("\n")
+  },
   provision(profile) {
     return [
       "uid=$(id -u); gid=$(id -g)",
@@ -109,7 +118,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     if (!dependencies || !dependencies.clock || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function" || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function")) throw new TypeError("Vercel provider dependencies are invalid")
     const now = dependencies.clock.now()
     if (!Number.isFinite(now)) throw new TypeError("Vercel provider dependencies are invalid")
-    this.#config = { ...config, apiOrigin: normalizedOrigin(config.apiOrigin), polling: { ...config.polling } }
+    this.#config = { ...config, apiOrigin: normalizedOrigin(config.apiOrigin), polling: { ...config.polling }, ...(config.automaticStopMs === undefined ? {} : { automaticStopMs: config.automaticStopMs }) }
     this.#fetch = dependencies.fetch ?? fetch
     this.#clock = dependencies.clock
     this.#diagnostic = dependencies.diagnostic
@@ -122,10 +131,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     const body = {
       name, projectId: this.#config.projectId, persistent: true,
       tags: { [OWNER_TAG]: owner, [ACCOUNT_TAG]: account },
-      // A finite Vercel-wide snapshot expiry bounds provider storage. We do
-      // not configure keepLastSnapshots because that policy also evicts
-      // explicit Waterbox snapshots; targeted automatic cleanup stays below.
-      snapshotExpiration: 86_400_000,
+      ...(this.#config.automaticStopMs === undefined ? {} : { timeout: this.#config.automaticStopMs }),
       ...(input.sourceSnapshotRef === undefined ? {} : { source: { type: "snapshot", snapshotId: snapshotRef(input.sourceSnapshotRef).id } }),
     }
     try {
@@ -145,9 +151,20 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
   }
 
   async inspect(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
-    input.signal.throwIfAborted(); const value = sandboxRef(input.providerRef)
-    try { return observation(await this.#inspectNamed(value.name, value.owner, value.account, input.signal), value) }
-    catch (error) { if (error instanceof VercelHttpError && error.status === 404) return { state: "terminated", providerRef: value }; throw error }
+    input.signal.throwIfAborted(); const value = sandboxRef(input.providerRef), deadline = this.#deadline()
+    while (true) {
+      let current: NativeSandbox
+      try { current = await this.#inspectNamed(value.name, value.owner, value.account, input.signal) }
+      catch (error) { if (error instanceof VercelHttpError && error.status === 404) return { state: "terminated", providerRef: value }; throw error }
+      // Vercel's automatic shutdown may expose its native stopping and
+      // snapshotting phases. They are provider implementation details, not
+      // Waterbox lifecycle checkpoints: only an explicit Waterbox mutation
+      // owns the durable `stopping` state. Keep polling this exact owned name
+      // without resume until Vercel supplies an authoritative stable shape.
+      if (!automaticStopTransient(current.status)) return observation(current, value)
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Vercel sandbox inspection did not reach a stable state")
+      await this.#clock.sleep(this.#config.polling.intervalMs, input.signal)
+    }
   }
 
   async runCommand(input: InfrastructureCommandInput): Promise<InfrastructureCommandResult> {
@@ -156,20 +173,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     let commandId: string
     try {
       const body = { command: "/bin/sh", args: ["-c", input.script], ...(input.cwd === undefined ? {} : { cwd: input.cwd }), env: input.environment ?? {}, sudo: false, timeout: input.timeoutMs }
-      let created: unknown
-      try {
-        created = await this.#json("POST", `/v2/sandboxes/sessions/${segment(native.sessionId)}/cmd`, input.signal, { query: { teamId: this.#config.teamId }, body, mutation: true })
-      } catch (error) {
-        // A new Vercel sandbox rejects a non-existent cwd before dispatch.
-        // The shared full-Linux profile deliberately uses /workspace, which
-        // the installation command creates. A definite 400 is the only
-        // proven pre-dispatch case, so one equivalent default-cwd submission
-        // is safe; losses, 5xx, and every other mutation outcome are never
-        // replayed.
-        if (!(error instanceof VercelHttpError && error.status === 400 && input.cwd === "/workspace")) throw error
-        const { cwd: _cwd, ...defaultCwdBody } = body
-        created = await this.#json("POST", `/v2/sandboxes/sessions/${segment(native.sessionId)}/cmd`, input.signal, { query: { teamId: this.#config.teamId }, body: defaultCwdBody, mutation: true })
-      }
+      const created = await this.#json("POST", `/v2/sandboxes/sessions/${segment(native.sessionId)}/cmd`, input.signal, { query: { teamId: this.#config.teamId }, body, mutation: true })
       commandId = command(created, native.sessionId).id
     } catch (error) { throw mutationError(error, "Vercel command outcome is unknown") }
     try {
@@ -207,13 +211,21 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
 
   async #resume(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted(); const value = sandboxRef(input.providerRef)
+    let started: NativeSandbox
     try {
-      const started = await this.#inspectNamed(value.name, value.owner, value.account, input.signal, true, true)
+      started = await this.#inspectNamed(value.name, value.owner, value.account, input.signal, true, true)
+    } catch (error) {
+      throw mutationError(error, "Vercel resume outcome is unknown")
+    }
+    try {
       if (started.status === "running") return observation(started, value)
+      const terminal = resumeTerminalError(started, value)
+      if (terminal !== undefined) throw terminal
       const ready = await this.#waitResumed(value, input.signal)
       return observation(ready, value)
+    } catch (error) {
+      throw postDispatchResumeError(error, value)
     }
-    catch (error) { throw mutationError(error, "Vercel resume outcome is unknown") }
   }
 
   async delete(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
@@ -343,7 +355,8 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     while (true) {
       const current = await this.#inspectNamed(value.name, value.owner, value.account, signal)
       if (current.status === "running") return current
-      if (current.status === "failed" || current.status === "aborted" || current.status === "stopped") throw new ProviderError("failure", "Vercel sandbox could not resume")
+      const terminal = resumeTerminalError(current, value)
+      if (terminal !== undefined) throw terminal
       if (this.#now() >= deadline) throw ambiguous("Vercel resume outcome is unknown")
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
     }
@@ -502,8 +515,9 @@ export class VercelSandboxProvider implements SandboxProvider {
 
 class VercelHttpError extends ProviderError { constructor(readonly status: number) { super("failure", `Vercel request failed (${status})`) } }
 class VercelAmbiguousError extends ProviderError { constructor(message: string, readonly createReconciliationAllowed = false) { super("ambiguous_execution", message) } }
-function isConfig(value: unknown): value is VercelProviderConfig { return record(value) && exact(value, ["apiOrigin", "token", "teamId", "projectId", "polling"]) && strings(value.apiOrigin, value.token, value.teamId, value.projectId) && record(value.polling) && exact(value.polling, ["intervalMs", "timeoutMs", "requestTimeoutMs"]) && Number.isSafeInteger(value.polling.intervalMs) && value.polling.intervalMs > 0 && Number.isSafeInteger(value.polling.timeoutMs) && value.polling.timeoutMs >= value.polling.intervalMs && Number.isSafeInteger(value.polling.requestTimeoutMs) && value.polling.requestTimeoutMs > 0 && value.polling.requestTimeoutMs <= value.polling.timeoutMs }
+function isConfig(value: unknown): value is VercelProviderConfig { return record(value) && exactSome(value, ["apiOrigin", "token", "teamId", "projectId", "polling"], ["automaticStopMs"]) && strings(value.apiOrigin, value.token, value.teamId, value.projectId) && record(value.polling) && exact(value.polling, ["intervalMs", "timeoutMs", "requestTimeoutMs"]) && Number.isSafeInteger(value.polling.intervalMs) && value.polling.intervalMs > 0 && Number.isSafeInteger(value.polling.timeoutMs) && value.polling.timeoutMs >= value.polling.intervalMs && Number.isSafeInteger(value.polling.requestTimeoutMs) && value.polling.requestTimeoutMs > 0 && value.polling.requestTimeoutMs <= value.polling.timeoutMs && (value.automaticStopMs === undefined || automaticStopMilliseconds(value.automaticStopMs)) }
 function exact(value: Record<string, unknown>, required: readonly string[]): boolean { const keys = Object.keys(value); return keys.length === required.length && required.every(key => Object.hasOwn(value, key)) }
+function automaticStopMilliseconds(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value % 60_000 === 0 }
 function strings(...values: unknown[]): boolean { return values.every(value => typeof value === "string" && value.length > 0 && value === value.trim()) }
 function normalizedOrigin(value: string): string { const url = new URL(value); if (url.protocol !== "https:" || url.pathname !== "/" || url.search || url.hash || url.username || url.password) throw new TypeError("Vercel provider configuration is invalid"); return url.toString().replace(/\/$/, "") }
 function ref(name: string, owner: string, account: string): SandboxRef { return { kind: "vercel-sandbox-v1", name, owner, account } }
@@ -514,9 +528,16 @@ function exactSome(value: Record<string, unknown>, required: readonly string[], 
 function state(value: NativeState): InfrastructureSandboxObservation["state"] { return value === "pending" ? "provisioning" : value === "running" ? "running" : value === "stopped" ? "stopped" : value === "stopping" || value === "snapshotting" ? "stopping" : "failed" }
 function snapshotState(value: NativeSnapshot["status"]): InfrastructureSnapshotObservation["state"] { return value === "created" ? "ready" : value === "deleted" ? "deleted" : "failed" }
 function observation(native: NativeSandbox, providerRef: SandboxRef): InfrastructureSandboxObservation { return { state: state(native.status), providerRef } }
+function coreObservation(native: NativeSandbox, providerRef: SandboxRef): ProviderSandboxObservation { return { state: state(native.status), providerRef } }
+function resumeTerminalError(native: NativeSandbox, providerRef: SandboxRef): ProviderError | undefined {
+  if (native.status === "failed" || native.status === "aborted") return new ProviderError("known_state", "Vercel sandbox could not resume", { knownObservation: { resource: "sandbox", observation: coreObservation(native, providerRef) } })
+  if (native.status === "stopped") return new ProviderError("ambiguous_execution", "Vercel resume outcome is unknown", { knownObservation: { resource: "sandbox", observation: coreObservation(native, providerRef) } })
+  return undefined
+}
 function sandbox(value: unknown, name: string, projectId: string, owner: string, account: string): NativeSandbox { const root = record(value) && record(value.sandbox) && record(value.session) ? value : undefined; if (!root || root.sandbox.name !== name || root.sandbox.currentSessionId !== root.session.id || root.session.projectId !== projectId || !strings(root.session.id) || !nativeState(root.sandbox.status) || !record(root.sandbox.tags) || root.sandbox.tags[OWNER_TAG] !== owner || root.sandbox.tags[ACCOUNT_TAG] !== account || (root.sandbox.currentSnapshotId !== undefined && !strings(root.sandbox.currentSnapshotId))) throw new ProviderError("failure", "Vercel returned an invalid sandbox response"); return { name, sessionId: root.session.id as string, status: root.sandbox.status, owner, account, ...(root.sandbox.currentSnapshotId === undefined ? {} : { currentSnapshotId: root.sandbox.currentSnapshotId as string }) } }
 function listSandbox(value: unknown): NativeSandbox { if (!record(value) || !strings(value.name, value.currentSessionId) || !nativeState(value.status) || !record(value.tags) || !strings(value.tags[OWNER_TAG], value.tags[ACCOUNT_TAG])) throw new ProviderError("failure", "Vercel returned an invalid inventory sandbox"); return { name: value.name as string, sessionId: value.currentSessionId as string, status: value.status, owner: value.tags[OWNER_TAG] as string, account: value.tags[ACCOUNT_TAG] as string } }
 function nativeState(value: unknown): value is NativeState { return value === "pending" || value === "snapshotting" || value === "running" || value === "stopping" || value === "stopped" || value === "failed" || value === "aborted" }
+function automaticStopTransient(value: NativeState): boolean { return value === "stopping" || value === "snapshotting" }
 function command(value: unknown, sessionId: string): { id: string; exitCode: number | null } { if (!record(value) || !record(value.command) || !strings(value.command.id) || value.command.sessionId !== sessionId || (value.command.exitCode !== null && (!Number.isSafeInteger(value.command.exitCode) || (value.command.exitCode as number) < 0))) throw new Error("invalid command response"); return { id: value.command.id as string, exitCode: value.command.exitCode as number | null } }
 function stopResult(value: unknown, sessionId: string): { snapshot?: NativeSnapshot } { if (!record(value) || !record(value.session) || value.session.id !== sessionId || value.session.status !== "stopped") throw new Error("invalid stop response"); return record(value.snapshot) ? { snapshot: snapshot(value.snapshot, sessionId) } : {} }
 function manualSnapshot(value: unknown, sessionId: string): NativeSnapshot { if (!record(value) || !record(value.session) || value.session.id !== sessionId || !nativeState(value.session.status) || !record(value.snapshot)) throw new Error("invalid snapshot response"); return snapshot(value.snapshot, sessionId) }
@@ -532,6 +553,11 @@ function isAmbiguous(error: unknown): boolean { return error instanceof Provider
 function isReconciliableCreate(error: unknown): boolean { return error instanceof VercelAmbiguousError && error.createReconciliationAllowed }
 function ambiguous(message: string, createReconciliationAllowed = false): ProviderError { return new VercelAmbiguousError(message, createReconciliationAllowed) }
 function mutationError(error: unknown, message: string): ProviderError { if (error instanceof ProviderError && (error.kind === "limit" || error instanceof VercelHttpError && error.status < 500)) return error; return ambiguous(message) }
+function postDispatchResumeError(error: unknown, value: SandboxRef): ProviderError {
+  if (error instanceof ProviderError && error.knownObservation !== undefined) return error
+  if (error instanceof VercelHttpError && error.status === 404) return new ProviderError("exact_absence", "Vercel sandbox is absent after accepted resume", { knownObservation: { resource: "sandbox", observation: { state: "terminated", providerRef: value } } })
+  return ambiguous("Vercel resume outcome is unknown")
+}
 function media(response: Response): string { return response.headers.get("content-type")?.split(";", 1)[0] ?? "" }
 async function cancel(response: Response): Promise<void> { await response.body?.cancel().catch(() => undefined) }
 async function boundedText(response: Response, maximum: number, signal: AbortSignal): Promise<string> { if (!response.body) throw new Error("empty response"); const reader = response.body.getReader(), chunks: Uint8Array[] = []; let length = 0, done = false; try { while (true) { signal.throwIfAborted(); const item = await reader.read(); if (item.done) { done = true; break }; length += item.value.byteLength; if (length > maximum) throw new Error("response too large"); chunks.push(item.value) } } finally { if (!done) await reader.cancel().catch(() => undefined); reader.releaseLock() } return new TextDecoder("utf-8", { fatal: true }).decode(join(chunks, length)) }

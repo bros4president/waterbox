@@ -1,14 +1,19 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId } from "@waterbox/contracts"
 import { SandboxService } from "@waterbox/core"
-import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { WaterboxSandboxBackend, type SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 import { createHash } from "node:crypto"
 import { gunzipSync } from "node:zlib"
-import { VercelSandboxInfrastructure, VercelSandboxProvider, type VercelProviderClock } from "../src/index.ts"
+import { VERCEL_RUNTIME_PROFILE, VercelSandboxInfrastructure, VercelSandboxProvider, type VercelProviderClock } from "../src/index.ts"
 
 const signal = () => new AbortController().signal
 class Clock implements VercelProviderClock { now(): number { return 0 }; async sleep(_milliseconds: number, value: AbortSignal): Promise<void> { value.throwIfAborted() } }
+class AdvancingClock implements VercelProviderClock {
+  #now = 0
+  now(): number { return this.#now }
+  async sleep(milliseconds: number, value: AbortSignal): Promise<void> { value.throwIfAborted(); this.#now += milliseconds }
+}
 const config = { apiOrigin: "https://vercel.test", token: "test-token", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 10, requestTimeoutMs: 5 } }
 const createInput = { accountId: "account", sandboxId: "sbx_calm-river-a1" as never, idempotencyKey: "once", signal: signal() }
 const artifactBytes = new TextEncoder().encode("#!/usr/bin/env node\nconsole.log('waterbox')\n")
@@ -30,7 +35,7 @@ function name() { return "waterbox-sbx-calm-river-a1-e3ec51d770cb" }
 describe("Vercel primitive REST adapter", () => {
   test("assembles the native primitive through the shared runtime with Vercel-only path mechanics", async () => {
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
-    const scripts: string[] = []
+    const commands: { args: string[]; cwd?: string }[] = []
     let output = 0
     const provider = new VercelSandboxProvider(config, {
       clock: new Clock(),
@@ -39,14 +44,23 @@ describe("Vercel primitive REST adapter", () => {
         const request = new Request(input, init), path = new URL(request.url).pathname
         if (request.method === "GET" && path === `/v2/sandboxes/${name()}`) return created(name())
         if (request.method === "POST" && path.endsWith("/fs/write")) return Response.json({ ok: true })
-        if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[] }; scripts.push(body.args[1] ?? ""); return Response.json({ command: { id: `command-${scripts.length}`, sessionId: "session-1", exitCode: null } }) }
+        if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[]; cwd?: string }; commands.push(body); return Response.json({ command: { id: `command-${commands.length}`, sessionId: "session-1", exitCode: null } }) }
         if (request.method === "GET" && /\/cmd\/command-\d+$/.test(path)) return Response.json({ command: { id: path.split("/").at(-1), sessionId: "session-1", exitCode: 0 } })
-        if (request.method === "GET" && path.endsWith("/logs")) return new Response(JSON.stringify({ stream: "stdout", data: ["waterbox-bootstrap-incomplete\n", "waterbox-bootstrap-installed\n", "waterbox-bootstrap-ok\n"][output++] }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
+        if (request.method === "GET" && path.endsWith("/logs")) return new Response(JSON.stringify({ stream: "stdout", data: ["", "waterbox-bootstrap-incomplete\n", "waterbox-bootstrap-installed\n", "waterbox-bootstrap-ok\n"][output++] }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
         throw new Error(`unexpected ${request.method} ${path}`)
       },
     })
     const prepared = await provider.prepareSandbox({ accountId: "account", providerRef, signal: signal() })
     expect(prepared).toMatchObject({ state: "running" })
+    expect(VERCEL_RUNTIME_PROFILE.workspacePath).toBe("/workspace")
+    expect(VERCEL_RUNTIME_PROFILE.persistentPaths.workspace).toBe("/workspace")
+    const scripts = commands.map(command => command.args[1] ?? "")
+    expect(commands[0]?.cwd).toBe("/")
+    expect(scripts[0]).toContain(`install_bin -d -m 0755 -o "$uid" -g "$gid" '/workspace'`)
+    expect(commands.slice(1).every(command => command.cwd === "/workspace")).toBeTrue()
+    const installer = scripts.find(script => script.includes("base64 -d > '/workspace/.waterbox/waterbox'"))
+    const launcher = Buffer.from(installer?.match(/printf %s '([A-Za-z0-9+/=]+)' \| base64 -d > '\/workspace\/\.waterbox\/waterbox'/)?.[1] ?? "", "base64").toString("utf8")
+    expect(launcher).toContain("cd '/workspace'")
     expect(scripts.some(script => script.includes("if test \"$uid\" = 0"))).toBeTrue()
     expect(scripts.every(script => !script.includes("Vercel"))).toBeTrue()
   })
@@ -62,8 +76,43 @@ describe("Vercel primitive REST adapter", () => {
     expect(JSON.stringify(result.providerRef)).not.toContain("session-1")
     expect(new URL(requests[0]!.url).pathname).toBe("/v4/sandboxes")
     const body = await requests[0]!.json() as Record<string, unknown>
-    expect(body).toMatchObject({ name: name(), projectId: "project", persistent: true, snapshotExpiration: 86_400_000 })
+    expect(body).toMatchObject({ name: name(), projectId: "project", persistent: true })
+    expect(body).not.toHaveProperty("snapshotExpiration")
+    expect(body).not.toHaveProperty("timeout")
     expect(body).not.toHaveProperty("keepLastSnapshots")
+  })
+
+  test("sends exact timeout milliseconds only for a configured automatic stop", async () => {
+    const requests: Request[] = []
+    const value = new VercelSandboxInfrastructure({ ...config, automaticStopMs: 7_200_000 }, {
+      clock: new Clock(),
+      fetch: async (input, init) => {
+        const request = new Request(input, init); requests.push(request)
+        return created((await request.clone().json() as { name: string }).name)
+      },
+    })
+    await value.create(createInput)
+    const body = await requests[0]!.json() as Record<string, unknown>
+    expect(body).toMatchObject({ timeout: 7_200_000 })
+    expect(body).not.toHaveProperty("snapshotExpiration")
+  })
+
+  test("keeps a longest Friendly Words sandbox ID deterministic and within Vercel's native name bound", async () => {
+    const friendlyId = "sbx_quintessential-quintessential-gigantspinosaurus"
+    const sandboxId = friendlyId as never
+    const idempotencyKey = "friendly-words-longest"
+    let body: { name: string; tags: Record<string, string> } | undefined
+    const value = new VercelSandboxInfrastructure(config, {
+      clock: new Clock(),
+      fetch: async (_input, init) => {
+        body = await new Request("https://vercel.test", init).json() as { name: string; tags: Record<string, string> }
+        return Response.json({ sandbox: { name: body.name, currentSessionId: "session-1", status: "running", tags: body.tags }, session: { id: "session-1", projectId: "project" } })
+      },
+    })
+    await value.create({ accountId: "account", sandboxId, idempotencyKey, signal: signal() })
+    const owner = createHash("sha256").update(`account:${sandboxId}:${idempotencyKey}`).digest("hex").slice(0, 24)
+    expect(body?.name).toBe(`waterbox-${friendlyId.replace(/[^a-z0-9-]/g, "-").slice(0, 42)}-${owner.slice(0, 12)}`)
+    expect(body?.name.length).toBeLessThanOrEqual(64)
   })
 
   test("reconciles only a response-lost create by exact owned non-resuming name lookup", async () => {
@@ -104,6 +153,95 @@ describe("Vercel primitive REST adapter", () => {
     expect(new URL(requests.find(request => new URL(request.url).pathname.endsWith("/cmd/command-1"))!.url).searchParams.get("wait")).toBe("true")
   })
 
+  test("contains native automatic-stop transients in bounded non-resuming inspection", async () => {
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    const statuses = ["stopping", "snapshotting", "stopped"] as const
+    let reads = 0
+    const { value, requests } = fixture(request => created(name(), statuses[Math.min(reads++, statuses.length - 1)], "session-1"))
+
+    await expect(value.inspect({ accountId: "account", providerRef, signal: signal() })).resolves.toEqual({ state: "stopped", providerRef })
+    expect(reads).toBe(3)
+    expect(requests.every(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "false")).toBe(true)
+
+    const failed = fixture(() => created(name(), "failed", "session-1"))
+    await expect(failed.value.inspect({ accountId: "account", providerRef, signal: signal() })).resolves.toEqual({ state: "failed", providerRef })
+    let absentReads = 0
+    const absent = fixture((_request) => ++absentReads === 2 ? Response.json({}, { status: 404 }) : created(name(), "stopping", "session-1"))
+    await expect(absent.value.inspect({ accountId: "account", providerRef, signal: signal() })).resolves.toEqual({ state: "terminated", providerRef })
+    expect(absent.requests).toHaveLength(2)
+    expect(absent.requests.every(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "false")).toBe(true)
+
+    const boundedRequests: Request[] = []
+    const bounded = new VercelSandboxInfrastructure({ ...config, polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } }, {
+      clock: new AdvancingClock(),
+      fetch: async (input, init) => { const request = new Request(input, init); boundedRequests.push(request); return created(name(), "stopping", "session-1") },
+    })
+    await expect(bounded.inspect({ accountId: "account", providerRef, signal: signal() })).rejects.toMatchObject({ kind: "failure", message: "Vercel sandbox inspection did not reach a stable state" })
+    expect(boundedRequests).toHaveLength(3)
+    expect(boundedRequests.every(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "false")).toBe(true)
+  })
+
+  test("carries automatic stopping through exact stopped observation before one ordinary-tool resume", async () => {
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    const automaticStatuses = ["stopping", "snapshotting", "stopped"] as const
+    const requests: Request[] = []
+    const commandOutput = new Map<string, string>()
+    let automaticRead = 0
+    let commandCount = 0
+    let userCommandDispatches = 0
+    const provider = new VercelSandboxProvider(config, {
+      clock: new Clock(),
+      artifact,
+      fetch: async (input, init) => {
+        const request = new Request(input, init), url = new URL(request.url), path = url.pathname
+        requests.push(request)
+        if (request.method === "GET" && path === `/v2/sandboxes/${name()}`) {
+          if (url.searchParams.get("resume") === "true") return created(name(), "running", "session-2")
+          if (automaticRead < automaticStatuses.length) return created(name(), automaticStatuses[automaticRead++]!, "session-1")
+          return created(name(), "running", "session-2")
+        }
+        if (request.method === "POST" && path.endsWith("/cmd")) {
+          const body = await request.clone().json() as { args: string[] }
+          const script = body.args[1] ?? ""
+          const commandId = `command-${++commandCount}`
+          if (script.includes("waterbox-bootstrap")) commandOutput.set(commandId, "waterbox-bootstrap-ok\n")
+          else if (script.includes(" run ")) {
+            userCommandDispatches++
+            const event = { type: "result", title: "complete", output: "ok", metadata: { filePath: "marker.txt", type: "text", offset: 1, lines: 1, totalLines: 1 } }
+            commandOutput.set(commandId, `${JSON.stringify(event)}\n`)
+          } else commandOutput.set(commandId, "")
+          return Response.json({ command: { id: commandId, sessionId: "session-2", exitCode: null } })
+        }
+        const commandMatch = /\/cmd\/(command-\d+)(?:\/logs)?$/.exec(path)
+        if (request.method === "GET" && commandMatch?.[1] !== undefined) {
+          if (path.endsWith("/logs")) {
+            return new Response(`${JSON.stringify({ stream: "stdout", data: commandOutput.get(commandMatch[1]) ?? "" })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+          }
+          return Response.json({ command: { id: commandMatch[1], sessionId: "session-2", exitCode: 0 } })
+        }
+        throw new Error(`unexpected ${request.method} ${path}`)
+      },
+    })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-river-a1" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef, state: "running", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.probeSandbox(identity, sandboxId)).resolves.toMatchObject({ state: "stopped" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("stopped")
+    const inspectionRequests = requests.slice()
+    expect(inspectionRequests).toHaveLength(3)
+    expect(inspectionRequests.every(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "false")).toBe(true)
+
+    const events = []
+    for await (const event of await service.executeTool(identity, sandboxId, "read", { filePath: "marker.txt" })) events.push(event)
+    expect(events).toHaveLength(1)
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("running")
+    expect(requests.filter(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "true")).toHaveLength(1)
+    expect(userCommandDispatches).toBe(1)
+  })
+
   test("accepts command logs only at exact v2 status 200", async () => {
     let commands = 0
     const { value } = fixture(request => {
@@ -119,26 +257,20 @@ describe("Vercel primitive REST adapter", () => {
     expect(commands).toBe(1)
   })
 
-  test("uses one default-cwd bootstrap command only after Vercel definitively rejects a fresh /workspace cwd", async () => {
+  test("surfaces a definite cwd rejection after exactly one unchanged command POST", async () => {
     const requests: Request[] = []
     const { value } = fixture(async request => {
       requests.push(request)
       const path = new URL(request.url).pathname
       if (path === `/v2/sandboxes/${name()}`) return created(name())
-      if (path.endsWith("/cmd") && request.method === "POST") {
-        const body = await request.clone().json() as { cwd?: string }
-        return body.cwd === "/workspace" ? Response.json({}, { status: 400 }) : Response.json({ command: { id: "bootstrap-command", sessionId: "session-1", exitCode: null } })
-      }
-      if (path.endsWith("/cmd/bootstrap-command")) return Response.json({ command: { id: "bootstrap-command", sessionId: "session-1", exitCode: 0 } })
-      if (path.endsWith("/logs")) return new Response(`${JSON.stringify({ stream: "stdout", data: "ok\n" })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+      if (path.endsWith("/cmd") && request.method === "POST") return Response.json({}, { status: 400 })
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
-    await expect(value.runCommand({ accountId: "account", providerRef, script: "true", cwd: "/workspace", timeoutMs: 1000, signal: signal() })).resolves.toMatchObject({ exitCode: 0 })
+    await expect(value.runCommand({ accountId: "account", providerRef, script: "true", cwd: "/workspace", timeoutMs: 1000, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     const commands = requests.filter(request => request.method === "POST" && new URL(request.url).pathname.endsWith("/cmd"))
-    expect(commands).toHaveLength(2)
+    expect(commands).toHaveLength(1)
     expect(await commands[0]!.clone().json()).toMatchObject({ cwd: "/workspace" })
-    expect(await commands[1]!.clone().json()).not.toHaveProperty("cwd")
   })
 
   test("never replays dispatched Vercel mutations when their acknowledgements are unprovable", async () => {
@@ -282,11 +414,11 @@ describe("Vercel primitive REST adapter", () => {
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     const provider = new WaterboxSandboxBackend(value, { artifact })
-    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository()
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-river-a1" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_calm-river-a5"]) })
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_calm-river-a5"]) })
 
     const snapshot = await service.createSnapshot(identity, sandboxId, {})
 
@@ -303,6 +435,58 @@ describe("Vercel primitive REST adapter", () => {
     await expect(value.stopResume.resume({ accountId: "account", providerRef, signal: signal() })).resolves.toMatchObject({ state: "running", providerRef })
     const readsByResume = requests.filter(request => new URL(request.url).pathname === `/v2/sandboxes/${name()}`)
     expect(readsByResume.map(request => new URL(request.url).searchParams.get("resume"))).toEqual(["true", "false"])
+  })
+
+  test("distinguishes definite resume rejection from polling failures after acceptance", async () => {
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    for (const status of [400, 429]) {
+      const rejected = fixture(() => Response.json({}, { status }))
+      await expect(rejected.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() }), `pre-dispatch ${status}`).rejects.toMatchObject({ kind: status === 429 ? "limit" : "failure" })
+      expect(rejected.requests, `pre-dispatch ${status}`).toHaveLength(1)
+
+      const accepted = fixture(request => new URL(request.url).searchParams.get("resume") === "true"
+        ? created(name(), "pending", "session-2")
+        : Response.json({}, { status }))
+      await expect(accepted.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() }), `post-dispatch ${status}`).rejects.toMatchObject({ kind: "ambiguous_execution" })
+      expect(accepted.requests.map(request => new URL(request.url).searchParams.get("resume")), `post-dispatch ${status}`).toEqual(["true", "false"])
+    }
+
+    const terminalFailure = fixture(request => new URL(request.url).searchParams.get("resume") === "true"
+      ? created(name(), "pending", "session-2")
+      : created(name(), "failed", "session-2"))
+    await expect(terminalFailure.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() })).rejects.toMatchObject({ kind: "known_state", knownObservation: { resource: "sandbox", observation: { state: "failed", providerRef } } })
+
+    const terminalAbsence = fixture(request => new URL(request.url).searchParams.get("resume") === "true"
+      ? created(name(), "pending", "session-2")
+      : Response.json({}, { status: 404 }))
+    await expect(terminalAbsence.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() })).rejects.toMatchObject({ kind: "exact_absence", knownObservation: { resource: "sandbox", observation: { state: "terminated", providerRef } } })
+  })
+
+  test("retains resuming after an accepted resume hits a polling rejection without redispatch", async () => {
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    let resumeDispatches = 0
+    let reads = 0
+    const { value } = fixture(request => {
+      const url = new URL(request.url)
+      if (url.pathname !== `/v2/sandboxes/${name()}`) throw new Error(`unexpected ${request.method} ${url.pathname}`)
+      if (url.searchParams.get("resume") === "true") {
+        resumeDispatches++
+        return created(name(), "pending", "session-2")
+      }
+      reads++
+      return reads === 1 ? Response.json({}, { status: 429 }) : created(name(), "stopped", "session-2")
+    })
+    const provider = new WaterboxSandboxBackend(value, { artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-river-a1" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef, state: "stopped", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.resumeSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "ambiguous_execution" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("resuming")
+    expect((await service.getSandbox(identity, sandboxId)).state).toBe("resuming")
+    expect(resumeDispatches).toBe(1)
   })
 
   test("reconciles a 409 snapshot delete only through an exact deleted tombstone read", async () => {

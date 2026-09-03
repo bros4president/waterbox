@@ -7,7 +7,7 @@ import { access, mkdtemp, rm, stat } from "node:fs/promises"
 import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createEmbeddedApiBackend, createLocalControlPlane, parseLocalProviderConfiguration, type LocalControlPlaneConfig } from "../src/index.ts"
+import { createEmbeddedApiBackend, createLocalControlPlane, deriveProviderConfigurationId, parseAutomaticStopDuration, parseLocalProviderConfiguration, type LocalControlPlaneConfig } from "../src/index.ts"
 
 const accountId = "acct_local_control_plane_test"
 const sandboxId = "sbx_calm-cactus-7k3m"
@@ -27,24 +27,28 @@ function config(sqlitePath: string, provider = new FakeSandboxProvider()): Local
 }
 
 function boxConfig(sqlitePath: string): LocalControlPlaneConfig {
+  const providerConfig = { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } }
   return {
     sqlitePath,
     accountId,
     provider: {
       kind: "box",
-      config: { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } },
+      config: providerConfig,
+      providerConfigurationId: deriveProviderConfigurationId({ kind: "box", config: providerConfig }),
       runtimeArtifact: { bytes: new Uint8Array([1]), sha256: "0".repeat(64), cliProtocolVersion: 2, artifactVersion: "test" },
     },
   }
 }
 
 function vercelConfig(sqlitePath: string): LocalControlPlaneConfig {
+  const providerConfig = { apiOrigin: "https://vercel.invalid", token: "test-placeholder", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } }
   return {
     sqlitePath,
     accountId,
     provider: {
       kind: "vercel",
-      config: { apiOrigin: "https://vercel.invalid", token: "test-placeholder", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } },
+      config: providerConfig,
+      providerConfigurationId: deriveProviderConfigurationId({ kind: "vercel", config: providerConfig }),
       runtimeArtifact: { bytes: new TextEncoder().encode("#!/usr/bin/env node\n"), sha256: createHash("sha256").update("#!/usr/bin/env node\n").digest("hex"), cliProtocolVersion: 2, artifactVersion: "test" },
     },
   }
@@ -65,6 +69,44 @@ function authenticated(path: string, init: RequestInit = {}): Request {
 }
 
 describe("local control-plane composition", () => {
+  test("derives canonical provider bindings from identity scope only", () => {
+    const vercel = {
+      kind: "vercel" as const,
+      config: { apiOrigin: "https://api.vercel.com/", token: "first-token", teamId: " team ", projectId: " project ", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } },
+    }
+    const reorderedVercel = {
+      config: { polling: { requestTimeoutMs: 99, timeoutMs: 100, intervalMs: 3 }, projectId: "project", token: "rotated-token", apiOrigin: "https://api.vercel.com", teamId: "team" },
+      kind: "vercel" as const,
+    }
+    const vercelId = deriveProviderConfigurationId(vercel)
+    expect(vercelId).toBe(deriveProviderConfigurationId(reorderedVercel))
+    expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, teamId: "other-team" } }))
+    expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, projectId: "other-project" } }))
+    expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, apiOrigin: "https://vercel.invalid" } }))
+    expect(vercelId).toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, automaticStopMs: 86_400_000 } }))
+
+    const box = { kind: "box" as const, config: { apiBaseUrl: "https://ascii.dev/api/box/v1/", apiKey: "box-key", polling: { intervalMs: 1, timeoutMs: 2 } } }
+    const reorderedBox = { config: { polling: { timeoutMs: 100, intervalMs: 3 }, apiKey: "box-key", apiBaseUrl: "https://ascii.dev/api/box/v1" }, kind: "box" as const }
+    const boxId = deriveProviderConfigurationId(box)
+    expect(boxId).toBe(deriveProviderConfigurationId(reorderedBox))
+    expect(boxId).not.toContain("box-key")
+    expect(boxId).not.toBe(deriveProviderConfigurationId({ ...box, config: { ...box.config, apiKey: "rotated-box-key" } }))
+    expect(boxId).not.toBe(deriveProviderConfigurationId({ ...box, config: { ...box.config, apiBaseUrl: "https://box.invalid/v1" } }))
+    expect(boxId).toBe(deriveProviderConfigurationId({ ...box, config: { ...box.config, automaticStopMs: 1_800_000 } }))
+  })
+
+  test("parses the operator automatic-stop duration strictly before composition", () => {
+    expect(parseAutomaticStopDuration("30m")).toBe(1_800_000)
+    expect(parseAutomaticStopDuration("90m")).toBe(5_400_000)
+    expect(parseAutomaticStopDuration("2h")).toBe(7_200_000)
+    expect(parseAutomaticStopDuration("24h")).toBe(86_400_000)
+    expect(parseAutomaticStopDuration(undefined)).toBeUndefined()
+    expect(parseAutomaticStopDuration("", { allowBlank: true })).toBeUndefined()
+    for (const value of ["", " ", "0m", "-1m", "1.5h", "1h30m", "30s", "1d", "30M", "9007199254740992m"]) expect(() => parseAutomaticStopDuration(value)).toThrow("WATERBOX_AUTO_STOP")
+    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "key", WATERBOX_AUTO_STOP: "30m" }, "/users/test").provider.config).toMatchObject({ automaticStopMs: 1_800_000 })
+    expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "key", WATERBOX_AUTO_STOP: "1.5h" }, "/users/test")).toThrow("WATERBOX_AUTO_STOP")
+  })
+
   test("raw API authentication is enforced without a listener", async () => {
     const plane = await createLocalControlPlane(config(":memory:"), resolver)
     cleanup.push(() => plane.close())
@@ -145,14 +187,19 @@ describe("local control-plane composition", () => {
   })
 
   test("owns direct environment parsing below composition and keeps values out of errors", () => {
-    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "token", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toMatchObject({ sqlitePath: "/users/test/.waterbox/direct.sqlite", provider: { kind: "vercel" } })
+    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "token", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toMatchObject({ sqlitePath: "/users/test/.waterbox/direct.sqlite", provider: { kind: "vercel", config: { token: "token" } } })
     const secret = "do-not-render"
     try { parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: secret, VERCEL_TEAM_ID: "team" }) } catch (error) { expect(String(error)).not.toContain(secret) }
+    for (const whitespaceSecret of [" token", "token ", "\ttoken", "token\n"]) {
+      expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: whitespaceSecret, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toThrow("VERCEL_TOKEN")
+      expect(() => deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: "https://api.vercel.com", token: whitespaceSecret, teamId: "team", projectId: "project", polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 } } })).toThrow("credential")
+    }
   })
 
   test("configured Vercel composition traverses embedded authentication, API, SQLite, core, and the shared runtime", async () => {
     const originalFetch = globalThis.fetch
     const commands = new Map<string, string>()
+    const commandCwds = new Map<string, string | undefined>()
     let createdSandbox: { name: string; tags: Record<string, string> } | undefined
     globalThis.fetch = (async (input, init) => {
       const request = new Request(input, init), url = new URL(request.url), path = url.pathname
@@ -162,9 +209,9 @@ describe("local control-plane composition", () => {
         return Response.json({ sandbox: { name: body.name, currentSessionId: "session-1", status: "running", tags: body.tags }, session: { id: "session-1", projectId: "project" } })
       }
       if (request.method === "GET" && path.startsWith("/v2/sandboxes/") && !path.includes("/sessions/")) return Response.json({ sandbox: { name: createdSandbox?.name, currentSessionId: "session-1", status: "running", tags: createdSandbox?.tags }, session: { id: "session-1", projectId: "project" } })
-      if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[] }; commands.set("command-1", body.args[1] ?? ""); return Response.json({ command: { id: "command-1", sessionId: "session-1", exitCode: null } }) }
-      if (request.method === "GET" && path.endsWith("/cmd/command-1")) return Response.json({ command: { id: "command-1", sessionId: "session-1", exitCode: 0 } })
-      if (request.method === "GET" && path.endsWith("/logs")) return new Response(JSON.stringify({ stream: "stdout", data: "waterbox-bootstrap-ok\n" }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
+      if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[]; cwd?: string }; const id = `command-${commands.size + 1}`; commands.set(id, body.args[1] ?? ""); commandCwds.set(id, body.cwd); return Response.json({ command: { id, sessionId: "session-1", exitCode: null } }) }
+      if (request.method === "GET" && /\/cmd\/command-\d+$/.test(path)) { const id = path.split("/").at(-1)!; return Response.json({ command: { id, sessionId: "session-1", exitCode: 0 } }) }
+      if (request.method === "GET" && path.endsWith("/logs")) { const id = path.split("/").at(-2)!; return new Response(JSON.stringify({ stream: "stdout", data: id === "command-1" ? "" : "waterbox-bootstrap-ok\n" }) + "\n", { headers: { "content-type": "application/x-ndjson" } }) }
       throw new Error(`unexpected Vercel request ${request.method} ${path}`)
     }) as typeof fetch
     try {
@@ -174,6 +221,8 @@ describe("local control-plane composition", () => {
       const created = await client.createSandbox({}, { idempotencyKey: "configured-vercel", signal: new AbortController().signal })
       expect(created).toMatchObject({ sandboxId, provider: "vercel", state: "running" })
       expect([...commands.values()].some(script => script.includes("waterbox-bootstrap"))).toBeTrue()
+      expect(commandCwds.get("command-1")).toBe("/")
+      expect(commandCwds.get("command-2")).toBe("/workspace")
     } finally { globalThis.fetch = originalFetch }
   })
 

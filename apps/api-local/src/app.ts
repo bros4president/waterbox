@@ -1,5 +1,5 @@
 import type { IdentityResolver } from "@waterbox/api"
-import { createLocalControlPlane, type LocalControlPlane, type LocalControlPlaneOverrides } from "@waterbox/control-plane-local"
+import { createLocalControlPlane, deriveProviderConfigurationId, type LocalControlPlane, type LocalControlPlaneOverrides } from "@waterbox/control-plane-local"
 import { loadSandboxRuntimeArtifact, type SandboxRuntimeArtifact } from "@waterbox/provider-box"
 import type { LocalApiConfig } from "./config.ts"
 
@@ -18,7 +18,7 @@ export function createDevelopmentControlPlane(config: LocalApiConfig, runtimeArt
   return createLocalControlPlane({
     sqlitePath: config.sqlitePath,
     accountId: config.accountId,
-    provider: { kind: "box", config: config.box, runtimeArtifact },
+    provider: { kind: "box", config: config.box, providerConfigurationId: deriveProviderConfigurationId({ kind: "box", config: config.box }), runtimeArtifact },
   }, fixedDevelopmentIdentityResolver(config.developmentApiKey, config.accountId), overrides)
 }
 

@@ -47,7 +47,6 @@ describe("Dynamo-shaped in-memory repositories", () => {
       version: 1,
       createdAt: timestamp,
       updatedAt: timestamp,
-      expiresAt: timestamp,
     }
     const other = { ...record, accountId: "bob" }
 
@@ -63,6 +62,7 @@ function sandbox(accountId: string, sandboxId: SandboxId): SandboxRecord {
     accountId,
     sandboxId,
     provider: "fake",
+    providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     providerRef: null,
     state: "running",
     version: 1,
@@ -76,6 +76,7 @@ function snapshot(accountId: string, snapshotId: SnapshotId): SnapshotRecord {
     accountId,
     snapshotId,
     provider: "fake",
+    providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     providerRef: null,
     sourceSandboxId: "sbx_calm-cactus-a1",
     state: "ready",

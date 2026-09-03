@@ -135,6 +135,13 @@ export interface FullLinuxRuntimeProfile {
 
 export interface RuntimePathProvisioner {
   /**
+   * Optional trusted fragment that establishes the workspace before any
+   * cwd-bound runtime verification or tool command. The shared runtime runs
+   * this fragment from the explicit filesystem root; providers must make it
+   * idempotent.
+   */
+  prepareWorkspace?(paths: Pick<FullLinuxRuntimeProfile, "workspacePath" | "persistentPaths" | "ephemeralPaths">): string
+  /**
    * Returns the non-interactive command fragment that creates the supplied
    * persistent runtime and ephemeral detached-job roots. A provider can supply
    * its own privilege mechanics here without exposing provider behavior to the

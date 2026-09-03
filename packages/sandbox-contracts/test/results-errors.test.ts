@@ -138,6 +138,7 @@ describe("structured errors", () => {
       "invalid_request",
       "unauthorized",
       "not_found",
+      "provider_configuration_mismatch",
       "conflict",
       "idempotency_conflict",
       "idempotency_in_progress",

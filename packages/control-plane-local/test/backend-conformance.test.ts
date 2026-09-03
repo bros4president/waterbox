@@ -168,7 +168,7 @@ async function fixture(mode: Mode, options: { provider?: ConformanceProvider; de
 
 async function seedProvisioning(sqlitePath: string) {
   const store = new SqliteRepositoryStore(sqlitePath, { create: true })
-  await store.sandboxes.createIfAbsent({ accountId, sandboxId, provider: "fake", providerRef: { privateSandboxId: sandboxId }, state: "provisioning", version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" })
+  await store.sandboxes.createIfAbsent({ accountId, sandboxId, provider: "fake", providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: { privateSandboxId: sandboxId }, state: "provisioning", version: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" })
   store.close()
 }
 

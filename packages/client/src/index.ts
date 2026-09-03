@@ -154,6 +154,10 @@ export class WaterboxClient {
     return this.#json("POST", `/v1/sandboxes/${sandboxPath(input.sandboxId)}/probe`, 200, SandboxSchema, context.signal)
   }
 
+  stopSandbox(input: { sandboxId: SandboxId }, context: CommandContext): Promise<Sandbox> {
+    return this.#json("POST", `/v1/sandboxes/${sandboxPath(input.sandboxId)}/stop`, 200, SandboxSchema, context.signal)
+  }
+
   deleteSandbox(input: { sandboxId: SandboxId }, context: CommandContext): Promise<Sandbox> {
     return this.#json("DELETE", `/v1/sandboxes/${sandboxPath(input.sandboxId)}`, 200, SandboxSchema, context.signal)
   }

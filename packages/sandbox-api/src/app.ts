@@ -313,6 +313,7 @@ function statusFor(code: ErrorCode): number {
     case "unauthorized": return 401
     case "not_found": return 404
     case "conflict":
+    case "provider_configuration_mismatch":
     case "idempotency_conflict":
     case "idempotency_in_progress": return 409
     case "transfer_consumed": return 409
@@ -330,6 +331,7 @@ function publicMessage(code: ErrorCode): string {
   switch (code) {
     case "not_found": return "The resource was not found"
     case "conflict": return "The request conflicts with current state"
+    case "provider_configuration_mismatch": return "The resource belongs to a different provider configuration"
     case "idempotency_conflict": return "The idempotency key conflicts with an earlier request"
     case "idempotency_in_progress": return "The idempotent request is still in progress"
     case "invalid_state": return "The resource is not in a valid state for this operation"

@@ -5,11 +5,19 @@ import { join } from "node:path"
 import { mkdtemp } from "node:fs/promises"
 import { runCli } from "../src/cli.ts"
 import { dispatch } from "../src/dispatch.ts"
-import { configStorage, credentialState, loadPersisted, resolvedEnvironment, setup, type ConfigStorage, type CredentialStore, type SetupPrompts } from "../src/onboarding.ts"
+import { automaticStopGuidance, configStorage, credentialState, loadPersisted, resolvedEnvironment, setup, type ConfigStorage, type CredentialStore, type SetupPrompts } from "../src/onboarding.ts"
+import { deriveProviderConfigurationId, parseLocalProviderConfiguration } from "@waterbox/control-plane-local"
 
 function fakeStorage(initial?: string): ConfigStorage & { value?: string; writes: number; failWrite: boolean; removes: number } { return { value: initial, writes: 0, failWrite: false, removes: 0, async read() { return this.value }, async write(value) { this.writes += 1; if (this.failWrite) throw new Error("write failed"); this.value = value }, async remove() { this.removes += 1; this.value = undefined } } }
 function fakeCredentials(values: Partial<Record<"box" | "vercel", string>> = {}): CredentialStore & { inaccessible: boolean; fail?: "set" | "delete-box" | "delete-vercel"; values: Partial<Record<"box" | "vercel", string>> } { return { values, inaccessible: false, async get(provider) { if (this.inaccessible) throw new Error("locked"); return this.values[provider] }, async set(provider, secret) { if (this.inaccessible || this.fail === "set") throw new Error("locked"); this.values[provider] = secret }, async delete(provider) { if (this.inaccessible || this.fail === `delete-${provider}`) throw new Error("locked"); const present = this.values[provider] !== undefined; delete this.values[provider]; return present } } }
-const boxPrompts: SetupPrompts = { async selectProvider() { return "box" }, async input(_message, initial) { return initial }, async secret() { return "box-secret" } }
+const boxPrompts: SetupPrompts = { async selectProvider() { return "box" }, async input(_message, initial) { return initial }, async secret() { return "box-secret" }, async confirm() { return true } }
+const boxSettings = { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const }
+const vercelSettings = { apiOrigin: "https://api.vercel.com", teamId: "team", projectId: "project", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, requestTimeoutMs: 30000 as const }
+function boxBinding(apiKey: string, apiBaseUrl = boxSettings.apiBaseUrl) { return deriveProviderConfigurationId({ kind: "box", config: { apiBaseUrl, apiKey, polling: { intervalMs: 1000, timeoutMs: 120000 } } }) }
+function vercelBinding(settings = vercelSettings) { return deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: settings.apiOrigin, token: "credential-excluded", teamId: settings.teamId, projectId: settings.projectId, polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 } } }) }
+function persistedV2Box(apiKey: string, settings = boxSettings) { return JSON.stringify({ version: 2, provider: "box", providerConfigurationId: boxBinding(apiKey, settings.apiBaseUrl), box: settings }) }
+function persistedV2Vercel(settings = vercelSettings) { return JSON.stringify({ version: 2, provider: "vercel", providerConfigurationId: vercelBinding(settings), vercel: settings }) }
+async function loadBoxConfig(storage: ConfigStorage) { const config = await loadPersisted(storage); if (config?.provider !== "box") throw new Error("Expected persisted Box configuration"); return config }
 
 describe("native-keyring onboarding", () => {
   test("resolves persisted Box and Vercel settings only when provider is absent", async () => {
@@ -21,6 +29,56 @@ describe("native-keyring onboarding", () => {
     expect(explicit.environment).not.toHaveProperty("VERCEL_TOKEN")
   })
 
+  test("persists and hydrates optional automatic stop without changing resource scope", async () => {
+    const messages: string[] = []
+    const prompts: SetupPrompts = {
+      async selectProvider() { return "box" },
+      async input(message, initial) { messages.push(message); return message.startsWith("Automatic stop") ? "90m" : initial },
+      async secret() { return "box-secret" },
+      async confirm() { throw new Error("automatic stop must not change binding") },
+    }
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    await setup(storage, fakeCredentials({ box: "box-secret" }), prompts)
+    expect((await loadBoxConfig(storage)).box.automaticStopMs).toBe(5_400_000)
+    expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment.WATERBOX_AUTO_STOP).toBe("90m")
+    expect(messages).toContain(`Automatic stop duration (optional, for example 30m or 2h)\n${automaticStopGuidance}`)
+  })
+
+  test("persists version 2 scope metadata while runtime derives the active binding from exact credentials", async () => {
+    for (const provider of ["box", "vercel"] as const) {
+      const storage = fakeStorage(), credentials = fakeCredentials()
+      const prompts: SetupPrompts = provider === "box" ? boxPrompts : {
+        async selectProvider() { return "vercel" },
+        async input(message, initial) { return message.includes("team") ? "team" : message.includes("project") ? "project" : initial },
+        async secret() { return "vercel-secret" },
+        async confirm() { throw new Error("first setup must not warn") },
+      }
+      await setup(storage, credentials, prompts)
+      const persisted = await loadPersisted(storage)
+      expect(persisted?.version).toBe(2)
+      expect(persisted).toHaveProperty("providerConfigurationId")
+      if (persisted?.version !== 2) throw new Error("Expected version 2 persisted configuration")
+      const hydrated = await resolvedEnvironment({}, storage, credentials)
+      const fromKeyring = parseLocalProviderConfiguration(hydrated.environment, "/users/test")
+      const fromEnvironment = provider === "box"
+        ? parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "box-secret", BOX_API_BASE_URL: boxSettings.apiBaseUrl }, "/users/test")
+        : parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "vercel-secret", VERCEL_API_ORIGIN: vercelSettings.apiOrigin, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")
+      expect(fromKeyring.provider.providerConfigurationId).toBe(fromEnvironment.provider.providerConfigurationId)
+      expect(fromKeyring.provider.providerConfigurationId).toBe(persisted.providerConfigurationId)
+    }
+
+    const misleadingMetadata = fakeStorage(JSON.stringify({ version: 2, provider: "box", providerConfigurationId: boxBinding("different-key"), box: boxSettings }))
+    const hydrated = await resolvedEnvironment({}, misleadingMetadata, fakeCredentials({ box: "actual-key" }))
+    expect(parseLocalProviderConfiguration(hydrated.environment, "/users/test").provider.providerConfigurationId).toBe(boxBinding("actual-key"))
+  })
+
+  test("blank automatic-stop setup persists no provider override", async () => {
+    const storage = fakeStorage()
+    await setup(storage, fakeCredentials(), boxPrompts)
+    expect((await loadBoxConfig(storage)).box).not.toHaveProperty("automaticStopMs")
+    expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment).not.toHaveProperty("WATERBOX_AUTO_STOP")
+  })
+
   test("rejects provider variables without a selection and malformed persisted config without leaking secrets", async () => {
     await expect(resolvedEnvironment({ BOX_API_KEY: "secret" }, fakeStorage(), fakeCredentials())).rejects.toThrow("WATERBOX_PROVIDER")
     await expect(resolvedEnvironment({}, fakeStorage('{"version":1,"provider":"box","box":{"apiKey":"secret"}}'), fakeCredentials())).rejects.toThrow("malformed")
@@ -28,13 +86,149 @@ describe("native-keyring onboarding", () => {
     await expect(loadPersisted({ async read() { throw new Error("private path") }, async write() {}, async remove() {} })).rejects.toThrow("configuration is unavailable")
   })
 
-  test("setup persists only settings after keyring read-back and removes stale provider credentials", async () => {
+  test("setup persists only settings after keyring read-back and retains inactive provider credentials", async () => {
     const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
     const credentials = fakeCredentials({ vercel: "old" })
     await setup(storage, credentials, boxPrompts)
     expect(storage.value).not.toContain("box-secret")
-    expect(credentials.values).toEqual({ box: "box-secret" })
+    expect(credentials.values).toEqual({ box: "box-secret", vercel: "old" })
     expect(await loadPersisted(storage)).toMatchObject({ provider: "box" })
+  })
+
+  test("first setup and Vercel token rotation do not require a scope-change confirmation", async () => {
+    let confirmations = 0
+    const firstTime: SetupPrompts = { ...boxPrompts, async confirm() { confirmations += 1; return true } }
+    await setup(fakeStorage(), fakeCredentials(), firstTime)
+    expect(confirmations).toBe(0)
+
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+    const prompts: SetupPrompts = {
+      async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "rotated-token" },
+      async confirm() { confirmations += 1; return true },
+    }
+    await setup(storage, fakeCredentials({ vercel: "old-token" }), prompts)
+    expect(confirmations).toBe(0)
+  })
+
+  test("scope changes warn before mutation and a declined confirmation preserves all local state", async () => {
+    const raw = JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } })
+    const storage = fakeStorage(raw), credentials = fakeCredentials({ box: "old-box", vercel: "old-vercel" })
+    const messages: string[] = []
+    const prompts: SetupPrompts = {
+      async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "new-vercel" },
+      async confirm(message) { messages.push(message); return false },
+    }
+    await expect(setup(storage, credentials, prompts)).rejects.toThrow("canceled")
+    expect(messages).toEqual(["Changing provider resource scope will not stop, delete, or migrate existing resources. They may continue incurring provider charges. Continue?"])
+    expect(storage.value).toBe(raw)
+    expect(credentials.values).toEqual({ box: "old-box", vercel: "old-vercel" })
+  })
+
+  test("Box key and Vercel team or project changes require scope-change confirmation", async () => {
+    const boxStorage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    const rejected: SetupPrompts = { ...boxPrompts, async secret() { return "rotated-box-key" }, async confirm() { return false } }
+    await expect(setup(boxStorage, fakeCredentials({ box: "old-box" }), rejected)).rejects.toThrow("canceled")
+
+    for (const changed of ["team", "project"] as const) {
+      const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+      let confirmed = 0
+      const prompts: SetupPrompts = {
+        async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes(changed) ? `other-${changed}` : message.includes("team") ? "team" : "project" }, async secret() { return "same-token" },
+        async confirm() { confirmed += 1; return false },
+      }
+      await expect(setup(storage, fakeCredentials({ vercel: "same-token" }), prompts)).rejects.toThrow("canceled")
+      expect(confirmed).toBe(1)
+    }
+  })
+
+  test("version 2 metadata preserves switch warnings when prior credentials are missing", async () => {
+    const cases: Array<{ raw: string; prompts: SetupPrompts }> = [
+      {
+        raw: persistedV2Box("old-box-key"),
+        prompts: { ...boxPrompts, async secret() { return "new-box-key" }, async confirm() { return false } },
+      },
+      ...(["team", "project", "origin"] as const).map(changed => ({
+        raw: persistedV2Vercel(),
+        prompts: {
+          async selectProvider() { return "vercel" as const },
+          async input(message: string, initial: string) {
+            if (changed === "origin" && message.includes("origin")) return "https://other.vercel.example"
+            if (changed === "team" && message.includes("team")) return "other-team"
+            if (changed === "project" && message.includes("project")) return "other-project"
+            return initial
+          },
+          async secret() { return "replacement-token" },
+          async confirm() { return false },
+        },
+      })),
+      {
+        raw: persistedV2Vercel(),
+        prompts: { ...boxPrompts, async confirm() { return false } },
+      },
+    ]
+    for (const { raw, prompts } of cases) {
+      const storage = fakeStorage(raw), credentials = fakeCredentials()
+      await expect(setup(storage, credentials, prompts)).rejects.toThrow("canceled")
+      expect(storage.value).toBe(raw)
+      expect(storage.writes).toBe(0)
+      expect(credentials.values).toEqual({})
+    }
+  })
+
+  test("legacy version 1 setup warns only when the prior binding cannot be proved or changes", async () => {
+    const legacyBox = JSON.stringify({ version: 1, provider: "box", box: boxSettings })
+    let boxConfirmations = 0
+    await expect(setup(fakeStorage(legacyBox), fakeCredentials(), { ...boxPrompts, async confirm() { boxConfirmations += 1; return false } })).rejects.toThrow("canceled")
+    expect(boxConfirmations).toBe(1)
+
+    const legacyVercel = JSON.stringify({ version: 1, provider: "vercel", vercel: vercelSettings })
+    let unchangedConfirmations = 0
+    const unchangedStorage = fakeStorage(legacyVercel)
+    await setup(unchangedStorage, fakeCredentials(), {
+      async selectProvider() { return "vercel" }, async input(_message, initial) { return initial }, async secret() { return "replacement-token" },
+      async confirm() { unchangedConfirmations += 1; return true },
+    })
+    expect(unchangedConfirmations).toBe(0)
+    expect((await loadPersisted(unchangedStorage))?.version).toBe(2)
+
+    let changedConfirmations = 0
+    await expect(setup(fakeStorage(legacyVercel), fakeCredentials(), {
+      async selectProvider() { return "vercel" }, async input(message, initial) { return message.includes("team") ? "other-team" : initial }, async secret() { return "replacement-token" },
+      async confirm() { changedConfirmations += 1; return false },
+    })).rejects.toThrow("canceled")
+    expect(changedConfirmations).toBe(1)
+  })
+
+  test("operational-only changes do not warn when version 2 metadata proves the same binding", async () => {
+    let confirmations = 0
+    const storage = fakeStorage(persistedV2Box("box-secret"))
+    await setup(storage, fakeCredentials(), {
+      ...boxPrompts,
+      async input(message, initial) { return message.startsWith("Automatic stop") ? "45m" : initial },
+      async confirm() { confirmations += 1; return true },
+    })
+    expect(confirmations).toBe(0)
+    expect((await loadBoxConfig(storage)).box.automaticStopMs).toBe(2_700_000)
+  })
+
+  test("Box and Vercel origin changes require confirmation and persist canonical endpoints", async () => {
+    const boxStorage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    let boxConfirmed = 0
+    const boxPrompts: SetupPrompts = { async selectProvider() { return "box" }, async input(message) { return message.startsWith("Automatic stop") ? "" : "https://box.example/api/" }, async secret() { return "same-box-key" }, async confirm() { boxConfirmed += 1; return false } }
+    await expect(setup(boxStorage, fakeCredentials({ box: "same-box-key" }), boxPrompts)).rejects.toThrow("canceled")
+    expect(boxConfirmed).toBe(1)
+
+    const vercelStorage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+    let vercelConfirmed = 0
+    const vercelPrompts: SetupPrompts = { async selectProvider() { return "vercel" }, async input(message, initial) { return message.includes("origin") ? "https://vercel.example/" : initial }, async secret() { return "same-token" }, async confirm() { vercelConfirmed += 1; return false } }
+    await expect(setup(vercelStorage, fakeCredentials({ vercel: "same-token" }), vercelPrompts)).rejects.toThrow("canceled")
+    expect(vercelConfirmed).toBe(1)
+
+    const stored = fakeStorage()
+    const persisted: SetupPrompts = { async selectProvider() { return "box" }, async input(message) { return message.startsWith("Automatic stop") ? "" : "https://box.example/api/" }, async secret() { return "box-key" }, async confirm() { return true } }
+    await setup(stored, fakeCredentials(), persisted)
+    expect((await loadBoxConfig(stored)).box.apiBaseUrl).toBe("https://box.example/api")
+    expect((await resolvedEnvironment({}, stored, fakeCredentials({ box: "box-key" }))).environment.BOX_API_BASE_URL).toBe("https://box.example/api")
   })
 
   test("status reports persisted available, missing, and inaccessible credentials without redacting its state", async () => {
@@ -56,15 +250,48 @@ describe("native-keyring onboarding", () => {
     expect(storage.value).toBeDefined()
   })
 
+  test("logout describes its strictly local effect", async () => {
+    const output: string[] = []
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    expect(await runCli(["logout"], { storage, credentials: fakeCredentials({ box: "box", vercel: "vercel" }), environment: {}, write: line => output.push(line), error() {} })).toBe(0)
+    expect(output).toEqual(["Waterbox local configuration and stored credentials removed. Remote resources and local SQLite records were not deleted."])
+  })
+
   test("setup failure does not write plaintext configuration", async () => {
     const storage = fakeStorage(); const credentials = fakeCredentials(); credentials.inaccessible = true
     await expect(setup(storage, credentials, boxPrompts)).rejects.toThrow("environment-only")
     expect(storage.writes).toBe(0)
   })
 
+  test("rejects whitespace-bearing credentials before keyring or configuration side effects", async () => {
+    for (const secret of [" box-secret", "box-secret ", "\tbox-secret", "box-secret\n"]) {
+      const storage = fakeStorage(); let keyringCalls = 0
+      const credentials: CredentialStore = {
+        async get() { keyringCalls += 1; return undefined },
+        async set() { keyringCalls += 1 },
+        async delete() { keyringCalls += 1; return false },
+      }
+      const prompts: SetupPrompts = { ...boxPrompts, async secret() { return secret } }
+      let message = ""
+      try { await setup(storage, credentials, prompts) } catch (error) { message = String(error) }
+      expect(message).toContain("credential is invalid")
+      expect(message).not.toContain(secret)
+      expect(keyringCalls).toBe(0)
+      expect(storage.writes).toBe(0)
+      expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: secret }, "/users/test")).toThrow("BOX_API_KEY")
+      expect(() => deriveProviderConfigurationId({ kind: "box", config: { apiBaseUrl: boxSettings.apiBaseUrl, apiKey: secret, polling: { intervalMs: 1000, timeoutMs: 120000 } } })).toThrow("credential")
+    }
+
+    const raw = persistedV2Box("valid-key"), secret = " stored-key-with-space "
+    let message = ""
+    try { await resolvedEnvironment({}, fakeStorage(raw), fakeCredentials({ box: secret })) } catch (error) { message = String(error) }
+    expect(message).toContain("stored credential is invalid")
+    expect(message).not.toContain(secret)
+  })
+
   test("CLI setup rejects non-interactive input before prompting", async () => {
     let prompted = false
-    const prompts: SetupPrompts = { async selectProvider() { prompted = true; return "box" }, async input(_message, initial) { return initial }, async secret() { return "secret" } }
+    const prompts: SetupPrompts = { async selectProvider() { prompted = true; return "box" }, async input(_message, initial) { return initial }, async secret() { return "secret" }, async confirm() { return true } }
     const errors: string[] = []
     expect(await runCli(["setup"], { storage: fakeStorage(), credentials: fakeCredentials(), prompts, interactive: false, write() {}, error: line => errors.push(line) })).toBe(1)
     expect(prompted).toBeFalse(); expect(errors.join("\n")).toContain("interactive terminal")
@@ -104,6 +331,21 @@ describe("native-keyring onboarding", () => {
     expect(credentials.values).toEqual({ box: "old" }); expect(storage.value).toContain('"provider":"box"')
   })
 
+  test("setup restores configuration and both credentials when a write commits then throws", async () => {
+    const priorRaw = persistedV2Box("old-box-key")
+    let stored = priorRaw, writes = 0
+    const storage: ConfigStorage = {
+      async read() { return stored },
+      async write(value) { stored = value; writes += 1; if (writes === 1) throw new Error("committed then failed") },
+      async remove() { stored = "" },
+    }
+    const credentials = fakeCredentials({ box: "old-box-key", vercel: "inactive-vercel-token" })
+    await expect(setup(storage, credentials, { ...boxPrompts, async secret() { return "new-box-key" } })).rejects.toThrow("rollback was confirmed")
+    expect(writes).toBe(2)
+    expect(stored).toBe(priorRaw)
+    expect(credentials.values).toEqual({ box: "old-box-key", vercel: "inactive-vercel-token" })
+  })
+
   test("setup rolls back a credential write that mutates before throwing", async () => {
     const storage = fakeStorage(); let value = "old"
     const credentials: CredentialStore = {
@@ -116,13 +358,10 @@ describe("native-keyring onboarding", () => {
     expect(value).toBe("old"); expect(message).toContain("rollback was confirmed"); expect(message).not.toContain("native secret detail")
   })
 
-  test("setup rolls back both providers for switch persistence and stale-delete failures", async () => {
-    const prompts: SetupPrompts = { async selectProvider() { return "vercel" }, async input(message) { return message.includes("team") ? "team" : "project" }, async secret() { return "new" } }
+  test("setup rolls back both providers when a switch cannot persist", async () => {
+    const prompts: SetupPrompts = { async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "new" }, async confirm() { return true } }
     const storage = fakeStorage(); storage.failWrite = true
     const credentials = fakeCredentials({ box: "old-box", vercel: "old-vercel" })
-    await expect(setup(storage, credentials, prompts)).rejects.toThrow("confirmed")
-    expect(credentials.values).toEqual({ box: "old-box", vercel: "old-vercel" })
-    storage.failWrite = false; credentials.fail = "delete-box"
     await expect(setup(storage, credentials, prompts)).rejects.toThrow("confirmed")
     expect(credentials.values).toEqual({ box: "old-box", vercel: "old-vercel" })
   })
@@ -133,15 +372,13 @@ describe("native-keyring onboarding", () => {
     expect(await loadPersisted(storage)).toMatchObject({ provider: "box" })
   })
 
-  test("setup commits configuration before deleting stale credentials and restores it if deletion fails", async () => {
+  test("setup commits configuration without deleting inactive credentials", async () => {
     const events: string[] = []; const raw = '{"malformed":true}'
     const storage: ConfigStorage = { async read() { return raw }, async write() { events.push("write") }, async remove() { events.push("remove") } }
     let box = "old"
-    const credentials: CredentialStore = { async get(provider) { return provider === "box" ? box : undefined }, async set(_provider, secret) { events.push("set"); box = secret }, async delete() { events.push("delete"); throw new Error("native detail never printed") } }
-    let message = ""
-    try { await setup(storage, credentials, boxPrompts) } catch (error) { message = String(error) }
-    expect(message).toContain("rollback could not be confirmed"); expect(message).not.toContain("native detail never printed")
-    expect(events.slice(0, 3)).toEqual(["set", "write", "delete"])
+    const credentials: CredentialStore = { async get(provider) { return provider === "box" ? box : undefined }, async set(_provider, secret) { events.push("set"); box = secret }, async delete() { events.push("delete"); return true } }
+    await setup(storage, credentials, boxPrompts)
+    expect(events).toEqual(["set", "write"])
   })
 
   test("logout attempts both deletes and retains config when either delete fails", async () => {

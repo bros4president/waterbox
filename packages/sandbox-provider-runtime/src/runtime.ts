@@ -136,6 +136,7 @@ export class WaterboxSandboxBackend implements SandboxProvider {
 
   async prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation> {
     const primitive = primitiveInput(input)
+    await this.#prepareWorkspace(primitive)
     const first = await this.#verify(primitive, "verify")
     if (first === "complete") return { state: "running", providerRef: input.providerRef }
     try {
@@ -156,6 +157,17 @@ export class WaterboxSandboxBackend implements SandboxProvider {
     const final = await this.#verify(primitive, "final-verify")
     if (final !== "complete") throw new ProviderError("ambiguous_execution", "Runtime preparation outcome is unknown")
     return { state: "running", providerRef: input.providerRef }
+  }
+
+  async #prepareWorkspace(input: ReturnType<typeof primitiveInput>): Promise<void> {
+    if (this.#pathProvisioner.prepareWorkspace === undefined) return
+    const script = this.#pathProvisioner.prepareWorkspace(this.#runtimeProfile)
+    if (typeof script !== "string" || script.length === 0 || script.includes("\u0000")) throw new TypeError("Runtime path provisioner is invalid")
+    const request = { ...input, script, cwd: "/", timeoutMs: BOOTSTRAP_TIMEOUT_MS, maxStdoutBytes: MAX_COMMAND_OUTPUT_BYTES, maxStderrBytes: MAX_COMMAND_OUTPUT_BYTES }
+    const result = await this.#infrastructure.runCommand(request)
+    assertCommandResult(result, request)
+    if (uncertain(result)) throw new ProviderError("ambiguous_execution", "Runtime workspace preparation outcome is unknown")
+    if (result.exitCode !== 0 || decoded(result.stdout) !== "" || decoded(result.stderr) !== "") throw new ProviderError("failure", "Runtime workspace preparation failed")
   }
 
   async #recoverPreparationAfterAmbiguity(input: ReturnType<typeof primitiveInput>, providerRef: CoreJsonValue): Promise<ProviderSandboxObservation> {
@@ -393,7 +405,7 @@ function validateRuntimeProfile(value: FullLinuxRuntimeProfile): FullLinuxRuntim
   return value
 }
 function validatePathProvisioner(value: RuntimePathProvisioner): RuntimePathProvisioner {
-  if (!value || typeof value.provision !== "function") throw new TypeError("Runtime path provisioner is invalid")
+  if (!value || typeof value.provision !== "function" || (value.prepareWorkspace !== undefined && typeof value.prepareWorkspace !== "function")) throw new TypeError("Runtime path provisioner is invalid")
   return value
 }
 function isAbsolutePath(value: unknown): value is string { return typeof value === "string" && value.startsWith("/") && !value.includes("\u0000") && !value.includes("//") }

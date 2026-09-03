@@ -11,6 +11,7 @@ const common = {
   platform: "node",
   target: "node24.15",
   logLevel: "info",
+  loader: { ".txt": "text" },
   external: ["@napi-rs/keyring", "@inquirer/prompts"],
 }
 

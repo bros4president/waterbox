@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { assertVercelMcpSmokeAuthorized, compareVercelBaseline, readVercelBaseline, reconcileTrackedVercelNativeLifecycle } from "./vercel-mcp-smoke.ts"
+import { assertVercelMcpSmokeAuthorized, compareVercelBaseline, readVercelBaseline, reconcileTrackedVercelNativeLifecycle, runVercelMcpSmoke } from "./vercel-mcp-smoke.ts"
 
 const gates = {
   WATERBOX_VERCEL_SMOKE_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_VERCEL_SANDBOX_RESOURCES",
@@ -14,6 +14,10 @@ describe("Vercel embedded MCP smoke", () => {
     expect(() => assertVercelMcpSmokeAuthorized({})).toThrow("explicit authorization")
     expect(() => assertVercelMcpSmokeAuthorized({ WATERBOX_VERCEL_SMOKE_AUTHORIZATION: gates.WATERBOX_VERCEL_SMOKE_AUTHORIZATION })).toThrow("explicit authorization")
     expect(() => assertVercelMcpSmokeAuthorized(gates)).not.toThrow()
+  })
+
+  test("requires automatic stop before any Vercel baseline request", async () => {
+    await expect(runVercelMcpSmoke(gates)).rejects.toThrow("requires WATERBOX_AUTO_STOP")
   })
 
   test("captures bounded active baselines and ignores deleted tombstones", async () => {

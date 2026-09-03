@@ -29,14 +29,41 @@ describe("Waterbox MCP client renderer", () => {
     const connection = await connected(commands)
     try {
       const listedTools = (await connection.client.listTools()).tools
-      expect(listedTools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
+      expect(listedTools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "stop_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
       expect(listedTools.find(tool => tool.name === "create_snapshot")?.description).toBe("Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.")
+      expect(listedTools.find(tool => tool.name === "stop_sandbox")?.description).toBe("Ends current compute while preserving resumable sandbox state, subject to provider behavior.")
+      expect(listedTools.find(tool => tool.name === "delete_sandbox")?.description).toContain("Permanently")
+      expect(listedTools.map(tool => tool.name)).not.toContain("resume_sandbox")
+      expect(listedTools.map(tool => tool.name)).not.toContain("list_sandboxes")
+      for (const name of ["read", "write", "edit", "patch", "glob", "grep", "bash"]) {
+        const description = listedTools.find(tool => tool.name === name)?.description
+        expect(description).toContain("sandbox workspace")
+        expect(description).not.toContain("/workspace")
+      }
       const result = await connection.client.callTool({ name: "read", arguments: { sandboxId: sandbox.sandboxId, filePath: "/workspace/a.txt" } })
       expect(result).toMatchObject({ content: [{ text: expect.stringContaining('"output":"A\\n"') }] })
       expect(reads).toBe(1)
       expect(await connection.client.callTool({ name: "read", arguments: { filePath: "/workspace/a.txt" } })).toMatchObject({ isError: true, content: [{ text: "Invalid arguments for Waterbox read" }] })
       expect(reads).toBe(1)
     } finally { await connection.close() }
+  })
+
+  test("validates, dispatches, and safely renders stop_sandbox", async () => {
+    let stops = 0
+    const commands = stubClient({
+      async stopSandbox(input: any) { stops += 1; expect(input).toEqual({ sandboxId: sandbox.sandboxId }); return { ...sandbox, state: "stopped" } },
+    })
+    const connection = await connected(commands)
+    try {
+      expect(await connection.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).toMatchObject({ content: [{ text: expect.stringContaining('"state":"stopped"') }] })
+      expect(stops).toBe(1)
+      expect(await connection.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: "not-a-sandbox" } })).toMatchObject({ isError: true, content: [{ text: "Waterbox MCP request failed" }] })
+      expect(stops).toBe(1)
+    } finally { await connection.close() }
+
+    const failing = await connected(stubClient({ async stopSandbox() { throw new WaterboxClientError("Stopping failed", { status: 502, code: "provider_failure" }) } }))
+    try { expect(await failing.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).toMatchObject({ isError: true, content: [{ text: "Stopping failed" }] }) }
+    finally { await failing.close() }
   })
 
   test("keeps host plaintext out of arguments and clears it after the client settles", async () => {

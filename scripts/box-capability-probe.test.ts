@@ -48,7 +48,7 @@ describe("Box capability probe", () => {
       if (url.pathname.endsWith("/boxes") && request.method === "GET") return json({ ok: true, type: "box.list", boxes: ++cleanupLists === 1 ? [{ id: restored, state: "ready" }] : [] })
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") { sourceGets++; return json({ ok: true, type: "box.info", box: { id: source, state: sourceGets === 2 ? "archived" : "ready" } }) }
       if (url.pathname.endsWith(`/boxes/${restored}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: restored, state: "ready" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "workspace/waterbox-capability-probe-marker", encoding: "base64", size: 32 })
       if (url.pathname.endsWith("/commands")) return json({ ok: true, type: "command.finished", success: true, exitCode: 0, timedOut: false })
       if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") return json({ ok: true, type: "snapshot.named.saving", snapshot: { name: body.name, sourceBoxId: source, status: "saving" } }, 202)
       if (url.pathname.includes("/named-snapshots/") && request.method === "GET") { snapshotGets++; const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.info", snapshot: { name, sourceBoxId: source, status: snapshotGets === 1 ? "saving" : "ready", ...(snapshotGets > 1 ? { snapshotId: "artifact-1" } : {}) } }) }
@@ -165,7 +165,7 @@ describe("Box capability probe", () => {
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; if (creates === 3) throw new TypeError("restored response lost"); const id = creates < 3 ? source : restored; return json({ ok: true, type: "box.created", status: "provisioning", box: { id, state: "ready" } }, 202) }
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
       if (url.pathname.endsWith(`/boxes/${restored}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: restored, state: "error" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "workspace/waterbox-capability-probe-marker", encoding: "base64", size: 32 })
       if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") return json({ ok: true, type: "snapshot.named.saving", snapshot: { name: body.name, sourceBoxId: source, status: "saving" } }, 202)
       if (url.pathname.includes("/named-snapshots/") && request.method === "GET") { snapshotGets++; const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.info", snapshot: { name, sourceBoxId: source, status: snapshotGets === 1 ? "saving" : "ready", ...(snapshotGets > 1 ? { snapshotId: "artifact-1" } : {}) } }) }
       if (request.method === "DELETE" && url.pathname.includes("/named-snapshots/")) { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" }) }
@@ -190,7 +190,7 @@ describe("Box capability probe", () => {
       if (url.pathname.endsWith("/account/data-retention")) return retention()
       if (url.pathname.endsWith("/boxes") && request.method === "POST") { creates++; return json({ ok: true, type: "box.created", status: "provisioning", box: { id: source, state: "ready" } }, 202) }
       if (url.pathname.endsWith(`/boxes/${source}`) && request.method === "GET") return json({ ok: true, type: "box.info", box: { id: source, state: "ready" } })
-      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "waterbox-capability-probe-marker", encoding: "base64", size: 32 })
+      if (url.pathname.endsWith("/files")) return json({ ok: true, type: "file.written", success: true, path: "workspace/waterbox-capability-probe-marker", encoding: "base64", size: 32 })
       if (url.pathname.endsWith("/named-snapshots") && request.method === "POST") throw new TypeError("snapshot response lost")
       if (request.method === "DELETE" && url.pathname.includes("/named-snapshots/")) { const name = decodeURIComponent(url.pathname.split("/").at(-1)!); return json({ ok: true, type: "snapshot.named.deleted", name, status: "deleted" }) }
       if (request.method === "DELETE" && url.pathname.endsWith(source)) return json({ ok: true, type: "box.deleting", operation: { id: operation, kind: "box", targetId: source, status: "pending" } }, 202)

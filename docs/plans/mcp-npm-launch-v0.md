@@ -468,7 +468,7 @@ After Box readiness:
 4. Copy the upload into a root-owned mode-`0600` staging file and check that exact staged file's SHA-256 with the documented Node runtime.
 5. Publish the verified staged bundle atomically as `/usr/local/lib/waterbox-cli.js`.
 6. Install the launcher atomically as `/usr/local/bin/waterbox` with mode `0755`.
-7. Create `/workspace` with the intended user ownership.
+7. Create `/home/user/workspace` with the intended user ownership.
 8. Create `/run/waterbox/bash-jobs` with mode `0700`.
 9. Write `/usr/local/lib/waterbox-bootstrap.json` last through atomic replacement.
 10. Verify the manifest, `waterbox health`, `waterbox version`, `node --version`, and `rg --version`.
@@ -478,10 +478,10 @@ The launcher uses Node:
 ```sh
 #!/bin/sh
 set -eu
-sudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /workspace
+sudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /home/user/workspace
 sudo -n install -d -m 0700 /run/waterbox/bash-jobs
-cd /workspace
-exec sudo -n env WORKSPACE_ROOT=/workspace /usr/local/bin/node /usr/local/lib/waterbox-cli.js "$@"
+cd /home/user/workspace
+exec sudo -n env WORKSPACE_ROOT=/home/user/workspace /usr/local/bin/node /usr/local/lib/waterbox-cli.js "$@"
 ```
 
 The exact quoting and privilege boundaries require tests. No secret is embedded in the launcher or manifest.
@@ -520,7 +520,7 @@ Bootstrap has a distinct retry policy from user commands:
 - Every new Box created from a Waterbox snapshot receives the current runtime installation.
 - User filesystem content from the snapshot remains authoritative outside Waterbox-owned runtime paths.
 - Installation may overwrite only Waterbox-owned paths under `/usr/local/lib`, `/usr/local/bin/waterbox`, and `/run/waterbox`.
-- `/workspace` is recreated because Box does not preserve it in named snapshots.
+- `/home/user/workspace` is recreated because Box named snapshots preserve `/home/user` rather than a root-level workspace.
 - `/run` jobs and secure-transfer identities are runtime state and are not restored.
 - Stop/resume retains installed files and packages according to Box documentation.
 - Existing stopped sandboxes are not upgraded merely because a newer npm package starts locally.

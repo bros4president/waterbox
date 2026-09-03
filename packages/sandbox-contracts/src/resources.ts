@@ -4,6 +4,11 @@ import { ErrorCodeSchema } from "./errors.ts"
 export const SandboxIdSchema = z.string().regex(/^sbx_[a-z]+-[a-z]+-[a-z0-9]+$/)
 export const SnapshotIdSchema = z.string().regex(/^snap_[a-z]+-[a-z]+-[a-z0-9]+$/)
 export const ProviderNameSchema = z.string().min(1).max(64).regex(/^[a-z][a-z0-9-]*$/)
+/**
+ * Internal, versioned identity for a provider resource scope. This is never a
+ * public resource DTO field or an authorization token.
+ */
+export const ProviderConfigurationIdSchema = z.string().regex(/^pcfg_[A-Za-z0-9_-]{43}$/)
 export const TimestampSchema = z.string().datetime({ offset: true })
 
 export const SandboxStateSchema = z.enum([
@@ -57,6 +62,7 @@ export const SnapshotSchema = z.object({
 
 export type SandboxId = z.infer<typeof SandboxIdSchema>
 export type SnapshotId = z.infer<typeof SnapshotIdSchema>
+export type ProviderConfigurationId = z.infer<typeof ProviderConfigurationIdSchema>
 export type SandboxState = z.infer<typeof SandboxStateSchema>
 export type SnapshotState = z.infer<typeof SnapshotStateSchema>
 export type PublicResourceError = z.infer<typeof PublicResourceErrorSchema>

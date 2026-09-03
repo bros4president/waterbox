@@ -25,7 +25,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check:premerge": "bun run typecheck && bun run test && bun run test:node-sqlite && git diff --check \"$(git merge-base HEAD origin/main)\"..HEAD && git diff --check && git diff --cached --check",
-    "check:release": "bun run check:premerge && bun run build:mcp && npm pack --dry-run ./packages/mcp"
+    "check:release": "bun run check:premerge && bun run build:mcp && bun run scripts/verify-mcp-package.ts"
   },
   "dependencies": {
     "@aws-sdk/client-iam": "^3.883.0",
