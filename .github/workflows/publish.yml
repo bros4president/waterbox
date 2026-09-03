@@ -52,12 +52,15 @@ jobs:
           path: ${{ runner.temp }}/waterbox-release/*
           if-no-files-found: error
           retention-days: 90
-      - name: Publish retained tarball with provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+      - name: Publish or verify retained tarball
         run: |
-          npm install --global npm@11.5.1
-          test "$(npm whoami)" = "lucho-mzmz"
+          npm install --global npm@11.19.1
           cd "${RUNNER_TEMP}/waterbox-release"
           sha256sum --check waterbox-0.1.0-alpha.1.sha256
-          npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.1.tgz" --provenance --access public --tag next
+          if npm view waterbox@0.1.0-alpha.1 version >/dev/null 2>&1; then
+            mkdir "${RUNNER_TEMP}/waterbox-registry"
+            npm pack waterbox@0.1.0-alpha.1 --pack-destination "${RUNNER_TEMP}/waterbox-registry" --silent
+            cmp waterbox-0.1.0-alpha.1.tgz "${RUNNER_TEMP}/waterbox-registry/waterbox-0.1.0-alpha.1.tgz"
+          else
+            npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.1.tgz" --provenance --access public --tag next
+          fi
