@@ -2,7 +2,7 @@
 
 Date: 2026-09-01
 
-Status: Phase 6 evidence complete; the initial verdict below is retained as the historical audit classification. Phase 7 subsequently approved the supplementary provider-neutral primitive extraction in `docs/plans/sandbox-provider-primitives-and-vercel-v0.md`.
+Status: complete. The initial verdict below is retained as the historical audit classification; Phase 7 subsequently implemented and live-verified the approved provider-neutral primitive extraction.
 
 ## Verdict
 

@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Node 24.15.0, Phase 3, full Phase 4 Box bootstrap, the post-PR #5 Fetch-backed live path, the Phase 6 Vercel capability audit, and Phase 7 provider implementation handoff are verified. PR #5 merged the Fetch-backed product boundary as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and the current checkout includes it; current-Node-24 CI and package/release-path verification remain pending.
+Status: implementation in progress. Provider implementation, live acceptance, Node 24.15.0/current-Node verification, and installed-artifact verification are complete. Phase 8 package/legal/documentation closure, Phase 9 CI, and Phase 10 publication remain pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -720,7 +720,7 @@ Also run focused Node 24 repository compatibility checks added by this phase.
 
 ### Phase 2: Node MCP And One-Shot CLI
 
-Status: implemented and verified on Node 24.15.0, including the post-PR #5 Fetch-backed live MCP path; current Node 24 CI verification remains pending; depends on Phase 1.
+Status: complete; implemented and verified on Node 24.15.0 and current Node 24, including the Fetch-backed live MCP path; CI automation remains Phase 9 work.
 
 Scope:
 
@@ -756,7 +756,7 @@ Run the generated artifacts under the declared Node minimum and a current Node 2
 
 ### Phase 3: Durable Preparing Checkpoint
 
-Status: credential-free implementation verified; depends on the Phase 0 credential-free baseline and Phase 2, not Phase 0's remaining Box live gates
+Status: complete; credential-free implementation verified and Phase 0 and Phase 2 prerequisites satisfied
 
 Scope:
 
@@ -838,7 +838,7 @@ Authorized isolated-account evidence verified provider snapshot restore and stop
 
 ### Phase 5: Fetch-Backed Product Boundary
 
-Status: merged in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and integrated into the current checkout. Credential-free tests and the Node 24.15.0 live MCP path are re-verified; current-Node-24 CI and release-path verification remain pending; depends on Phase 4
+Status: complete; merged in PR #5 as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`, integrated, and re-verified through credential-free tests, current and minimum Node 24, installed-artifact verification, and authorized provider live acceptance
 
 Scope:
 
@@ -854,7 +854,7 @@ Acceptance criteria:
 - Provider diagnostics, including the Box provider diagnostic callback, are preserved.
 - Pre-merge review fixes preserve the Box provider diagnostic callback and restore comprehensive unconfigured safety coverage.
 
-Existing direct-path live evidence remains provider/bootstrap evidence only. A fresh end-to-end MCP smoke must run against the merged Fetch-backed path.
+The required fresh end-to-end MCP smoke passed against the merged Fetch-backed path.
 
 Verification:
 
@@ -869,7 +869,7 @@ Also run the configured embedded fake-provider flow under Node 24.15.0 and curre
 
 ### Phase 6: Vercel Sandbox Capability Probe And Provider-Port Audit
 
-Status: complete. The direct-REST fake suite and authorized isolated-project live probe passed with exact baseline reconciliation. The report's initial adapter-local recommendation was refined by the approved Phase 7 architecture review into the supplementary provider-neutral primitive extraction; implementation remains pending.
+Status: complete. The direct-REST fake suite and authorized isolated-project live probe passed with exact baseline reconciliation, and the approved provider-neutral implementation was completed in Phase 7.
 
 Scope:
 
@@ -890,11 +890,11 @@ Acceptance criteria:
 
 ### Phase 7: Evaluate Audit, Approve Contract, Then Implement Vercel Provider
 
-Status: complete; `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` completed its Phases 1-7 provider implementation handoff. Phase 8 package, legal, and release-document closure remains pending.
+Status: complete; the provider-neutral primitive boundary, shared runtime, Box migration, Vercel implementation, configured composition, and authorized two-provider acceptance are complete. Phase 8 package, legal, and release-document closure remains pending.
 
 Scope:
 
-- Use `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` as the durable implementation plan for this phase.
+- Follow the approved provider-neutral primitive and shared-runtime architecture recorded in the Phase 6 audit and implementation log.
 - Introduce the provider-neutral primitive infrastructure port and shared Waterbox runtime composition described there.
 - Migrate Box without behavior or persisted-reference regression and pass the authorized Box gate before production Vercel composition.
 - Then add the Vercel primitive adapter, local composition, settled configuration contract, shared parity, and authorized live acceptance.
@@ -924,14 +924,14 @@ Also run the shared mandatory provider expectations against both adapters, optio
 
 ### Phase 8: Package, Legal, And Documentation
 
-Status: pending; depends on Phase 7 and full Phase 4 live acceptance before legacy system-template removal or package completion
+Status: pending; Phase 7 and the Phase 4 live prerequisite are complete
 
 Scope:
 
 - Rename the package and executable to `waterbox`, retain its CLI-only contract, and add complete npm metadata.
 - Add Apache-2.0 licensing and exact bundle closure notices, including Hono/OpenAPI/API/client dependencies.
 - Rewrite package and root documentation for the Fetch-backed local architecture and both providers.
-- Remove supported-path system-template documentation and scripts only after full Phase 4 live acceptance, including snapshot-sourced reinstall.
+- Remove supported-path system-template documentation and scripts; the Phase 4 snapshot-sourced reinstall and live prerequisite are complete.
 - This phase now includes bounded native-keyring onboarding only: exact-pinned `@napi-rs/keyring@2.0.0` remains external to the bundle and is lazy-loaded; interactive setup never accepts CLI credential arguments; config is atomically persisted without secrets; and status/logout have safe missing-versus-inaccessible-store behavior. This does not complete the remaining package rename, legal, or broad documentation scope.
 
 Acceptance criteria:
@@ -1124,7 +1124,7 @@ docs/research/vercel-sandbox-provider-port-audit.md
 
 The existing `scripts/direct-mcp-smoke.ts` name is pre-refactor terminology. Rename or replace it with the embedded-path smoke in Phase 8; do not retain a direct-core production path merely to preserve the script name.
 
-Do not delete system-template machinery until full Phase 4 live acceptance, including snapshot-sourced reinstall. Removal is a late cleanup in Phase 8, not an assumption in earlier phases.
+The Phase 4 live prerequisite is complete. Remove system-template machinery as a Phase 8 cleanup, not as an assumption in earlier phases.
 
 ## Verification Matrix
 
@@ -1184,7 +1184,7 @@ Live tests require explicit isolated-account authorization and must prove:
 - [ ] Legacy system-template machinery removed after the snapshot/live gate.
 - [x] PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`.
 - [x] PR #5 integrated into the current checkout.
-- [ ] Post-merge embedded MCP Node-minimum, live, and release-path re-verification completed.
+- [x] Post-merge embedded MCP Node-minimum, current-Node, live, and installed-artifact re-verification completed.
 - [x] Vercel Sandbox provider-port audit has an approved follow-up architecture decision.
 - [x] Vercel Sandbox provider implemented only after the approved audit verdict.
 - [ ] npm package renamed to `waterbox`.
@@ -1215,5 +1215,5 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-09-01: PR #5 merged as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b` and was integrated into the current checkout. The launch plan was realigned to its Fetch-backed product boundary and adds audit-before-implementation pressure for Vercel Sandbox. Post-merge re-verification, the Vercel probe, and the Vercel adapter remain unclaimed.
 - 2026-09-01: Post-merge verification restored workspace links and passed 446 credential-free tests, typecheck, MCP build, focused Fetch-backed coverage, and Node 24.15.0 artifact checks. The authorized Fetch-backed Box smoke passed fresh preparation, all seven tools, secure transfer, Bash, concurrency, bounded exact cleanup, and a deliberately stale snapshot-sourced reinstall with user-data preservation and current runtime verification. The raw capability probe separately passed snapshot restore, stop/resume identity and marker continuity, accepted-pending deletion with visibility/capacity release, snapshot deletion, and zero active run-owned resources. Phase 0 and Phase 4 live gates are complete; no provider identifiers or credentials were retained.
 - 2026-09-01: Phase 6 completed without adding the Vercel SDK or changing production behavior. Twelve direct-REST fake tests passed request-contract, ambiguity, lifecycle, transient snapshot, bounded-output, redaction, and cleanup cases. The separately authorized isolated-project probe passed fresh named create, Node 24, `rg`, privilege/workspace preparation, gzip-tar upload, command wait/log/kill, stop/resume persistence with replaced session identity, manual and automatic snapshots, snapshot-source restore, deletion/tombstones, and exact baseline reconciliation with zero cleanup errors. The audit in `docs/research/vercel-sandbox-provider-port-audit.md` records exactly one verdict: adapter-local shim needed, port unchanged. Phase 7 approval, production implementation, and configuration selection remain pending; no credential or provider identifier was retained in the plan or report.
-- 2026-09-01: Phase 7 architecture review approved `docs/plans/sandbox-provider-primitives-and-vercel-v0.md` as the supplementary implementation plan. The review refined the audit recommendation: Box and Vercel share a direct low-level intersection, while the current provider implementation boundary mixes native sandbox primitives with shared Waterbox preparation, CLI, secure-transfer, and Bash-job logic. Implementation must introduce the primitive port, extract the shared runtime, migrate and live-regress Box, and only then implement and live-accept Vercel. Native `fetch` against the validated REST surface is the settled Vercel transport; no Vercel SDK dependency is planned. No production code or live provider operation occurred while recording this decision.
+- 2026-09-01: Phase 7 architecture review approved a supplementary provider-neutral implementation plan. The review refined the audit recommendation: Box and Vercel share a direct low-level intersection, while the current provider implementation boundary mixes native sandbox primitives with shared Waterbox preparation, CLI, secure-transfer, and Bash-job logic. Implementation must introduce the primitive port, extract the shared runtime, migrate and live-regress Box, and only then implement and live-accept Vercel. Native `fetch` against the validated REST surface is the settled Vercel transport; no Vercel SDK dependency is planned. No production code or live provider operation occurred while recording this decision.
 - 2026-09-02: Phase 7 complete: the supplementary provider plan completed its provider-neutral primitive boundary, shared runtime, Box migration/regression, Vercel adapter/composition, documentation, and authorized two-provider acceptance. Vercel passed fresh/current preparation, all tools, ciphertext transfer, Bash, concurrency, snapshot restore/repair, stop/resume, cancellation/kill recovery, and owned automatic-snapshot tombstone cleanup with zero active resources; Box passed its direct embedded regression with exact baseline restoration. Final verification passed 474 tests and 2433 expectations, typecheck, MCP build, Node SQLite tests, the default Node composition smoke, and diff checking. `$NODE_24_15_BIN` and `$NODE_24_CURRENT_BIN` were absent, so those named commands were not run and no substitute was used. Phase 8+ package, legal, CI, and npm release work remains pending.
