@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { type SandboxState, type SnapshotState } from "@waterbox/contracts"
-import { ProviderError, type SandboxProvider } from "@waterbox/core/provider"
+import { ProviderError, type ProviderSandboxObservation, type SandboxProvider } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
 import {
   WaterboxSandboxBackend,
@@ -180,8 +180,13 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async #resume(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    const state = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"), input.signal))
-    return observation(mapSandboxState(state.state), ref)
+    const accepted = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"))
+    try {
+      const ready = await this.#waitReady(accepted, input.signal, ref)
+      return observation(mapSandboxState(ready.state), ref)
+    } catch (error) {
+      throw postDispatchResumeError(error, ref)
+    }
   }
   async delete(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
@@ -230,11 +235,18 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
     } catch (error) { if (error instanceof BoxHttpError && error.status === 404) return snapshotObservation("deleted", ref); throw error }
   }
 
-  async #waitReady(initial: BoxDto, signal: AbortSignal): Promise<BoxDto> {
+  async #waitReady(initial: BoxDto, signal: AbortSignal, resumeRef?: SandboxRef): Promise<BoxDto> {
     let current = initial
     const deadline = this.#now() + this.#config.polling.timeoutMs
     while (!READY.has(current.state)) {
-      if (current.state === "error" || current.state === "archived" || this.#now() >= deadline) throw new ProviderError("failure", "Box could not become ready")
+      if (current.state === "error" || current.state === "archived") {
+        if (resumeRef !== undefined) {
+          const observed = coreObservation(mapSandboxState(current.state), resumeRef)
+          throw new ProviderError(current.state === "error" ? "known_state" : "ambiguous_execution", "Box resume did not become ready", { knownObservation: { resource: "sandbox", observation: observed } })
+        }
+        throw new ProviderError("failure", "Box could not become ready")
+      }
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Box could not become ready")
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
       current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
     }
@@ -321,11 +333,19 @@ function deletion(value: unknown, type: string, target: string, expected?: strin
 function commandResult(value: unknown): { exitCode: number | null; stdout: string; stderr: string; timedOut: boolean; stdoutTruncated: boolean; stderrTruncated: boolean } { if (!object(value) || value.ok !== true || value.type !== "command.finished" || typeof value.success !== "boolean" || (typeof value.exitCode !== "number" && value.exitCode !== null) || (value.success !== (value.exitCode === 0)) || typeof value.stdout !== "string" || typeof value.stderr !== "string" || typeof value.timedOut !== "boolean" || (value.stdoutTruncated !== undefined && typeof value.stdoutTruncated !== "boolean") || (value.stderrTruncated !== undefined && typeof value.stderrTruncated !== "boolean")) throw ambiguous(); return { exitCode: value.exitCode as number | null, stdout: value.stdout, stderr: value.stderr, timedOut: value.timedOut, stdoutTruncated: value.stdoutTruncated === true, stderrTruncated: value.stderrTruncated === true } }
 function writtenFile(value: unknown, path: string, size: number): void { const result = envelope(value, "file.written"); if (result.success !== true || typeof result.path !== "string" || new URL(result.path, "file:///home/user/").pathname !== path || result.encoding !== "base64" || result.size !== size) throw new ProviderError("failure", "Box returned an invalid file upload response") }
 function observation(state: SandboxState, providerRef: SandboxRef): InfrastructureSandboxObservation { return { state, providerRef } }
+function coreObservation(state: SandboxState, providerRef: SandboxRef): ProviderSandboxObservation { return { state, providerRef } }
 function snapshotObservation(state: SnapshotState, providerRef: SnapshotRef): InfrastructureSnapshotObservation { return { state, providerRef } }
 function mapSandboxState(state: BoxState): SandboxState { return READY.has(state) || state === "running" ? "running" : ["init", "provisioning", "provisioned", "cloning"].includes(state) ? "provisioning" : state === "archiving" ? "stopping" : state === "archived" ? "stopped" : "failed" }
 function mapSnapshotState(state: SnapshotStatus): SnapshotState { return state === "saving" ? "creating" : state }
 function ambiguous(): ProviderError { return new ProviderError("ambiguous_execution", "Box command outcome is unknown") }
 function ambiguousMutation(): ProviderError { return new ProviderError("ambiguous_execution", "Box mutation outcome is unknown") }
+function postDispatchResumeError(error: unknown, ref: SandboxRef): ProviderError {
+  if (error instanceof ProviderError && error.knownObservation !== undefined) return error
+  if (error instanceof BoxHttpError && error.status === 404) {
+    return new ProviderError("exact_absence", "Box sandbox is absent after accepted resume", { knownObservation: { resource: "sandbox", observation: coreObservation("terminated", ref) } })
+  }
+  return new ProviderError("ambiguous_execution", "Box resume outcome is unknown")
+}
 function meaningfulStderr(value: string): string { return value.replace(/^sh: 0: getcwd\(\) failed: No such file or directory\n?/, "") }
 function segment(value: string): string { return encodeURIComponent(value) }
 function nonempty(value: unknown): value is string { return typeof value === "string" && value.length > 0 && value === value.trim() }

@@ -151,6 +151,30 @@ describe("Box primitive contracts", () => {
     await expect(deleted.delete({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
   })
 
+  test("distinguishes definite resume rejection from polling failures after acceptance", async () => {
+    for (const status of [400, 429]) {
+      const rejected = infrastructure(() => Response.json({ code: "rejected" }, { status }))
+      await expect(rejected.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `pre-dispatch ${status}`).rejects.toMatchObject({ kind: "failure" })
+      expect(rejected.requests, `pre-dispatch ${status}`).toHaveLength(1)
+
+      const accepted = infrastructure(request => request.method === "POST"
+        ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+        : Response.json({ code: "poll_rejected" }, { status }))
+      await expect(accepted.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `post-dispatch ${status}`).rejects.toMatchObject({ kind: "ambiguous_execution" })
+      expect(accepted.requests.map(request => request.method), `post-dispatch ${status}`).toEqual(["POST", "GET"])
+    }
+
+    const terminalFailure = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      : box("error"))
+    await expect(terminalFailure.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "known_state", knownObservation: { resource: "sandbox", observation: { state: "failed", providerRef: sandboxRef } } })
+
+    const terminalAbsence = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      : Response.json({}, { status: 404 }))
+    await expect(terminalAbsence.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "exact_absence", knownObservation: { resource: "sandbox", observation: { state: "terminated", providerRef: sandboxRef } } })
+  })
+
   test("classifies every dispatched lifecycle response that cannot prove its result as ambiguous without retrying", async () => {
     const lifecycle = [
       ["create", (value: BoxSandboxInfrastructure) => value.create({ accountId: "account", sandboxId: "sbx_calm-cactus-7k3m" as never, idempotencyKey: "uncertain-create", signal: signal() })],
@@ -325,6 +349,33 @@ describe("Box primitive contracts", () => {
 })
 
 describe("assembled Box compatibility", () => {
+  test("retains resuming after an accepted resume hits a polling limit without redispatch", async () => {
+    let resumeDispatches = 0
+    let reads = 0
+    const { fetch } = infrastructure(request => {
+      if (request.method === "POST" && new URL(request.url).pathname.endsWith(`/boxes/${sandboxRef.boxId}/resume`)) {
+        resumeDispatches++
+        return Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      }
+      if (request.method === "GET") {
+        reads++
+        return reads === 1 ? Response.json({ code: "rate_limited" }, { status: 429 }) : box("archived")
+      }
+      throw new Error("unexpected Box request")
+    })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "stopped", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.resumeSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "ambiguous_execution" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("resuming")
+    expect((await service.getSandbox(identity, sandboxId)).state).toBe("resuming")
+    expect(resumeDispatches).toBe(1)
+  })
+
   test("maps an omitted native snapshot source observation without changing the durable source", async () => {
     const { fetch } = infrastructure(async request => {
       const path = new URL(request.url).pathname

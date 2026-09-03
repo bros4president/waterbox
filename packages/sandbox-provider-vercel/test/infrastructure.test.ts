@@ -343,6 +343,58 @@ describe("Vercel primitive REST adapter", () => {
     expect(readsByResume.map(request => new URL(request.url).searchParams.get("resume"))).toEqual(["true", "false"])
   })
 
+  test("distinguishes definite resume rejection from polling failures after acceptance", async () => {
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    for (const status of [400, 429]) {
+      const rejected = fixture(() => Response.json({}, { status }))
+      await expect(rejected.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() }), `pre-dispatch ${status}`).rejects.toMatchObject({ kind: status === 429 ? "limit" : "failure" })
+      expect(rejected.requests, `pre-dispatch ${status}`).toHaveLength(1)
+
+      const accepted = fixture(request => new URL(request.url).searchParams.get("resume") === "true"
+        ? created(name(), "pending", "session-2")
+        : Response.json({}, { status }))
+      await expect(accepted.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() }), `post-dispatch ${status}`).rejects.toMatchObject({ kind: "ambiguous_execution" })
+      expect(accepted.requests.map(request => new URL(request.url).searchParams.get("resume")), `post-dispatch ${status}`).toEqual(["true", "false"])
+    }
+
+    const terminalFailure = fixture(request => new URL(request.url).searchParams.get("resume") === "true"
+      ? created(name(), "pending", "session-2")
+      : created(name(), "failed", "session-2"))
+    await expect(terminalFailure.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() })).rejects.toMatchObject({ kind: "known_state", knownObservation: { resource: "sandbox", observation: { state: "failed", providerRef } } })
+
+    const terminalAbsence = fixture(request => new URL(request.url).searchParams.get("resume") === "true"
+      ? created(name(), "pending", "session-2")
+      : Response.json({}, { status: 404 }))
+    await expect(terminalAbsence.value.stopResume.resume({ accountId: "account", providerRef, signal: signal() })).rejects.toMatchObject({ kind: "exact_absence", knownObservation: { resource: "sandbox", observation: { state: "terminated", providerRef } } })
+  })
+
+  test("retains resuming after an accepted resume hits a polling rejection without redispatch", async () => {
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    let resumeDispatches = 0
+    let reads = 0
+    const { value } = fixture(request => {
+      const url = new URL(request.url)
+      if (url.pathname !== `/v2/sandboxes/${name()}`) throw new Error(`unexpected ${request.method} ${url.pathname}`)
+      if (url.searchParams.get("resume") === "true") {
+        resumeDispatches++
+        return created(name(), "pending", "session-2")
+      }
+      reads++
+      return reads === 1 ? Response.json({}, { status: 429 }) : created(name(), "stopped", "session-2")
+    })
+    const provider = new WaterboxSandboxBackend(value, { artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-river-a1" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef, state: "stopped", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.resumeSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "ambiguous_execution" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("resuming")
+    expect((await service.getSandbox(identity, sandboxId)).state).toBe("resuming")
+    expect(resumeDispatches).toBe(1)
+  })
+
   test("reconciles a 409 snapshot delete only through an exact deleted tombstone read", async () => {
     const ref = { kind: "vercel-snapshot-v1", id: "snapshot-tombstone", owner: owner(), sourceName: name() } as const
     let reads = 0, deletes = 0
