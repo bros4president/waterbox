@@ -174,8 +174,13 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async #stop(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    const state = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/stop`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.stopping"))
-    return observation(mapSandboxState(state.state), ref)
+    const accepted = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/stop`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.stopping"))
+    try {
+      const stopped = await this.#waitStopped(accepted, input.signal, ref)
+      return observation(mapSandboxState(stopped.state), ref)
+    } catch (error) {
+      throw postDispatchStopError(error, ref)
+    }
   }
   async #resume(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
@@ -247,6 +252,17 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
         throw new ProviderError("failure", "Box could not become ready")
       }
       if (this.#now() >= deadline) throw new ProviderError("failure", "Box could not become ready")
+      await this.#clock.sleep(this.#config.polling.intervalMs, signal)
+      current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
+    }
+    return current
+  }
+  async #waitStopped(initial: BoxDto, signal: AbortSignal, ref: SandboxRef): Promise<BoxDto> {
+    let current = initial
+    const deadline = this.#now() + this.#config.polling.timeoutMs
+    while (current.state !== "archived") {
+      if (current.state === "error") throw new ProviderError("known_state", "Box could not stop", { knownObservation: { resource: "sandbox", observation: coreObservation("failed", ref) } })
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Box could not stop")
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
       current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
     }
@@ -339,6 +355,13 @@ function mapSandboxState(state: BoxState): SandboxState { return READY.has(state
 function mapSnapshotState(state: SnapshotStatus): SnapshotState { return state === "saving" ? "creating" : state }
 function ambiguous(): ProviderError { return new ProviderError("ambiguous_execution", "Box command outcome is unknown") }
 function ambiguousMutation(): ProviderError { return new ProviderError("ambiguous_execution", "Box mutation outcome is unknown") }
+function postDispatchStopError(error: unknown, ref: SandboxRef): ProviderError {
+  if (error instanceof ProviderError && error.knownObservation !== undefined) return error
+  if (error instanceof BoxHttpError && error.status === 404) {
+    return new ProviderError("exact_absence", "Box sandbox is absent after accepted stop", { knownObservation: { resource: "sandbox", observation: coreObservation("terminated", ref) } })
+  }
+  return new ProviderError("ambiguous_execution", "Box stop outcome is unknown")
+}
 function postDispatchResumeError(error: unknown, ref: SandboxRef): ProviderError {
   if (error instanceof ProviderError && error.knownObservation !== undefined) return error
   if (error instanceof BoxHttpError && error.status === 404) {

@@ -151,6 +151,29 @@ describe("Box primitive contracts", () => {
     await expect(deleted.delete({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
   })
 
+  test("polls an accepted stop to exact archived completion", async () => {
+    const { value, requests } = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+      : box("archived"))
+
+    await expect(value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "stopped", providerRef: sandboxRef })
+    expect(requests.map(request => request.method)).toEqual(["POST", "GET"])
+  })
+
+  test("distinguishes definite stop rejection from polling failures after acceptance", async () => {
+    for (const status of [400, 429]) {
+      const rejected = infrastructure(() => Response.json({ code: "rejected" }, { status }))
+      await expect(rejected.value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `pre-dispatch ${status}`).rejects.toMatchObject({ kind: "failure" })
+      expect(rejected.requests, `pre-dispatch ${status}`).toHaveLength(1)
+
+      const accepted = infrastructure(request => request.method === "POST"
+        ? Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+        : Response.json({ code: "poll_rejected" }, { status }))
+      await expect(accepted.value.stopResume.stop({ accountId: "account", providerRef: sandboxRef, signal: signal() }), `post-dispatch ${status}`).rejects.toMatchObject({ kind: "ambiguous_execution" })
+      expect(accepted.requests.map(request => request.method), `post-dispatch ${status}`).toEqual(["POST", "GET"])
+    }
+  })
+
   test("distinguishes definite resume rejection from polling failures after acceptance", async () => {
     for (const status of [400, 429]) {
       const rejected = infrastructure(() => Response.json({ code: "rejected" }, { status }))
@@ -349,6 +372,65 @@ describe("Box primitive contracts", () => {
 })
 
 describe("assembled Box compatibility", () => {
+  test("returns exact stopped completion and enables one subsequent delete", async () => {
+    let stopDispatches = 0
+    let deleteDispatches = 0
+    const operationId = `bdop_${"a".repeat(32)}`
+    const { fetch } = infrastructure(request => {
+      const path = new URL(request.url).pathname
+      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/stop`)) {
+        stopDispatches++
+        return Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+      }
+      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) return box("archived")
+      if (request.method === "DELETE" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) {
+        deleteDispatches++
+        return Response.json({ ok: true, type: "box.deleting", operation: { id: operationId, kind: "box", targetId: sandboxRef.boxId, status: "pending" } }, { status: 202 })
+      }
+      if (request.method === "GET" && path.endsWith(`/deletion-operations/${operationId}`)) return Response.json({ ok: true, type: "deletion.operation", operation: { id: operationId, kind: "box", targetId: sandboxRef.boxId, status: "completed" } })
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.stopSandbox(identity, sandboxId)).resolves.toMatchObject({ state: "stopped" })
+    await expect(service.deleteSandbox(identity, sandboxId)).resolves.toMatchObject({ state: "terminated" })
+    expect(stopDispatches).toBe(1)
+    expect(deleteDispatches).toBe(1)
+  })
+
+  test("retains stopping after accepted stop polling ambiguity without redispatch", async () => {
+    let stopDispatches = 0
+    let reads = 0
+    const { fetch } = infrastructure(request => {
+      const path = new URL(request.url).pathname
+      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/stop`)) {
+        stopDispatches++
+        return Response.json({ ok: true, type: "box.stopping", id: sandboxRef.boxId, status: "archiving" }, { status: 202 })
+      }
+      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) {
+        reads++
+        return reads === 1 ? Response.json({ code: "rate_limited" }, { status: 429 }) : box("ready")
+      }
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
+    const identity: Identity = { accountId: "account" }
+    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
+    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
+
+    await expect(service.stopSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "ambiguous_execution" })
+    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("stopping")
+    await expect(service.stopSandbox(identity, sandboxId)).rejects.toMatchObject({ code: "invalid_state" })
+    expect(stopDispatches).toBe(1)
+  })
+
   test("retains resuming after an accepted resume hits a polling limit without redispatch", async () => {
     let resumeDispatches = 0
     let reads = 0
