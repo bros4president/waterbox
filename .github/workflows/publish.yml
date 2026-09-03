@@ -25,6 +25,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.15.0
+          registry-url: https://registry.npmjs.org
       - name: Retain minimum Node 24 binary
         run: echo "NODE_24_15_BIN=$(command -v node)" >> "$GITHUB_ENV"
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -52,8 +53,11 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Publish retained tarball with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
         run: |
           npm install --global npm@11.5.1
+          test "$(npm whoami)" = "lucho-mzmz"
           cd "${RUNNER_TEMP}/waterbox-release"
           sha256sum --check waterbox-0.1.0-alpha.1.sha256
           npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.1.tgz" --provenance --access public --tag next
