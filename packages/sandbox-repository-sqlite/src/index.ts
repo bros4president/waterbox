@@ -88,8 +88,17 @@ type IdempotencyDocumentRow = {
 }
 type CursorPayload = { v: 1; after: string }
 type TableColumnRow = { name: string; type: string; notnull: number | bigint; pk: number | bigint }
+type TableListRow = { name: string; ncol: number | bigint; wr: number | bigint; strict: number | bigint }
+type SchemaVersionRow = { singleton: number | bigint; schema_version: number | bigint }
+
+const REPOSITORY_SCHEMA_VERSION = 1
+const REPOSITORY_SCHEMA_TABLE = "waterbox_repository_schema"
 
 const REPOSITORY_TABLE_COLUMNS = {
+  [REPOSITORY_SCHEMA_TABLE]: [
+    ["singleton", "INTEGER", 1, 1],
+    ["schema_version", "INTEGER", 1, 0],
+  ],
   sandbox_documents: [
     ["account_id", "TEXT", 1, 1],
     ["resource_id", "TEXT", 1, 2],
@@ -110,6 +119,12 @@ const REPOSITORY_TABLE_COLUMNS = {
     ["document", "TEXT", 1, 0],
   ],
 } as const
+
+const REPOSITORY_DOCUMENT_TABLES = new Set([
+  "sandbox_documents",
+  "snapshot_documents",
+  "idempotency_documents",
+])
 
 const CURSOR_FORMAT_VERSION = 1
 class CursorCodec {
@@ -214,9 +229,21 @@ function serialize(value: unknown): string {
 }
 
 function hasCurrentRepositorySchema(database: RepositoryDatabase): boolean {
-  return Object.entries(REPOSITORY_TABLE_COLUMNS).every(([table, expected]) => {
+  const waterboxTables = waterboxTableNames(database)
+  if (waterboxTables.size !== Object.keys(REPOSITORY_TABLE_COLUMNS).length
+    || !Object.keys(REPOSITORY_TABLE_COLUMNS).every((table) => waterboxTables.has(table))) {
+    return false
+  }
+
+  const tableList = database.prepare("PRAGMA table_list").all() as TableListRow[]
+  const hasCurrentTables = Object.entries(REPOSITORY_TABLE_COLUMNS).every(([table, expected]) => {
     const columns = database.prepare(`PRAGMA table_info(${table})`).all() as TableColumnRow[]
     if (columns.length !== expected.length) return false
+    const definition = tableList.find((candidate) => candidate.name === table)
+    if (definition === undefined
+      || Number(definition.ncol) !== expected.length
+      || Number(definition.wr) !== 1
+      || Number(definition.strict) !== 0) return false
     return columns.every((column, index) => {
       const expectedColumn = expected[index]
       return expectedColumn !== undefined
@@ -226,6 +253,67 @@ function hasCurrentRepositorySchema(database: RepositoryDatabase): boolean {
         && Number(column.pk) === expectedColumn[3]
     })
   })
+  if (!hasCurrentTables) return false
+
+  const versions = database.prepare(
+    `SELECT singleton, schema_version FROM ${REPOSITORY_SCHEMA_TABLE}`,
+  ).all() as SchemaVersionRow[]
+  return versions.length === 1
+    && Number(versions[0]?.singleton) === 1
+    && Number(versions[0]?.schema_version) === REPOSITORY_SCHEMA_VERSION
+}
+
+function waterboxTableNames(database: RepositoryDatabase): Set<string> {
+  const rows = database.prepare("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").all() as { name: string }[]
+  return new Set(rows
+    .map((row) => row.name)
+    .filter((name) => REPOSITORY_DOCUMENT_TABLES.has(name) || name.startsWith("waterbox_")))
+}
+
+function initializeFreshRepositorySchema(database: RepositoryDatabase): boolean {
+  database.exec("BEGIN IMMEDIATE")
+  try {
+    // Reinspect while holding the write lock: another process may have initialized
+    // the file after the constructor's first read.
+    if (waterboxTableNames(database).size !== 0) {
+      const current = hasCurrentRepositorySchema(database)
+      database.exec("ROLLBACK")
+      return current
+    }
+    database.exec(`
+      CREATE TABLE ${REPOSITORY_SCHEMA_TABLE} (
+        singleton INTEGER NOT NULL PRIMARY KEY CHECK (singleton = 1),
+        schema_version INTEGER NOT NULL
+      ) WITHOUT ROWID;
+      INSERT INTO ${REPOSITORY_SCHEMA_TABLE} (singleton, schema_version)
+        VALUES (1, ${REPOSITORY_SCHEMA_VERSION});
+      CREATE TABLE sandbox_documents (
+        account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
+        PRIMARY KEY (account_id, resource_id)
+      ) WITHOUT ROWID;
+      CREATE TABLE snapshot_documents (
+        account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
+        PRIMARY KEY (account_id, resource_id)
+      ) WITHOUT ROWID;
+      CREATE TABLE idempotency_documents (
+        account_id TEXT NOT NULL, scope TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+        version INTEGER NOT NULL, document TEXT NOT NULL,
+        PRIMARY KEY (account_id, scope, idempotency_key)
+      ) WITHOUT ROWID;
+    `)
+    if (!hasCurrentRepositorySchema(database)) throw new Error("Failed to initialize Waterbox SQLite schema")
+    database.exec("COMMIT")
+    return true
+  } catch (error) {
+    try { database.exec("ROLLBACK") } catch {}
+    throw error
+  }
+}
+
+function ensureCurrentRepositorySchema(database: RepositoryDatabase): boolean {
+  return waterboxTableNames(database).size === 0
+    ? initializeFreshRepositorySchema(database)
+    : hasCurrentRepositorySchema(database)
 }
 
 export class SqliteSandboxRepository implements SandboxRepository {
@@ -406,22 +494,7 @@ export class SqliteRepositoryStore {
       readOnly: options.readonly,
     })
     this.database.exec("PRAGMA foreign_keys = OFF")
-    this.database.exec(`
-      CREATE TABLE IF NOT EXISTS sandbox_documents (
-        account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
-        PRIMARY KEY (account_id, resource_id)
-      ) WITHOUT ROWID;
-      CREATE TABLE IF NOT EXISTS snapshot_documents (
-        account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
-        PRIMARY KEY (account_id, resource_id)
-      ) WITHOUT ROWID;
-      CREATE TABLE IF NOT EXISTS idempotency_documents (
-        account_id TEXT NOT NULL, scope TEXT NOT NULL, idempotency_key TEXT NOT NULL,
-        version INTEGER NOT NULL, document TEXT NOT NULL,
-        PRIMARY KEY (account_id, scope, idempotency_key)
-      ) WITHOUT ROWID;
-    `)
-    if (!hasCurrentRepositorySchema(this.database)) {
+    if (!ensureCurrentRepositorySchema(this.database)) {
       this.database.close()
       this.#closed = true
       throw new IncompatibleRepositorySchemaError(filename)
