@@ -1,11 +1,14 @@
 import { build } from "esbuild"
+import { execFile } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
-import { mkdir, rm } from "node:fs/promises"
+import { mkdir, rename, rm } from "node:fs/promises"
+import { promisify } from "node:util"
 import { verifyBundleClosure } from "./verify-mcp-bundle-closure.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const mode = process.argv[2]
+const run = promisify(execFile)
 
 const common = {
   absWorkingDir: root,
@@ -24,6 +27,27 @@ if (mode === "cli") {
     entryPoints: [resolve(root, "packages/sandbox-cli/src/main.ts")],
     outfile: resolve(root, "packages/sandbox-cli/dist/waterbox-cli.js"),
   })
+} else if (mode === "provider-box") {
+  const packageRoot = resolve(root, "packages/sandbox-provider-box")
+  const dist = resolve(packageRoot, "dist")
+  await rm(dist, { recursive: true, force: true })
+  await mkdir(dist, { recursive: true })
+  await build({
+    ...common,
+    entryPoints: [resolve(packageRoot, "src/public.ts")],
+    outfile: resolve(dist, "index.js"),
+    external: ["@waterbox/contracts", "@waterbox/contracts/*", "@waterbox/core", "@waterbox/core/*"],
+  })
+  await build({
+    ...common,
+    entryPoints: [resolve(root, "packages/sandbox-cli/src/main.ts")],
+    outfile: resolve(dist, "waterbox-cli.js"),
+  })
+  await run(process.execPath, [resolve(root, "node_modules/typescript/bin/tsc"), "-p", resolve(packageRoot, "tsconfig.build.json")])
+  // The package exposes only the ergonomic public surface, not its workspace internals.
+  await rm(resolve(dist, "index.d.ts"), { force: true })
+  await rename(resolve(dist, "public.d.ts"), resolve(dist, "index.d.ts"))
+  await rm(resolve(dist, "index.d.ts.map"), { force: true })
 } else if (mode === "mcp") {
   const dist = resolve(root, "packages/mcp/dist")
   await rm(dist, { recursive: true, force: true })
@@ -44,5 +68,5 @@ if (mode === "cli") {
   ])
   await verifyBundleClosure(root, results.map(result => result.metafile))
 } else {
-  throw new Error("Usage: node scripts/build-waterbox.mjs <cli|mcp>")
+  throw new Error("Usage: node scripts/build-waterbox.mjs <cli|provider-box|mcp>")
 }

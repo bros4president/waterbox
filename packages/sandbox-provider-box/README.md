@@ -1,28 +1,43 @@
 # @waterbox/provider-box
 
-`BoxSandboxProvider` implements the provider-neutral core port over Box Public API v1.
-Lifecycle and snapshots use first-class Box endpoints. Tool execution invokes the
-one-shot Waterbox CLI through `POST /boxes/{id}/commands`; no hosted daemon or protected
-URL is used or persisted.
+Box Public API v1 provider for Waterbox. It includes the sandbox CLI artifact,
+so application code installs no private Waterbox runtime packages.
 
-Configuration supplies the API base URL, API key, polling policy, clock, and an immutable
-Node CLI artifact. Fresh Boxes are `noEnv` and omit `from`; snapshot-sourced Boxes use only
-the user snapshot reference. After readiness, preparation verifies an existing manifest,
-installed artifact digest, CLI health/version, Node 24, and ripgrep before mutating anything.
-An incomplete runtime receives a deterministic artifact upload and a root-owned staged,
-digest-checked atomic installation. The launcher and CLI are published before the manifest,
-which is always the final completion marker. Opaque V2 references contain the Box ID only;
-legacy daemon references are rejected.
+```sh
+npm install @waterbox/provider-box@next
+```
 
-Canonical tool arguments are encoded as a bounded, versioned base64url envelope and sent
-as one `waterbox run` argument. Commands are never retried. Lost responses, Box 5xx,
-timeouts, truncation, malformed CLI output, and internal CLI failures are surfaced as
-ambiguous execution. Definite API 4xx and structured CLI rejections are ordinary provider
-failures. Bash returns one buffered terminal event because Box commands are synchronous.
-That event may report completed execution or detached dispatch; the adapter forwards either
-receipt unchanged and does not read or poll its output/status files.
+```ts
+import { BoxSandboxProvider } from "@waterbox/provider-box"
 
-Each tool invocation is sent as one independent Box command request. The adapter does not
-queue, serialize, deduplicate, or throttle command execution. Any provider-side command
-ordering or concurrency limit is surfaced as Box behavior rather than recreated by
-Waterbox.
+const provider = new BoxSandboxProvider({
+  apiBaseUrl: "https://api.box.example/v1",
+  apiKey: process.env.BOX_API_KEY!,
+  polling: { intervalMs: 1_000, timeoutMs: 60_000 },
+  automaticStopMs: 3_600_000,
+})
+```
+
+`createBoxSandboxProvider(config)` is an equivalent factory. Both compose the
+embedded CLI artifact and the system clock automatically. Tests and advanced
+integrations may pass `clock`, `fetch`, `diagnostic`, or a replacement
+`artifact` as the optional second argument.
+
+The host entry requires Node.js 22 or later. The embedded CLI is built for
+Node.js 24.15 and runs inside the Box sandbox; Box images must provide a
+compatible Node 24 runtime and `rg`.
+
+## Public API
+
+- `BoxSandboxProvider` and `createBoxSandboxProvider`
+- `SystemBoxProviderClock`
+- `deriveBoxProviderConfigurationId(config)` for the conservative Box
+  provider binding identity used by Waterbox core
+- `loadSandboxRuntimeArtifact(location, artifactVersion)` for explicit
+  artifact loading
+- `BoxProviderConfig`, `BoxProviderDependencies`, `BoxProviderClock`,
+  `BoxProviderFetch`, `BoxProviderDiagnostic`, and `SandboxRuntimeArtifact`
+
+The provider uses native Box lifecycle and named-snapshot endpoints. Each tool
+execution is one Box command request and is never retried after an uncertain
+outcome.
