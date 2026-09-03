@@ -179,13 +179,13 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     if (!restoredRuntime.includes(HEALTH) || !restoredRuntime.includes(VERSION)) throw new Error("Direct MCP restored runtime verification failed")
     report("restored-runtime", { reinstalled: true, current: true })
 
-    const beforeAutomaticStop = trackedSandbox(await callTool(client, { name: "probe_sandbox", arguments: target }))
-    if (beforeAutomaticStop.state === "terminated" || beforeAutomaticStop.state === "failed") throw new Error("Direct MCP source sandbox was not resumable before automatic-stop observation")
-    const armedOutput = await successfulOutput(client, "bash", { ...target, command: "printf automatic-stop-armed" }, sleep)
+    const beforeAutomaticStop = trackedSandbox(await callTool(client, { name: "probe_sandbox", arguments: restoredTarget }))
+    if (beforeAutomaticStop.state === "terminated" || beforeAutomaticStop.state === "failed") throw new Error("Direct MCP restored sandbox was not resumable before automatic-stop observation")
+    const armedOutput = await successfulOutput(client, "bash", { ...restoredTarget, command: "printf automatic-stop-armed" }, sleep)
     if (armedOutput !== "automatic-stop-armed") throw new Error("Direct MCP could not arm automatic-stop observation from running compute")
     report("automatic-stop-armed", { running: true, logicalToolDispatches: 1 })
 
-    await waitForAutomaticStop(client, target, {
+    await waitForAutomaticStop(client, restoredTarget, {
       automaticStopMs: options.automaticStopMs,
       graceMs: options.automaticStopGraceMs ?? 120_000,
       pollIntervalMs: options.automaticStopPollIntervalMs ?? 1_000,
@@ -193,7 +193,7 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
       sleep,
     })
     report("automatic-stop", { stopped: true, resumable: true })
-    const automaticResumeOutput = await successfulOutput(client, "bash", { ...target, command: "printf automatic-stop-resumed" }, sleep)
+    const automaticResumeOutput = await successfulOutput(client, "bash", { ...restoredTarget, command: "printf automatic-stop-resumed" }, sleep)
     if (automaticResumeOutput !== "automatic-stop-resumed") throw new Error("Direct MCP ordinary tool did not resume an automatically stopped sandbox")
     report("automatic-stop-ordinary-resume", { resumed: true, logicalToolDispatches: 1 })
   } catch (error) {

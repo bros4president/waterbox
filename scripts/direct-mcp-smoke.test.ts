@@ -55,6 +55,8 @@ describe("Direct MCP smoke", () => {
     expect(snapshotAt).toBeLessThan(restoredReadAt)
     expect(restoredReadAt).toBeLessThan(automaticArmAt)
     expect(automaticArmAt).toBeLessThan(automaticResumeAt)
+    expect(fake.calls[automaticArmAt]!.arguments.sandboxId).toBe(restoredSandboxId)
+    expect(fake.calls[automaticResumeAt]!.arguments.sandboxId).toBe(restoredSandboxId)
     expect(fake.deletions).toEqual([restoredSandboxId, snapshotId, sandboxId])
     expect(lines.join("\n")).toContain('"ready":true')
     expect(lines.join("\n")).toContain('"preserved":true')
@@ -73,12 +75,14 @@ describe("Direct MCP smoke", () => {
       staleRuntimeCommand: "rm -f /workspace/.waterbox/waterbox-cli.js",
       restoredRuntimeCheck: "test -s /workspace/.waterbox/waterbox-cli.js && test -f /workspace/.waterbox/manifest.json",
     }
-    const fake = fakeClient({ workdir: runtime.workdir, markerPath: runtime.markerPath, snapshotStopsSource: true })
+    const fake = fakeClient({ workdir: runtime.workdir, markerPath: runtime.markerPath, sourceStaleAfterSnapshot: true })
     await runDirectMcpProductFlow(fake.client, { ...productOptions(fake), runtime })
     expect(fake.calls).toContainEqual({ name: "read", arguments: { sandboxId: restoredSandboxId, filePath: "vercel-direct-marker" } })
     const markerCommand = fake.calls.find((call) => call.name === "bash" && call.arguments.command === "pwd; cat -- vercel-direct-marker")
     expect(markerCommand?.arguments).not.toHaveProperty("workdir")
-    expect(fake.calls.filter((call) => call.name === "bash" && call.arguments.command === "printf automatic-stop-armed")).toHaveLength(1)
+    expect(fake.calls.filter((call) => call.name === "bash" && call.arguments.command === "printf automatic-stop-armed" && call.arguments.sandboxId === restoredSandboxId)).toHaveLength(1)
+    const snapshotAt = fake.calls.findIndex((call) => call.name === "create_snapshot")
+    expect(fake.calls.slice(snapshotAt + 1).filter((call) => ["probe_sandbox", "bash"].includes(call.name) && call.arguments.sandboxId === sandboxId)).toHaveLength(0)
     expect(fake.deletions).toEqual([restoredSandboxId, snapshotId, sandboxId])
   })
 
@@ -206,11 +210,12 @@ const text = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringi
 const resource = (id = sandboxId, state = "running", sourceSnapshotId?: string) => ({ sandboxId: id, provider: "box", state, ...(sourceSnapshotId ? { sourceSnapshotId } : {}), version: 1, createdAt: now, updatedAt: now })
 const snapshot = (state = "creating") => ({ snapshotId, provider: "box", sourceSandboxId: sandboxId, state, version: 1, createdAt: now, updatedAt: now })
 
-function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; failSnapshotCreate?: boolean; failSnapshotReadiness?: boolean; failRestoredCreate?: boolean; failRestoredVerification?: boolean; failRestoredCleanup?: boolean; neverAutoStop?: boolean; malformedSourceResponse?: boolean; malformedSnapshotResponse?: boolean; malformedRestoredResponse?: boolean; sourceRecoveryError?: boolean; restoredRecoveryError?: boolean; snapshotStopsSource?: boolean; workdir?: string; markerPath?: string } = {}) {
+function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; failSnapshotCreate?: boolean; failSnapshotReadiness?: boolean; failRestoredCreate?: boolean; failRestoredVerification?: boolean; failRestoredCleanup?: boolean; neverAutoStop?: boolean; malformedSourceResponse?: boolean; malformedSnapshotResponse?: boolean; malformedRestoredResponse?: boolean; sourceRecoveryError?: boolean; restoredRecoveryError?: boolean; sourceStaleAfterSnapshot?: boolean; workdir?: string; markerPath?: string } = {}) {
   const calls: Call[] = [], deletions: string[] = []
-  let marker = "", snapshotLists = 0, sourceProbes = 0, clock = 0
+  let marker = "", snapshotLists = 0, clock = 0
   const workdir = options.workdir ?? "/home/user/workspace", markerPath = options.markerPath ?? "waterbox-direct-marker"
   const states = new Map([[sandboxId, "running"], [restoredSandboxId, "running"]])
+  const probes = new Map<string, number>()
   const output = (value = "") => text({ output: value, metadata: {} })
   const bash = (value = "", timedOut = false) => ({ content: [{ type: "text", text: value }], structuredContent: { output: value, metadata: { exitCode: timedOut ? null : 0, timedOut } } })
   const client = {
@@ -224,12 +229,14 @@ function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; fai
         return text(options.malformedSourceResponse ? { ...resource(), provider: 42 } : resource())
       }
       if (request.name === "probe_sandbox") {
-        if (request.arguments.sandboxId === sandboxId && ++sourceProbes >= 3 && !options.neverAutoStop) states.set(sandboxId, "stopped")
+        const count = (probes.get(request.arguments.sandboxId) ?? 0) + 1
+        probes.set(request.arguments.sandboxId, count)
+        if (request.arguments.sandboxId === restoredSandboxId && count >= 3 && !options.neverAutoStop) states.set(restoredSandboxId, "stopped")
         return text(resource(request.arguments.sandboxId, states.get(request.arguments.sandboxId) ?? "running"))
       }
       if (request.name === "stop_sandbox") { states.set(request.arguments.sandboxId, "stopped"); return text(resource(request.arguments.sandboxId, "stopped")) }
       if (request.name === "delete_sandbox") { deletions.push(request.arguments.sandboxId); if (options.failRestoredCleanup && request.arguments.sandboxId === restoredSandboxId) throw new Error("cleanup unavailable"); return text(resource(request.arguments.sandboxId, "terminated")) }
-      if (request.name === "create_snapshot") { if (options.failSnapshotCreate) throw new Error("snapshot unavailable"); if (options.snapshotStopsSource) states.set(sandboxId, "stopped"); return text(options.malformedSnapshotResponse ? { ...snapshot(), provider: 42 } : snapshot()) }
+      if (request.name === "create_snapshot") { if (options.failSnapshotCreate) throw new Error("snapshot unavailable"); if (options.sourceStaleAfterSnapshot) states.set(sandboxId, "failed"); return text(options.malformedSnapshotResponse ? { ...snapshot(), provider: 42 } : snapshot()) }
       if (request.name === "list_snapshots") { snapshotLists++; return text({ items: [snapshot(options.failSnapshotReadiness ? "failed" : snapshotLists === 1 ? "creating" : "ready")] }) }
       if (request.name === "delete_snapshot") { deletions.push(request.arguments.snapshotId); return text(snapshot("deleted")) }
       if (request.name === "send_file_securely") return text({ bytes: 5 })
