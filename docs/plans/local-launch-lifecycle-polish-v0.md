@@ -812,6 +812,13 @@ Do not mark a phase complete based on intent or partial implementation.
 - Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
 - Deviations: none.
 
+### 2026-09-03 - Issue #9 item 10 remediation
+
+- Implemented: replaced the dry-run package manifest check with an exact installed-artifact verifier. It creates one npm tarball in a fresh isolated pack directory, retains its path and SHA-256 identity across extraction and installation, rejects extra or mismatched tarballs, installs that same file into a clean project, and proves every installed publish artifact is byte-identical to the extracted tarball. The packed and installed third-party notices must match the package source notice byte-for-byte; the packed executable must contain the exact complete serialized predicate and object corpora from the pinned vendored sources. The installed npm executable must resolve to its packaged entry point, its adjacent runtime artifact must remain inside that package, neither may depend on an embedded source-tree path, and both execute from the isolated install under a compatible current Node.
+- Verification: `bun test scripts/verify-mcp-package.test.ts` passed (3 tests), including decoy-tarball and retained-tarball-mutation rejection; `bun run typecheck` passed; `bun run build:mcp && bun run scripts/verify-mcp-package.ts` passed using exactly one retained and installed `waterbox-mcp-0.1.0.tgz`; `git diff --check` passed. `NODE_24_15_BIN` was absent, so exact Node v24.15.0 execution was explicitly unavailable; both installed entry points executed successfully under current Node v24.19.0, and the verifier will require and exercise exact v24.15.0 whenever that named binary is supplied.
+- Live evidence: not run; package verification performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
+
 ### 2026-09-03 - Issue #9 items 6-7 type-safety correction
 
 - Corrected: expressed the provider/version checks as explicit discriminant guards before accessing provider-specific settings or version-2 binding metadata. This is a type-surface correction only; strict persisted-schema validation, runtime binding derivation, switch-warning behavior, and credential handling are unchanged.
