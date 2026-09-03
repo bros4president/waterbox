@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { type SandboxState, type SnapshotState } from "@waterbox/contracts"
+import { type ProviderConfigurationId, type SandboxState, type SnapshotState } from "@waterbox/contracts"
 import { ProviderError, type ProviderSandboxObservation, type SandboxProvider } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
 import {
@@ -31,6 +31,19 @@ export type BoxProviderFetch = (input: string | URL | Request, init?: RequestIni
 export type BoxProviderDiagnostic = RuntimeDiagnostic | { type: "tool-http-error"; status: number }
 export interface BoxInfrastructureDependencies { fetch?: BoxProviderFetch; clock: BoxProviderClock; diagnostic?: (event: BoxProviderDiagnostic) => void }
 export interface BoxProviderDependencies extends BoxInfrastructureDependencies { artifact: SandboxRuntimeArtifact }
+
+/**
+ * Derives the stable resource-scope identity used by Waterbox core. Polling and
+ * automatic-stop policy do not affect identity; the credential enters only as
+ * a one-way fingerprint.
+ */
+export function deriveBoxProviderConfigurationId(config: BoxProviderConfig): ProviderConfigurationId {
+  const apiBaseUrl = url(config.apiBaseUrl)
+  if (!nonempty(config.apiKey) || config.apiKey.length > 16_384) throw new TypeError("Box provider credential is invalid")
+  const credentialFingerprint = createHash("sha256").update(config.apiKey).digest("base64url")
+  const material = ["waterbox-provider-binding-v1", "box", apiBaseUrl, credentialFingerprint]
+  return `pcfg_${createHash("sha256").update(JSON.stringify(material)).digest("base64url")}`
+}
 
 type BoxState = "init" | "provisioning" | "provisioned" | "cloning" | "ready" | "idle" | "running" | "archiving" | "archived" | "error"
 type SnapshotStatus = "saving" | "ready" | "failed"

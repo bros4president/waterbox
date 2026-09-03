@@ -1,12 +1,43 @@
 {
   "name": "@waterbox/provider-box",
-  "private": true,
+  "version": "0.1.0-alpha.1",
+  "description": "Box sandbox provider for Waterbox, with an embedded Node 24 sandbox runtime.",
   "type": "module",
-  "exports": { ".": "./src/index.ts" },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bros4president/waterbox.git",
+    "directory": "packages/sandbox-provider-box"
+  },
+  "homepage": "https://github.com/bros4president/waterbox#readme",
+  "bugs": "https://github.com/bros4president/waterbox/issues",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-waterbox.mjs provider-box",
+    "prepack": "node ../../scripts/build-waterbox.mjs provider-box"
+  },
   "dependencies": {
-    "@waterbox/cli": "workspace:*",
-    "@waterbox/contracts": "workspace:*",
-    "@waterbox/core": "workspace:*",
-    "@waterbox/provider-runtime": "workspace:*"
+    "@waterbox/contracts": "0.1.0-alpha.1",
+    "@waterbox/core": "0.1.0-alpha.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
   }
 }

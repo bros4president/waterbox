@@ -23,12 +23,14 @@
     "verify:libraries": "bun run build:libraries && bun run lint:libraries && bun run scripts/verify-library-packages.ts",
     "build:mcp": "node scripts/build-waterbox.mjs mcp",
     "verify:mcp": "bun run build:mcp && publint packages/mcp && bun run scripts/verify-mcp-package.ts",
+    "build:provider-box": "bun run --cwd packages/sandbox-provider-box build",
+    "verify:provider-box": "bun run build:provider-box && publint packages/sandbox-provider-box && bun run scripts/verify-provider-box-package.ts",
     "smoke:mcp-embedded": "bun run build:mcp && bun run scripts/embedded-mcp-smoke.ts",
     "smoke:mcp-vercel": "bun run build:mcp && bun run scripts/vercel-mcp-smoke.ts",
-    "test": "bun run build:libraries && bun test",
-    "typecheck": "bun run build:libraries && tsc --noEmit",
+    "test": "bun run build:libraries && bun run build:provider-box && bun test",
+    "typecheck": "bun run build:libraries && bun run build:provider-box && tsc --noEmit",
     "check:premerge": "bun run typecheck && bun run test && bun run test:node-sqlite && git diff --check \"$(git merge-base HEAD origin/main)\"..HEAD && git diff --check && git diff --cached --check",
-    "check:release": "bun run check:premerge && bun run verify:libraries && bun run verify:mcp"
+    "check:release": "bun run check:premerge && bun run verify:libraries && bun run verify:mcp && bun run verify:provider-box"
   },
   "dependencies": {
     "@aws-sdk/client-iam": "^3.883.0",

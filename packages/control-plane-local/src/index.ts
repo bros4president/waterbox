@@ -6,6 +6,7 @@ import type { SandboxProvider } from "@waterbox/core/provider"
 import {
   BoxSandboxProvider,
   SystemBoxProviderClock,
+  deriveBoxProviderConfigurationId,
   type BoxProviderConfig,
   type BoxProviderDiagnostic,
 } from "@waterbox/provider-box"
@@ -81,8 +82,9 @@ export class LocalProviderConfigurationError extends Error {
 export function deriveProviderConfigurationId(selection: LocalProviderBindingInput): ProviderConfigurationId {
   if (selection.kind === "vercel") providerCredential(selection.config.token)
   const material = selection.kind === "box"
-    ? ["waterbox-provider-binding-v1", "box", normalizeBoxApiBaseUrl(selection.config.apiBaseUrl), sha256(providerCredential(selection.config.apiKey))]
+    ? undefined
     : ["waterbox-provider-binding-v1", "vercel", normalizeVercelApiOrigin(selection.config.apiOrigin), selection.config.teamId.trim(), selection.config.projectId.trim()]
+  if (selection.kind === "box") return deriveBoxProviderConfigurationId(selection.config)
   return `pcfg_${createHash("sha256").update(JSON.stringify(material)).digest("base64url")}`
 }
 
@@ -322,7 +324,6 @@ export function normalizeVercelApiOrigin(value: string): string {
   if (url.protocol !== "https:" || url.pathname !== "/" || url.username || url.password || url.search || url.hash) throw new TypeError("Vercel API origin is invalid")
   return url.toString().replace(/\/$/, "")
 }
-function sha256(value: string): string { return createHash("sha256").update(value).digest("base64url") }
 function validateConfiguredMcpBackend(value: LocalConfiguredMcpBackend): void {
   if (!value || !validSqlitePath(value.sqlitePath) || !value.provider || typeof value.provider !== "object") throw new LocalProviderConfigurationError()
   if (value.provider.kind === "box") {
