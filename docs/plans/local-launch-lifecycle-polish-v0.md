@@ -1,6 +1,6 @@
 # Local Launch Lifecycle Polish V0
 
-Status: complete
+Status: credential-free implementation complete; live acceptance pending
 
 This is the standalone implementation plan for the remaining local Waterbox launch work around provider-bound resources, provider workspace durability, automatic stop configuration, request-time state convergence, model-visible lifecycle control, provider-default snapshot retention, and readable resource identifiers.
 
@@ -426,7 +426,7 @@ Make setup changes explicit and reversible without pretending to manage inactive
 
 ## Phase 4: Provider Workspace Durability
 
-Status: complete
+Status: credential-free implementation complete; live acceptance pending
 
 ### Scope
 
@@ -452,7 +452,7 @@ Use provider-selected snapshot-durable workspaces and remove the universal `/wor
 
 ## Phase 5: Automatic-Stop Configuration And Snapshot Defaults
 
-Status: complete
+Status: credential-free implementation complete; live acceptance pending
 
 Prerequisite: Phase 1, because operational settings must be proven not to affect binding.
 
@@ -623,7 +623,7 @@ Vendor the corpus and replace the current small-word-plus-suffix generator.
 
 ## Phase 10: Documentation And Full Verification
 
-Status: complete
+Status: credential-free implementation complete; live acceptance pending
 
 Prerequisites: Phases 1-9.
 
@@ -824,4 +824,11 @@ Do not mark a phase complete based on intent or partial implementation.
 - Corrected: expressed the provider/version checks as explicit discriminant guards before accessing provider-specific settings or version-2 binding metadata. This is a type-surface correction only; strict persisted-schema validation, runtime binding derivation, switch-warning behavior, and credential handling are unchanged.
 - Verification: `bun run typecheck` passed; `bun test packages/mcp/test packages/control-plane-local/test` passed (85 tests); `bun run test:node-sqlite` passed (1 test); `git diff --check` passed.
 - Live evidence: not run; this correction performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
+
+### 2026-09-03 - Issue #9 item 11 remediation
+
+- Implemented: corrected the overall plan and Phases 4, 5, and 10 to retain credit for completed credential-free implementation while leaving live provider acceptance explicitly pending.
+- Verification: `bun run check:release` passed, including `bun run typecheck`, `bun test` (562 tests), `bun run test:node-sqlite` (1 test), all merge-base/worktree/index diff checks, the MCP build, and exact installed-artifact verification; a separate `bun run test:node-sqlite` passed (1 test), and `git diff --check` passed. Current Node v24.19.0 satisfied the declared `>=24.15.0` engine; `NODE_24_15_BIN` was absent, so exact declared-minimum execution remained unavailable and was reported as such by the package verifier.
+- Live evidence: no live calls ran. All Box, Vercel, provider-selection, and automatic-stop environment variables were absent, and the supported read-only `waterbox status` command reported `Waterbox status: not configured. Run waterbox setup.` with exit code 0. No scoped Box account or Vercel project was available for safe mutation and cleanup reconciliation, so workspace durability, automatic-stop behavior, stop/ordinary-resume behavior, and overall live acceptance remain pending.
 - Deviations: none.
