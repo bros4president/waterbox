@@ -79,6 +79,13 @@ export interface ProviderConsumeSecureTransferInput extends ProviderOperationInp
   transferId: SecureTransferId
 }
 
+/**
+ * Existing-resource lifecycle adapters use `failure` and `limit` only when
+ * they can prove that the requested mutation did not execute. Any transport
+ * loss, 5xx response, or invalid result after dispatch is
+ * `ambiguous_execution`. `known_state` and `exact_absence` communicate an
+ * exact observation, but do not by themselves establish dispatch certainty.
+ */
 export type ProviderErrorKind = "failure" | "limit" | "ambiguous_execution" | "expired" | "consumed" | "known_state" | "exact_absence"
 
 export class ProviderError extends Error {

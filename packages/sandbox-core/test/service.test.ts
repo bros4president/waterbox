@@ -1197,6 +1197,151 @@ describe("execution and reconciliation", () => {
     provider.snapshots!.delete = originalDelete
   })
 
+  test("authoritative terminal absence converges stop, resume, and delete without redispatch", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes } = harness({
+      provider,
+      sandboxIds: ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3"],
+    })
+
+    const stopTarget = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(stopTarget.sandboxId, "terminated")
+    provider.stopError = new ProviderError("failure", "resource no longer exists")
+    expect((await service.stopSandbox(alice, stopTarget.sandboxId)).state).toBe("terminated")
+    expect(provider.stopCalls).toBe(1)
+    expect((await service.getSandbox(alice, stopTarget.sandboxId)).state).toBe("terminated")
+    expect((await service.probeSandbox(alice, stopTarget.sandboxId)).state).toBe("terminated")
+    expect(provider.stopCalls).toBe(1)
+    provider.stopError = undefined
+
+    const resumeTarget = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, resumeTarget.sandboxId)
+    provider.sandboxStates.set(resumeTarget.sandboxId, "terminated")
+    provider.resumeError = new ProviderError("failure", "resource no longer exists")
+    await expectDomainError(service.resumeSandbox(alice, resumeTarget.sandboxId), "provider_failure")
+    expect(provider.resumeCalls).toBe(1)
+    expect((await sandboxes.get(alice.accountId, resumeTarget.sandboxId))?.state).toBe("terminated")
+    expect((await service.getSandbox(alice, resumeTarget.sandboxId)).state).toBe("terminated")
+    expect((await service.probeSandbox(alice, resumeTarget.sandboxId)).state).toBe("terminated")
+    expect(provider.resumeCalls).toBe(1)
+    provider.resumeError = undefined
+
+    const deleteTarget = await service.createSandbox(alice, {})
+    provider.sandboxStates.set(deleteTarget.sandboxId, "terminated")
+    provider.deleteError = new ProviderError("failure", "resource no longer exists")
+    expect((await service.deleteSandbox(alice, deleteTarget.sandboxId)).state).toBe("terminated")
+    expect(provider.deleteCalls).toBe(1)
+    expect((await service.deleteSandbox(alice, deleteTarget.sandboxId)).state).toBe("terminated")
+    expect(provider.deleteCalls).toBe(1)
+  })
+
+  test("provider limits restore every lifecycle transition after exact old-state confirmation", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes, snapshots } = harness({
+      provider,
+      sandboxIds: ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3", "sbx_warm-meadow-d4"],
+    })
+
+    const stopTarget = await service.createSandbox(alice, {})
+    provider.stopError = new ProviderError("limit", "stop rate limited")
+    await expectDomainError(service.stopSandbox(alice, stopTarget.sandboxId), "provider_limit")
+    expect((await sandboxes.get(alice.accountId, stopTarget.sandboxId))?.state).toBe("running")
+    expect(provider.stopCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(1)
+    provider.stopError = undefined
+
+    const resumeTarget = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, resumeTarget.sandboxId)
+    provider.resumeError = new ProviderError("limit", "resume rate limited")
+    await expectDomainError(service.resumeSandbox(alice, resumeTarget.sandboxId), "provider_limit")
+    expect((await sandboxes.get(alice.accountId, resumeTarget.sandboxId))?.state).toBe("stopped")
+    expect(provider.resumeCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(2)
+    provider.resumeError = undefined
+
+    const deleteTarget = await service.createSandbox(alice, {})
+    provider.deleteError = new ProviderError("limit", "delete rate limited")
+    await expectDomainError(service.deleteSandbox(alice, deleteTarget.sandboxId), "provider_limit")
+    expect((await sandboxes.get(alice.accountId, deleteTarget.sandboxId))?.state).toBe("running")
+    expect(provider.deleteCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(3)
+    provider.deleteError = undefined
+
+    const source = await service.createSandbox(alice, {})
+    const snapshot = await service.createSnapshot(alice, source.sandboxId, {})
+    let snapshotDeleteAttempts = 0
+    provider.snapshots!.delete = async () => {
+      snapshotDeleteAttempts++
+      throw new ProviderError("limit", "snapshot delete rate limited")
+    }
+    await expectDomainError(service.deleteSnapshot(alice, snapshot.snapshotId), "provider_limit")
+    expect((await snapshots.get(alice.accountId, snapshot.snapshotId))?.state).toBe("ready")
+    expect(snapshotDeleteAttempts).toBe(1)
+    expect(provider.inspectSnapshotCalls).toBe(1)
+  })
+
+  test("known old states use the same definite-rejection and ambiguity policy", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes, snapshots } = harness({
+      provider,
+      sandboxIds: ["sbx_calm-cactus-a1", "sbx_blue-river-b2", "sbx_soft-cloud-c3"],
+    })
+
+    const rejectedStop = await service.createSandbox(alice, {})
+    provider.stopError = new ProviderError("limit", "stop rate limited", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "running", providerRef: { privateSandboxId: rejectedStop.sandboxId } },
+      },
+    })
+    await expectDomainError(service.stopSandbox(alice, rejectedStop.sandboxId), "provider_limit")
+    expect((await sandboxes.get(alice.accountId, rejectedStop.sandboxId))?.state).toBe("running")
+    expect(provider.inspectSandboxCalls).toBe(0)
+    provider.stopError = undefined
+
+    const ambiguousStop = await service.createSandbox(alice, {})
+    provider.stopError = new ProviderError("ambiguous_execution", "stop response lost", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "running", providerRef: { privateSandboxId: ambiguousStop.sandboxId } },
+      },
+    })
+    await expectDomainError(service.stopSandbox(alice, ambiguousStop.sandboxId), "ambiguous_execution")
+    expect((await service.getSandbox(alice, ambiguousStop.sandboxId)).state).toBe("stopping")
+    expect(provider.stopCalls).toBe(2)
+    provider.stopError = undefined
+
+    const source = await service.createSandbox(alice, {})
+    const rejectedSnapshot = await service.createSnapshot(alice, source.sandboxId, {})
+    provider.snapshots!.delete = async () => {
+      throw new ProviderError("limit", "snapshot delete rate limited", {
+        knownObservation: {
+          resource: "snapshot",
+          observation: { state: "ready", providerRef: { privateSnapshotId: rejectedSnapshot.snapshotId } },
+        },
+      })
+    }
+    await expectDomainError(service.deleteSnapshot(alice, rejectedSnapshot.snapshotId), "provider_limit")
+    expect((await snapshots.get(alice.accountId, rejectedSnapshot.snapshotId))?.state).toBe("ready")
+    expect(provider.inspectSnapshotCalls).toBe(0)
+
+    const ambiguousSnapshot = await service.createSnapshot(alice, source.sandboxId, {})
+    let ambiguousSnapshotDeletes = 0
+    provider.snapshots!.delete = async () => {
+      ambiguousSnapshotDeletes++
+      throw new ProviderError("ambiguous_execution", "snapshot delete response lost", {
+        knownObservation: {
+          resource: "snapshot",
+          observation: { state: "ready", providerRef: { privateSnapshotId: ambiguousSnapshot.snapshotId } },
+        },
+      })
+    }
+    await expectDomainError(service.deleteSnapshot(alice, ambiguousSnapshot.snapshotId), "ambiguous_execution")
+    expect((await service.getSnapshot(alice, ambiguousSnapshot.snapshotId)).state).toBe("deleting")
+    expect(ambiguousSnapshotDeletes).toBe(1)
+    expect(provider.inspectSnapshotCalls).toBe(1)
+  })
+
   test("definite lifecycle rejections restore stable state but still surface the provider error", async () => {
     const provider = new FakeSandboxProvider()
     const { service, sandboxes, snapshots } = harness({

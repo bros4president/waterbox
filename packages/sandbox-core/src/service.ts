@@ -956,27 +956,31 @@ export class SandboxService {
     error: unknown,
     signal: AbortSignal,
   ): Promise<SandboxRecord | undefined> {
-    const known = knownSandboxObservation(error)
-    if (known !== undefined) {
-      const applied = await this.#applySandboxObservation(record, transition, known)
-      return applied.state === successState ? applied : undefined
+    let observation = knownSandboxObservation(error)
+    if (observation === undefined) {
+      if (!(error instanceof ProviderError)) return undefined
+      try {
+        observation = await this.#provider(record.provider).inspectSandbox({ accountId: record.accountId, providerRef: record.providerRef, signal })
+        signal.throwIfAborted()
+      } catch {
+        return undefined
+      }
     }
-    if (!(error instanceof ProviderError)) return undefined
-    let observation: ProviderSandboxObservation
-    try {
-      observation = await this.#provider(record.provider).inspectSandbox({ accountId: record.accountId, providerRef: record.providerRef, signal })
-      signal.throwIfAborted()
-    } catch {
-      return undefined
-    }
-    const applied = await this.#applySandboxObservation(record, transition, observation)
-    if (applied.state === successState) return applied
-    if (error.kind === "failure" && observation.state === previous) {
+    if (observation.state === previous) {
+      if (!isDefiniteLifecycleRejection(error)) return undefined
       // This is a definite pre-dispatch rejection: the exact read permits us
       // to restore the local stable checkpoint, but it does not convert the
       // rejected user operation into a success.
       await this.#restoreSandboxTransition(record, transition, previous)
+      return undefined
     }
+    if (!isAllowedSandboxObservation(transition, observation.state) && !isStaleSandboxObservation(transition, observation.state)) return undefined
+    const applied = await this.#applySandboxObservation(record, transition, observation)
+    if (applied.state === successState) return applied
+    // Stop's canonical promise (no running compute) is also satisfied by
+    // authoritative absence. Resume records absence but still surfaces the
+    // original rejection because no running sandbox exists.
+    if (applied.state === "terminated" && transition === "stopping") return applied
     return undefined
   }
 
@@ -987,27 +991,26 @@ export class SandboxService {
     error: unknown,
     signal: AbortSignal,
   ): Promise<SnapshotRecord | undefined> {
-    const known = knownSnapshotObservation(error)
-    if (known !== undefined) {
-      const applied = await this.#applySnapshotObservation(record, transition, known)
-      return applied.state === "deleted" ? applied : undefined
+    let observation = knownSnapshotObservation(error)
+    if (observation === undefined) {
+      if (!(error instanceof ProviderError)) return undefined
+      try {
+        observation = await this.#requireSnapshots(this.#provider(record.provider)).inspect({ accountId: record.accountId, snapshotId: record.snapshotId, providerRef: record.providerRef, signal })
+        signal.throwIfAborted()
+      } catch {
+        return undefined
+      }
     }
-    if (!(error instanceof ProviderError)) return undefined
-    let observation: ProviderSnapshotObservation
-    try {
-      observation = await this.#requireSnapshots(this.#provider(record.provider)).inspect({ accountId: record.accountId, snapshotId: record.snapshotId, providerRef: record.providerRef, signal })
-      signal.throwIfAborted()
-    } catch {
-      return undefined
-    }
-    const applied = await this.#applySnapshotObservation(record, transition, observation)
-    if (applied.state === "deleted") return applied
-    if (error.kind === "failure" && observation.state === previous) {
+    if (observation.state === previous) {
+      if (!isDefiniteLifecycleRejection(error)) return undefined
       // As above, restoration is recovery bookkeeping, not a successful
       // delete response.
       await this.#restoreSnapshotTransition(record, transition, previous)
+      return undefined
     }
-    return undefined
+    if (!isAllowedSnapshotObservation(transition, observation.state) && !isStaleSnapshotObservation(transition, observation.state)) return undefined
+    const applied = await this.#applySnapshotObservation(record, transition, observation)
+    return applied.state === "deleted" ? applied : undefined
   }
 
   async #restoreSandboxTransition(original: SandboxRecord, transition: SandboxState, state: SandboxState): Promise<SandboxRecord> {
@@ -1369,8 +1372,8 @@ function isAllowedSandboxObservation(transition: SandboxState, observed: Sandbox
   if (transition === "provisioning") return observed === "preparing"
   if (transition === "preparing") return observed === "running" || observed === "terminated"
   if (transition === "failed") return observed === "terminated"
-  if (transition === "stopping") return observed === "stopped"
-  if (transition === "resuming") return observed === "running"
+  if (transition === "stopping") return observed === "stopped" || observed === "terminated"
+  if (transition === "resuming") return observed === "running" || observed === "terminated"
   if (transition === "terminating") return observed === "terminated"
   return false
 }
@@ -1419,6 +1422,16 @@ function isStaleSnapshotObservation(transition: SnapshotState, observed: Snapsho
 function isAmbiguousExecution(error: unknown): boolean {
   return (error instanceof ProviderError && error.kind === "ambiguous_execution")
     || (error instanceof DomainError && error.code === "ambiguous_execution")
+}
+
+/**
+ * Provider adapters reserve these kinds for responses or local validation
+ * that prove the lifecycle mutation was rejected before execution. Transport
+ * loss, 5xx responses, and invalid post-dispatch results cross the boundary as
+ * ambiguous_execution and must never restore or redispatch the operation.
+ */
+function isDefiniteLifecycleRejection(error: unknown): boolean {
+  return error instanceof ProviderError && (error.kind === "failure" || error.kind === "limit")
 }
 
 function knownSandboxObservation(error: unknown): ProviderSandboxObservation | undefined {

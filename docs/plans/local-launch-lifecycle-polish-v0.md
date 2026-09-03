@@ -782,3 +782,10 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: the focused core/API/control-plane/Box/Vercel composition suite passed (190 tests); the two-service allocation race passed 20 repeated runs; the focused SQLite repository suite passed (30 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (547 tests); `git diff --check` passed.
 - Live evidence: not run; this remediation performs no provider access and authorizes no live provider mutation.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 items 3-4 remediation
+
+- Implemented: converged authoritative terminal absence from stopping, resuming, and terminating checkpoints; unified known and inspected lifecycle observations behind one operation-specific decision path; and defined `failure` and `limit` as the only provider error kinds that restore an exactly confirmed prior state. Stop treats terminal absence as satisfying its no-running-compute result, resume persists absence while surfacing the original canonical error, and delete remains terminal and idempotent. Definite limits restore stop, resume, sandbox-delete, and snapshot-delete checkpoints; ambiguous old-state observations retain their transitions without redispatch.
+- Verification: `bun test packages/sandbox-core/test/service.test.ts` passed (77 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (550 tests); `git diff --check` passed.
+- Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
+- Deviations: none.
