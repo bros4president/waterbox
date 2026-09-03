@@ -317,12 +317,11 @@ export class SandboxService {
     const existing = await this.#getSandboxRecord(identity, sandboxId)
     const existingProvider = this.#provider(existing.provider)
     const stopResume = this.#requireStopResume(existingProvider)
-    // Local stable state is a last observation, but an already-observed stop is
-    // still an idempotent success. A stale running record is handled below by
-    // the provider result and one exact inspection.
-    if (existing.state === "stopped") return toSandbox(existing)
-    if (existing.state !== "running") throw invalidState("stop", existing.state)
-    const record = await this.#claimSandboxTransition(identity, sandboxId, ["running"], "stopping", providerSignal)
+    if (existing.state !== "running" && existing.state !== "stopped") throw invalidState("stop", existing.state)
+    // Stable local state is only an observational checkpoint. An explicit stop
+    // always claims and dispatches so out-of-band provider drift is corrected.
+    const claimed = await this.#claimSandboxTransition(identity, sandboxId, ["running", "stopped"], "stopping", providerSignal)
+    const { record, previous } = claimed
     try {
       const observation = await stopResume.stop({
         accountId: identity.accountId,
@@ -333,7 +332,7 @@ export class SandboxService {
       return toSandbox(await this.#applySandboxObservation(record, "stopping", observation))
     } catch (error) {
       if (providerSignal.aborted && !isAmbiguousExecution(error)) throw providerSignal.reason
-      const recovered = await this.#investigateSandboxLifecycle(record, "stopping", "running", "stopped", error, providerSignal)
+      const recovered = await this.#investigateSandboxLifecycle(record, "stopping", previous, "stopped", error, providerSignal)
       if (recovered !== undefined) return toSandbox(recovered)
       throw mapProviderError(error)
     }
@@ -344,11 +343,10 @@ export class SandboxService {
     providerSignal.throwIfAborted()
     const initial = await this.#getSandboxRecord(identity, sandboxId)
     this.#requireStopResume(this.#provider(initial.provider))
-    if (initial.state === "running") return toSandbox(initial)
-    if (initial.state !== "stopped" && initial.state !== "resuming") {
+    if (initial.state !== "running" && initial.state !== "stopped" && initial.state !== "resuming") {
       throw invalidState("resume", initial.state)
     }
-    return toSandbox(await this.#resumeRecord(identity, sandboxId, providerSignal))
+    return toSandbox(await this.#resumeRecord(identity, sandboxId, providerSignal, true))
   }
 
   async deleteSandbox(identity: Identity, sandboxId: SandboxId, signal?: AbortSignal): Promise<Sandbox> {
@@ -356,13 +354,14 @@ export class SandboxService {
     providerSignal.throwIfAborted()
     const existing = await this.#getSandboxRecord(identity, sandboxId)
     if (existing.state === "terminated") return toSandbox(existing)
-    const record = await this.#claimSandboxTransition(
+    const claimed = await this.#claimSandboxTransition(
       identity,
       sandboxId,
       ["preparing", "running", "stopped", "failed"],
       "terminating",
       providerSignal,
     )
+    const { record, previous } = claimed
     const provider = this.#provider(record.provider)
     try {
       const observation = await provider.deleteSandbox({
@@ -374,7 +373,7 @@ export class SandboxService {
       return toSandbox(await this.#applySandboxObservation(record, "terminating", observation))
     } catch (error) {
       if (providerSignal.aborted && !isAmbiguousExecution(error)) throw providerSignal.reason
-      const recovered = await this.#investigateSandboxLifecycle(record, "terminating", existing.state, "terminated", error, providerSignal)
+      const recovered = await this.#investigateSandboxLifecycle(record, "terminating", previous, "terminated", error, providerSignal)
       if (recovered !== undefined) return toSandbox(recovered)
       throw mapProviderError(error)
     }
@@ -785,7 +784,7 @@ export class SandboxService {
     allowed: SandboxState[],
     transition: SandboxState,
     signal: AbortSignal = NEVER_ABORTED,
-  ): Promise<SandboxRecord> {
+  ): Promise<{ record: SandboxRecord; previous: SandboxState }> {
     let current = await this.#getSandboxRecord(identity, sandboxId)
     for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
       if (!allowed.includes(current.state)) throw invalidState(transition, current.state)
@@ -797,7 +796,9 @@ export class SandboxService {
         updatedAt: this.#now(),
         lastError: undefined,
       }
-      if (await this.#deps.sandboxes.compareAndSwap(updated, current.version)) return updated
+      if (await this.#deps.sandboxes.compareAndSwap(updated, current.version)) {
+        return { record: updated, previous: current.state }
+      }
       current = await this.#getSandboxRecord(identity, sandboxId)
     }
     throw new DomainError("conflict", "The sandbox changed concurrently")
@@ -965,6 +966,12 @@ export class SandboxService {
       } catch {
         return undefined
       }
+    }
+    // The requested target is idempotent even when it was also our last local
+    // checkpoint. This matters when an adapter reports already-stopped or
+    // already-running instead of returning a normal mutation observation.
+    if (observation.state === successState) {
+      return this.#applySandboxObservation(record, transition, observation)
     }
     if (observation.state === previous) {
       if (!isDefiniteLifecycleRejection(error)) return undefined
@@ -1158,11 +1165,16 @@ export class SandboxService {
     return this.#applySnapshotObservation(record, record.state, observation)
   }
 
-  async #resumeRecord(identity: Identity, sandboxId: SandboxId, signal: AbortSignal): Promise<SandboxRecord> {
+  async #resumeRecord(
+    identity: Identity,
+    sandboxId: SandboxId,
+    signal: AbortSignal,
+    forceProviderOperation = false,
+  ): Promise<SandboxRecord> {
     const operationKey = `${identity.accountId}\u0000${sandboxId}`
     for (let attempt = 0; attempt < this.#reconciliationAttempts; attempt++) {
       const current = await this.#getSandboxRecord(identity, sandboxId)
-      if (current.state === "running") return current
+      if (current.state === "running" && !forceProviderOperation) return current
       if (current.state === "resuming") {
         const active = this.#resumeOperations.get(operationKey)
         if (active !== undefined) {
@@ -1185,7 +1197,7 @@ export class SandboxService {
         if (reconciled.state === "running") return reconciled
         continue
       }
-      if (current.state !== "stopped") throw invalidState("resume", current.state)
+      if (current.state !== "running" && current.state !== "stopped") throw invalidState("resume", current.state)
       const provider = this.#provider(current.provider)
       const stopResume = this.#requireStopResume(provider)
       const claimed: SandboxRecord = {
@@ -1197,7 +1209,7 @@ export class SandboxService {
       }
       signal.throwIfAborted()
       if (!await this.#deps.sandboxes.compareAndSwap(claimed, current.version)) continue
-      const operation = this.#finishResume(claimed, stopResume, signal)
+      const operation = this.#finishResume(claimed, stopResume, current.state, signal)
       this.#resumeOperations.set(operationKey, operation)
       const clearOperation = () => {
         if (this.#resumeOperations.get(operationKey) === operation) this.#resumeOperations.delete(operationKey)
@@ -1208,7 +1220,12 @@ export class SandboxService {
     throw new DomainError("conflict", "The sandbox resume is still in progress")
   }
 
-  async #finishResume(record: SandboxRecord, stopResume: NonNullable<SandboxProvider["stopResume"]>, signal: AbortSignal): Promise<SandboxRecord> {
+  async #finishResume(
+    record: SandboxRecord,
+    stopResume: NonNullable<SandboxProvider["stopResume"]>,
+    previous: SandboxState,
+    signal: AbortSignal,
+  ): Promise<SandboxRecord> {
     try {
       const observation = await stopResume.resume({
         accountId: record.accountId,
@@ -1219,7 +1236,7 @@ export class SandboxService {
       return await this.#applySandboxObservation(record, "resuming", observation)
     } catch (error) {
       if (signal.aborted && !isAmbiguousExecution(error)) throw signal.reason
-      const recovered = await this.#investigateSandboxLifecycle(record, "resuming", "stopped", "running", error, signal)
+      const recovered = await this.#investigateSandboxLifecycle(record, "resuming", previous, "running", error, signal)
       if (recovered !== undefined) return recovered
       throw mapProviderError(error)
     }

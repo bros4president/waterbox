@@ -789,3 +789,10 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun test packages/sandbox-core/test/service.test.ts` passed (77 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (550 tests); `git diff --check` passed.
 - Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 item 5 remediation
+
+- Implemented: removed cached-target success from explicit sandbox stop and resume. Each explicit request now claims its transition from either relevant stable checkpoint, retains the exact claimed prior state for items 3-4 recovery policy, and dispatches the requested provider mutation once. Canonical already-stopped and already-running provider observations remain idempotent. Ordinary tool execution continues to trust an observed running checkpoint optimistically and learns provider-side stopping only after its single failed operation, without an eager resume or mutation replay.
+- Verification: `bun test packages/sandbox-core/test/service.test.ts` passed (78 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (551 tests); `git diff --check` passed.
+- Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
+- Deviations: none.

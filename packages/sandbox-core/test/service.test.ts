@@ -781,9 +781,48 @@ describe("lifecycle and optional groups", () => {
     expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
     expect((await service.deleteSandbox(alice, sandbox.sandboxId)).state).toBe("terminated")
     expect((await service.deleteSandbox(alice, sandbox.sandboxId)).state).toBe("terminated")
-    expect(provider.stopCalls).toBe(1)
-    expect(provider.resumeCalls).toBe(1)
+    expect(provider.stopCalls).toBe(2)
+    expect(provider.resumeCalls).toBe(2)
     expect(provider.deleteCalls).toBe(1)
+  })
+
+  test("explicit stop and resume correct provider drift and keep canonical target results idempotent", async () => {
+    const { service, provider, sandboxes } = harness()
+    const sandbox = await service.createSandbox(alice, {})
+
+    await service.stopSandbox(alice, sandbox.sandboxId)
+    provider.sandboxStates.set(sandbox.sandboxId, "running")
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
+    expect((await service.stopSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
+    expect(provider.stopCalls).toBe(2)
+    expect(provider.sandboxStates.get(sandbox.sandboxId)).toBe("stopped")
+
+    provider.stopError = new ProviderError("known_state", "already stopped", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "stopped", providerRef: { privateSandboxId: sandbox.sandboxId } },
+      },
+    })
+    expect((await service.stopSandbox(alice, sandbox.sandboxId)).state).toBe("stopped")
+    expect(provider.stopCalls).toBe(3)
+    provider.stopError = undefined
+
+    await service.resumeSandbox(alice, sandbox.sandboxId)
+    provider.sandboxStates.set(sandbox.sandboxId, "stopped")
+    expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("running")
+    expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
+    expect(provider.resumeCalls).toBe(2)
+    expect(provider.sandboxStates.get(sandbox.sandboxId)).toBe("running")
+
+    provider.resumeError = new ProviderError("known_state", "already running", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "running", providerRef: { privateSandboxId: sandbox.sandboxId } },
+      },
+    })
+    expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
+    expect(provider.resumeCalls).toBe(3)
+    expect(provider.inspectSandboxCalls).toBe(0)
   })
 
   test("mutation cancellation is preflighted and in-flight stop remains reconcilable", async () => {
@@ -1103,6 +1142,7 @@ describe("execution and reconciliation", () => {
 
     await expectDomainError(collect(await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" })), "provider_failure")
     expect(provider.executeCalls).toBe(1)
+    expect(provider.resumeCalls).toBe(0)
     expect(provider.inspectSandboxCalls).toBe(1)
     expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
 
