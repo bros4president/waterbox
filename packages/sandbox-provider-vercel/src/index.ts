@@ -151,9 +151,20 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
   }
 
   async inspect(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
-    input.signal.throwIfAborted(); const value = sandboxRef(input.providerRef)
-    try { return observation(await this.#inspectNamed(value.name, value.owner, value.account, input.signal), value) }
-    catch (error) { if (error instanceof VercelHttpError && error.status === 404) return { state: "terminated", providerRef: value }; throw error }
+    input.signal.throwIfAborted(); const value = sandboxRef(input.providerRef), deadline = this.#deadline()
+    while (true) {
+      let current: NativeSandbox
+      try { current = await this.#inspectNamed(value.name, value.owner, value.account, input.signal) }
+      catch (error) { if (error instanceof VercelHttpError && error.status === 404) return { state: "terminated", providerRef: value }; throw error }
+      // Vercel's automatic shutdown may expose its native stopping and
+      // snapshotting phases. They are provider implementation details, not
+      // Waterbox lifecycle checkpoints: only an explicit Waterbox mutation
+      // owns the durable `stopping` state. Keep polling this exact owned name
+      // without resume until Vercel supplies an authoritative stable shape.
+      if (!automaticStopTransient(current.status)) return observation(current, value)
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Vercel sandbox inspection did not reach a stable state")
+      await this.#clock.sleep(this.#config.polling.intervalMs, input.signal)
+    }
   }
 
   async runCommand(input: InfrastructureCommandInput): Promise<InfrastructureCommandResult> {
@@ -526,6 +537,7 @@ function resumeTerminalError(native: NativeSandbox, providerRef: SandboxRef): Pr
 function sandbox(value: unknown, name: string, projectId: string, owner: string, account: string): NativeSandbox { const root = record(value) && record(value.sandbox) && record(value.session) ? value : undefined; if (!root || root.sandbox.name !== name || root.sandbox.currentSessionId !== root.session.id || root.session.projectId !== projectId || !strings(root.session.id) || !nativeState(root.sandbox.status) || !record(root.sandbox.tags) || root.sandbox.tags[OWNER_TAG] !== owner || root.sandbox.tags[ACCOUNT_TAG] !== account || (root.sandbox.currentSnapshotId !== undefined && !strings(root.sandbox.currentSnapshotId))) throw new ProviderError("failure", "Vercel returned an invalid sandbox response"); return { name, sessionId: root.session.id as string, status: root.sandbox.status, owner, account, ...(root.sandbox.currentSnapshotId === undefined ? {} : { currentSnapshotId: root.sandbox.currentSnapshotId as string }) } }
 function listSandbox(value: unknown): NativeSandbox { if (!record(value) || !strings(value.name, value.currentSessionId) || !nativeState(value.status) || !record(value.tags) || !strings(value.tags[OWNER_TAG], value.tags[ACCOUNT_TAG])) throw new ProviderError("failure", "Vercel returned an invalid inventory sandbox"); return { name: value.name as string, sessionId: value.currentSessionId as string, status: value.status, owner: value.tags[OWNER_TAG] as string, account: value.tags[ACCOUNT_TAG] as string } }
 function nativeState(value: unknown): value is NativeState { return value === "pending" || value === "snapshotting" || value === "running" || value === "stopping" || value === "stopped" || value === "failed" || value === "aborted" }
+function automaticStopTransient(value: NativeState): boolean { return value === "stopping" || value === "snapshotting" }
 function command(value: unknown, sessionId: string): { id: string; exitCode: number | null } { if (!record(value) || !record(value.command) || !strings(value.command.id) || value.command.sessionId !== sessionId || (value.command.exitCode !== null && (!Number.isSafeInteger(value.command.exitCode) || (value.command.exitCode as number) < 0))) throw new Error("invalid command response"); return { id: value.command.id as string, exitCode: value.command.exitCode as number | null } }
 function stopResult(value: unknown, sessionId: string): { snapshot?: NativeSnapshot } { if (!record(value) || !record(value.session) || value.session.id !== sessionId || value.session.status !== "stopped") throw new Error("invalid stop response"); return record(value.snapshot) ? { snapshot: snapshot(value.snapshot, sessionId) } : {} }
 function manualSnapshot(value: unknown, sessionId: string): NativeSnapshot { if (!record(value) || !record(value.session) || value.session.id !== sessionId || !nativeState(value.session.status) || !record(value.snapshot)) throw new Error("invalid snapshot response"); return snapshot(value.snapshot, sessionId) }
