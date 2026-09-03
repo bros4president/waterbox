@@ -242,7 +242,7 @@ export async function createConfiguredEmbeddedApiBackend(
   diagnostic?: (event: LocalProviderDiagnostic) => void,
 ): Promise<ApiBackend> {
   validateConfiguredMcpBackend(configuration)
-  const artifact = await loadSandboxRuntimeArtifact(artifactLocation, "0.1.0")
+  const artifact = await loadSandboxRuntimeArtifact(artifactLocation, "0.1.0-alpha.1")
   return createEmbeddedApiBackend({ sqlitePath: configuration.sqlitePath, accountId: "local", provider: { ...configuration.provider, runtimeArtifact: artifact }, ...(diagnostic === undefined ? {} : { diagnostic }) })
 }
 

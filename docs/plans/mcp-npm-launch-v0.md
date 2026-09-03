@@ -1,8 +1,8 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Phase 8 credential-free package, endpoint-safety, legal, documentation, and exact-artifact closure is complete. Phase 9 workflow implementation is present, but hosted CI, protected-environment, and trusted-publisher validation remain pending. Phase 10 publication remains pending.
+Status: implementation in progress. Phase 8 credential-free package, endpoint-safety, legal, documentation, and exact-artifact closure is complete. Phase 9 workflow implementation and hosted CI are complete, but protected-environment and trusted-publisher validation remain pending. Phase 10 alpha publication remains pending.
 
-This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
+This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox@next` the primary alpha installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
 Waterbox is prelaunch. The package and runtime changes in this plan replace the unpublished `@waterbox/mcp` package and `waterbox-system-v6` bootstrap directly. Do not add compatibility aliases, migrations, deprecation packages, or preservation machinery for artifacts that have never been publicly released.
 
@@ -26,7 +26,7 @@ No live provider mutation is authorized merely by this document. Every live capa
 The package launch is successful when a new user can run:
 
 ```sh
-npx add-mcp waterbox
+npx add-mcp waterbox@next
 ```
 
 and receive a valid local stdio MCP configuration whose process:
@@ -49,12 +49,12 @@ The launch command installs configuration. It does not silently choose a provide
 - The public npm package name is `waterbox`.
 - The package has one public executable named `waterbox`.
 - The package is CLI-only in V0. It has no public JavaScript `exports` entry and ships no declarations.
-- `npx add-mcp waterbox` is the primary advertised installation command.
+- `npx add-mcp waterbox@next` is the primary advertised alpha installation command.
 - The supported server remains a local Node stdio MCP with no listener: MCP renderer -> private `@waterbox/client` -> authenticated in-process Fetch `ApiBackend` -> `@waterbox/api` -> core -> SQLite/provider.
 - `@waterbox/control-plane-local` owns embedded core, repository, and provider composition. Its embedded bearer is process-private; synthetic URLs are in-process Fetch routing, not network traffic. A remote `ApiBackend` seam does not imply hosted Waterbox exists.
 - Waterbox remains provider-neutral. Box and Vercel Sandbox are the launch-supported providers, neither is an implicit default.
 - Missing provider configuration is a connected setup state, not a process startup failure.
-- Provider credentials are supplied by the user through environment or client-specific secret facilities, or by the bounded native-keyring onboarding flow: `waterbox setup`, `waterbox status`, and `waterbox logout`.
+- Provider credentials are supplied by the user through environment or client-specific secret facilities, or by the bounded native-keyring onboarding flow: `npx waterbox@next setup`, `npx waterbox@next status`, and `npx waterbox@next logout`.
 - Native onboarding stores only Box API keys and Vercel tokens under keyring service `waterbox`; strict versioned non-secret provider settings are atomically stored in `~/.waterbox/config.json`. Persisted records allow only `https://ascii.dev/api/box/v1` and `https://api.vercel.com/` with approved defaults, preventing redirected keyring credentials; custom endpoints remain environment-only. Environment-only configuration remains the sole fallback, `.env` is never loaded implicitly, and headless Linux Secret Service/keyutils availability remains an operational durability caveat.
 - Credentials are never accepted through MCP tool arguments, returned in MCP content, or written to ordinary diagnostics.
 
@@ -85,7 +85,7 @@ The launch command installs configuration. It does not silently choose a provide
 - npm publication uses a controlled GitHub Actions workflow with npm trusted publishing, OIDC, and provenance.
 - The exact tarball is tested after packing and before publication.
 - Official MCP registry publication and add-mcp catalog discovery are separate from direct npm installation and do not block V0.
-- The final official MCP registry name is deferred until a project domain is selected and controlled. Reverse-DNS naming has no bearing on `npx add-mcp waterbox`.
+- The final official MCP registry name is deferred until a project domain is selected and controlled. Reverse-DNS naming has no bearing on `npx add-mcp waterbox@next`.
 
 ## Non-Goals
 
@@ -114,7 +114,7 @@ Do not add in this launch:
 
 ```text
 MCP client
-    | stdio: npx -y waterbox
+    | stdio: npx -y waterbox@next
     v
 thin MCP renderer
     -> private @waterbox/client
@@ -146,7 +146,7 @@ The publishable package manifest must have this effective shape:
 ```json
 {
   "name": "waterbox",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "private": false,
   "type": "module",
   "description": "Run coding tools in isolated, stateful sandboxes through MCP.",
@@ -176,7 +176,8 @@ The publishable package manifest must have this effective shape:
     "stdio"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "next"
   }
 }
 ```
@@ -263,13 +264,13 @@ Direct `add-mcp` package installation does not read package-specific `server.jso
 ```json
 {
   "command": "npx",
-  "args": ["-y", "waterbox"]
+  "args": ["-y", "waterbox@next"]
 }
 ```
 
-The docs must therefore distinguish installation from provider configuration. Do not claim that bare `npx add-mcp waterbox` collects credentials.
+The docs must therefore distinguish installation from provider configuration. Do not claim that `npx add-mcp waterbox@next` collects credentials.
 
-CI and release evidence pin an explicit reviewed `add-mcp` version. The user-facing command remains unversioned. Advancing the certified installer version requires a reviewed dependency update and rerunning configuration-generation tests rather than silently testing whatever `latest` resolves to.
+CI and release evidence pin an explicit reviewed `add-mcp` version. The user-facing package selector remains `waterbox@next` while the release is an alpha; the stable `latest` channel is not assigned. Advancing the certified installer version requires a reviewed dependency update and rerunning configuration-generation tests rather than silently testing whatever `latest` resolves to.
 
 ## Node Runtime Migration
 
@@ -493,7 +494,7 @@ The bootstrap manifest contains only non-secret compatibility facts:
 {
   "schemaVersion": 1,
   "artifactSha256": "<lowercase SHA-256>",
-  "artifactVersion": "0.1.0",
+  "artifactVersion": "0.1.0-alpha.1",
   "cliProtocolVersion": 2,
   "nodeMajor": 24,
   "bootstrapVersion": 1
@@ -600,7 +601,7 @@ This plan records engineering requirements, not legal advice. Any ownership or c
 The package README must lead with:
 
 ```sh
-npx add-mcp waterbox
+npx add-mcp waterbox@next
 ```
 
 It must then explain:
@@ -933,7 +934,7 @@ Scope:
 
 Acceptance criteria:
 
-- `npx waterbox` resolves the sole package bin and starts stdio MCP; `npx add-mcp waterbox` writes the expected package command.
+- `npx waterbox@next` resolves the sole package bin and starts stdio MCP; `npx add-mcp waterbox@next` writes the expected package command.
 - The tarball contains only approved files; private workspace internals are bundled, not public APIs or source packages.
 - Package metadata, legal notices, and documentation are factual for Box and Vercel Sandbox, optional capabilities, and no hosted mode.
 - `server.json` is either valid for an owned namespace or omitted from the release tarball and explicitly deferred.
@@ -955,7 +956,7 @@ The phase must add an installed-tarball test in an external temporary directory 
 
 ### Phase 9: CI And Release Automation
 
-Status: workflow implementation complete; hosted CI, protected `npm` environment, and npm trusted-publisher validation remain pending
+Status: workflow implementation and hosted CI complete; protected `npm` environment and npm trusted-publisher validation remain pending
 
 Scope:
 
@@ -998,7 +999,7 @@ Acceptance criteria:
 - The first package can establish npm trusted publishing safely; any unavoidable bootstrap publish is documented and immediately followed by trusted-publisher restriction.
 - Publication failure does not mutate versions or tags automatically.
 
-### Phase 10: Release Candidate And npm Launch
+### Phase 10: Alpha Release Candidate And npm Launch
 
 Status: pending; depends on Phase 9
 
@@ -1006,7 +1007,7 @@ Scope:
 
 - Reserve or publish the currently unclaimed `waterbox` npm name.
 - Execute final clean-environment and isolated-account release gates.
-- Publish `waterbox@0.1.0`.
+- Publish `waterbox@0.1.0-alpha.1` under the npm `next` dist-tag without assigning `latest`.
 - Verify public installation without changing client secrets automatically.
 
 Release candidate gates:
@@ -1018,21 +1019,22 @@ Release candidate gates:
 5. Node minimum and current Node 24 launch pass with Bun absent.
 6. Unconfigured MCP connects and returns provider-neutral setup guidance.
 7. Configured isolated-account Box and Vercel Sandbox smokes each pass the shared mandatory provider surface and return to exact baseline; optional capability smoke runs only where advertised.
-8. The pinned certified `add-mcp` version generates correct `waterbox` configurations for representative clients in temporary homes; the unversioned user command is checked once as a release observation and its resolved version is recorded.
+8. The pinned certified `add-mcp` version generates correct `waterbox@next` configurations for representative clients in temporary homes; the `next` resolution is checked once as a release observation and its resolved version is recorded.
 9. npm account ownership, 2FA, trusted publisher, and package access are verified.
 10. Documentation describes actual released behavior only.
 
 Post-publication verification:
 
 ```sh
-npm view waterbox@0.1.0
-npm exec --yes --package=waterbox@0.1.0 -- waterbox
-npx add-mcp@2.3.0 waterbox@0.1.0 --name waterbox -a opencode -y
+npm view waterbox@0.1.0-alpha.1
+npm view waterbox dist-tags --json
+npm exec --yes --package=waterbox@0.1.0-alpha.1 -- waterbox
+npx add-mcp@2.3.0 waterbox@next --name waterbox -a opencode -y
 ```
 
 The MCP process command requires a protocol-aware smoke harness; do not treat an indefinitely waiting stdio server as a failed CLI command.
 
-Verify npm provenance, package files, README rendering, issue links, and deprecation status. Do not publish a replacement version merely to fix documentation that can be corrected before the initial release.
+Verify `next` resolves to `0.1.0-alpha.1`, `latest` does not resolve to this prerelease, and npm provenance, package files, README rendering, issue links, and deprecation status are correct. Do not publish a replacement version merely to fix documentation that can be corrected before the initial release.
 
 ### Phase 11: Registry Discovery
 
@@ -1051,7 +1053,7 @@ Possible work:
 - Submit to integrations.sh or add-mcp's overlay for default catalog discovery.
 - Verify `npx add-mcp find waterbox` separately from direct package installation.
 
-This phase requires a new package version if ownership metadata was not included in `0.1.0`.
+This phase requires a new package version if ownership metadata was not included in `0.1.0-alpha.1`.
 
 ## File Impact Map
 
@@ -1187,13 +1189,13 @@ Live tests require explicit isolated-account authorization and must prove:
 - [x] Root and package docs match released behavior.
 - [x] Box and Vercel Sandbox setup docs and isolated live gates pass.
 - [x] Exact post-refactor bundle and legal closure verified.
-- [ ] Pull-request CI complete.
+- [x] Pull-request CI complete.
 - [ ] Trusted npm publish workflow protected.
 - [x] Installed-tarball test passes with Bun absent on Node 24.15.0 and Node 24.20.0.
 - [ ] Exact tested tarball checksum is preserved through npm publication.
 - [ ] Isolated-account release smoke passes with exact cleanup reconciliation.
-- [ ] `waterbox@0.1.0` published with provenance.
-- [ ] `npx add-mcp waterbox` verified from a clean environment.
+- [ ] `waterbox@0.1.0-alpha.1` published with provenance under `next` without assigning `latest`.
+- [ ] `npx add-mcp waterbox@next` verified from a clean environment.
 - [ ] Official MCP registry decision remains explicitly deferred or receives a separate approved phase.
 
 ## Implementation Log
@@ -1214,3 +1216,4 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-09-03: Phase 9 workflow code added PR/push release checks across Node 24.15.0 and current Node 24 plus a repository/tag/environment-restricted OIDC/provenance publish path that retains and publishes one verified tarball. Hosted workflow execution, GitHub environment protection, npm package bootstrap/ownership, and trusted-publisher configuration remain external pending gates; no publish, tag, release, commit, push, or provider mutation occurred.
 - 2026-09-03: Supervisor corrections completed the root install/keyring wording, made interactive setup reject unsafe or malformed persisted records before any prompt or credential-store access, and completed the active Direct-to-Embedded smoke terminology migration. The corrected focused suite passed 68 tests and 279 expectations; typecheck and exact Node v24.15.0 package verification passed, superseding the earlier pre-correction candidate.
 - 2026-09-03: Supervisory release hardening made the verifier construct the package twice from independently copied source trees with frozen installs and clean library/MCP builds before packing, executes installed artifacts with a Node-only `PATH`, and validates bundled package manifest licenses plus required notice terms and copyright lines against the reviewed map. The exact candidate passed on Node v24.15.0 and v24.20.0 with SHA-256 `d8f33fbe3c9e1ff23ef334cc4373e65c3b191590f54e24aa2d0c867c2fd6f111`. CI now exports the intended matrix Node binary. The publish workflow pins actions by commit, requires the tagged commit to be reachable from `origin/main`, records release evidence for 90 days, and rechecks the retained tarball SHA-256 immediately before trusted publication. Hosted CI, environment protection, npm bootstrap/trusted-publisher setup, authorized release smokes, and publication remain pending.
+- 2026-09-03: PR #14 merged the launch implementation after hosted CI passed on Node v24.15.0 and current Node 24. The first CLI publication policy then changed from stable to `waterbox@0.1.0-alpha.1` under `next`; package, runtime, installer, workflow, evidence, and documentation contracts were aligned without assigning `latest`. Local release verification passed 589 tests and 3021 expectations, typecheck, Node SQLite, shared-library gates, publint, reproducible isolated builds, installed-artifact protocol checks on Node v24.15.0, and pinned `add-mcp@2.3.0` configuration. A package-directory npm dry run also exposed and fixed cwd-dependent bundle-closure verification. The retained alpha candidate SHA-256 is `57fe657ef2fd7e13ada6585e1d2f0790c7a1b742bfa2293fec1001968a553518`; current Node 24 remains a hosted-CI gate for the follow-up PR.

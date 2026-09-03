@@ -20,7 +20,7 @@ export const OFFICIAL_BOX_API_BASE_URL = "https://ascii.dev/api/box/v1"
 export const OFFICIAL_VERCEL_API_ORIGIN = "https://api.vercel.com/"
 const accounts: Record<Provider, string> = { box: "box-api-key", vercel: "vercel-token" }
 const MAX_CONFIG_BYTES = 64 * 1024
-export const setupGuidance = "Waterbox MCP is not configured. Run waterbox setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Box: BOX_API_KEY; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID). Do not provide credentials in chat or tool arguments."
+export const setupGuidance = "Waterbox MCP is not configured. Run npx waterbox@next setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Box: BOX_API_KEY; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID). Do not provide credentials in chat or tool arguments."
 
 export class OnboardingError extends Error {
   constructor(message = setupGuidance) { super(message); this.name = "McpConfigurationError" }
@@ -30,19 +30,19 @@ export function configStorage(home = homedir()): ConfigStorage {
   const path = join(home, ".waterbox", "config.json")
   return {
     async read() {
-      try { const directory = await lstat(dirname(path)); if (directory.isSymbolicLink() || !directory.isDirectory()) throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client."); const stat = await lstat(path); if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_CONFIG_BYTES) throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client."); return await readFile(path, "utf8") }
+      try { const directory = await lstat(dirname(path)); if (directory.isSymbolicLink() || !directory.isDirectory()) throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client."); const stat = await lstat(path); if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_CONFIG_BYTES) throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client."); return await readFile(path, "utf8") }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error }
     },
     async write(value) {
       await mkdir(dirname(path), { recursive: true, mode: 0o700 }); const directory = await lstat(dirname(path))
-      if (directory.isSymbolicLink() || !directory.isDirectory()) throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client.")
+      if (directory.isSymbolicLink() || !directory.isDirectory()) throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client.")
       await chmod(dirname(path), 0o700)
-      try { const existing = await lstat(path); if (existing.isSymbolicLink() || !existing.isFile()) throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client.") } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+      try { const existing = await lstat(path); if (existing.isSymbolicLink() || !existing.isFile()) throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client.") } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
       const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`
       try { await writeFile(temporary, value, { encoding: "utf8", mode: 0o600, flag: "wx" }); await rename(temporary, path) } catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error }
     },
     async remove() {
-      try { const directory = await lstat(dirname(path)); if (directory.isSymbolicLink() || !directory.isDirectory()) throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client."); const existing = await lstat(path); if (existing.isSymbolicLink() || !existing.isFile()) throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client."); await rm(path) } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+      try { const directory = await lstat(dirname(path)); if (directory.isSymbolicLink() || !directory.isDirectory()) throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client."); const existing = await lstat(path); if (existing.isSymbolicLink() || !existing.isFile()) throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client."); await rm(path) } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
     },
   }
 }
@@ -60,30 +60,30 @@ export async function loadPersisted(storage: ConfigStorage): Promise<PersistedCo
   try { raw = await storage.read() }
   catch (error) {
     if (error instanceof OnboardingError) throw error
-    throw new OnboardingError("Waterbox configuration is unavailable. Run waterbox setup, then restart the MCP client.")
+    throw new OnboardingError("Waterbox configuration is unavailable. Run npx waterbox@next setup, then restart the MCP client.")
   }
   if (raw === undefined) return undefined
   let value: unknown
-  try { value = JSON.parse(raw) } catch { throw new OnboardingError("Waterbox configuration is malformed. Run waterbox setup, then restart the MCP client.") }
+  try { value = JSON.parse(raw) } catch { throw new OnboardingError("Waterbox configuration is malformed. Run npx waterbox@next setup, then restart the MCP client.") }
   const parsed = persistedSchema.safeParse(value)
-  if (!parsed.success) throw new OnboardingError("Waterbox configuration is malformed. Run waterbox setup, then restart the MCP client.")
+  if (!parsed.success) throw new OnboardingError("Waterbox configuration is malformed. Run npx waterbox@next setup, then restart the MCP client.")
   return parsed.data
 }
 
 export async function resolvedEnvironment(environment: Record<string, string | undefined>, storage: ConfigStorage, credentials: CredentialStore): Promise<{ environment: Record<string, string | undefined>; source: "environment" | "keyring"; provider: Provider }> {
   const explicit = environment.WATERBOX_PROVIDER
   if (explicit !== undefined) {
-    if (explicit !== "box" && explicit !== "vercel") throw new OnboardingError("Waterbox provider is unsupported. Run waterbox setup, then restart the MCP client.")
+    if (explicit !== "box" && explicit !== "vercel") throw new OnboardingError("Waterbox provider is unsupported. Run npx waterbox@next setup, then restart the MCP client.")
     return { environment, source: "environment", provider: explicit }
   }
-  if (providerVariablesPresent(environment)) throw new OnboardingError("Set WATERBOX_PROVIDER explicitly when using provider environment variables, or run waterbox setup, then restart the MCP client.")
+  if (providerVariablesPresent(environment)) throw new OnboardingError("Set WATERBOX_PROVIDER explicitly when using provider environment variables, or run npx waterbox@next setup, then restart the MCP client.")
   const config = await loadPersisted(storage)
   if (!config) throw new OnboardingError()
   let storedSecret: string | undefined
-  try { storedSecret = await credentials.get(config.provider) } catch { throw new OnboardingError(`Waterbox credential storage is unavailable. Run waterbox setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
-  if (storedSecret === undefined) throw new OnboardingError(`Waterbox credential is missing. Run waterbox setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`)
+  try { storedSecret = await credentials.get(config.provider) } catch { throw new OnboardingError(`Waterbox credential storage is unavailable. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
+  if (storedSecret === undefined) throw new OnboardingError(`Waterbox credential is missing. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`)
   let secret: string
-  try { secret = providerCredential(storedSecret) } catch { throw new OnboardingError(`Waterbox stored credential is invalid. Run waterbox setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
+  try { secret = providerCredential(storedSecret) } catch { throw new OnboardingError(`Waterbox stored credential is invalid. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
   const resolved: Record<string, string | undefined> = { ...environment, WATERBOX_PROVIDER: config.provider }
   if (config.provider === "box") { const settings = config.box!; Object.assign(resolved, { BOX_API_KEY: secret, BOX_API_BASE_URL: settings.apiBaseUrl, BOX_POLL_INTERVAL_MS: String(settings.pollIntervalMs), BOX_POLL_TIMEOUT_MS: String(settings.pollTimeoutMs), ...(settings.automaticStopMs === undefined ? {} : { WATERBOX_AUTO_STOP: automaticStopEnvironmentValue(settings.automaticStopMs) }) }) }
   else { const settings = config.vercel!; Object.assign(resolved, { VERCEL_TOKEN: secret, VERCEL_API_ORIGIN: settings.apiOrigin, VERCEL_TEAM_ID: settings.teamId, VERCEL_PROJECT_ID: settings.projectId, VERCEL_POLL_INTERVAL_MS: String(settings.pollIntervalMs), VERCEL_POLL_TIMEOUT_MS: String(settings.pollTimeoutMs), VERCEL_REQUEST_TIMEOUT_MS: String(settings.requestTimeoutMs), ...(settings.automaticStopMs === undefined ? {} : { WATERBOX_AUTO_STOP: automaticStopEnvironmentValue(settings.automaticStopMs) }) }) }
@@ -163,7 +163,7 @@ function parsePersistedConfigForSetup(raw: string | undefined): PersistedConfig 
     const parsed = persistedSchema.safeParse(JSON.parse(raw))
     if (parsed.success) return parsed.data
   } catch {}
-  throw new OnboardingError("Waterbox persisted configuration is unsafe or malformed. Remove ~/.waterbox/config.json, then run waterbox setup again, or use complete environment-only configuration. No credential was read or changed.")
+  throw new OnboardingError("Waterbox persisted configuration is unsafe or malformed. Remove ~/.waterbox/config.json, then run npx waterbox@next setup again, or use complete environment-only configuration. No credential was read or changed.")
 }
 function bindingFor(config: PersistedConfig, secret: string): string {
   const selection: LocalProviderBindingInput = config.provider === "box"

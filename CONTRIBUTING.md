@@ -19,7 +19,8 @@ current Node 24 binary when running artifact certification locally. Missing
 binaries are reported and do not count as evidence. CI supplies both versions.
 
 Publishing is restricted to the protected `npm` GitHub environment and a
-controlled `v0.1.0` tag. The workflow uses npm trusted publishing/OIDC and
-provenance, checks tag/package versions, verifies one exact tarball, and
-publishes that file. It has no `NPM_TOKEN`. Do not publish from a dirty checkout
-or run provider smokes without separate isolated-account authorization.
+controlled `v0.1.0-alpha.1` tag. The workflow uses npm trusted publishing/OIDC
+and provenance, checks tag/package versions, verifies one exact tarball, and
+publishes that file under the `next` dist-tag. It has no `NPM_TOKEN`. Do not
+publish from a dirty checkout or run provider smokes without separate
+isolated-account authorization.
