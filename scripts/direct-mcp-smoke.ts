@@ -1,12 +1,13 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { SandboxSchema, SnapshotPageSchema, SnapshotSchema } from "../packages/sandbox-contracts/src/index.ts"
+import { SandboxIdSchema, SandboxSchema, SnapshotIdSchema, SnapshotPageSchema, SnapshotSchema, type SandboxId, type SnapshotId } from "../packages/sandbox-contracts/src/index.ts"
+import { parseAutomaticStopDuration } from "../packages/control-plane-local/src/index.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
-const TOOL_NAMES = "create_sandbox,probe_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash"
+const TOOL_NAMES = "create_sandbox,probe_sandbox,stop_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash"
 const HEALTH = JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })
 const VERSION = JSON.stringify({ protocolVersion: 2 })
 const SNAPSHOT_POLL_ATTEMPTS = 180
@@ -32,6 +33,10 @@ export interface McpRuntimeLayout {
 }
 export interface ProductFlowOptions {
   localSecretPath: string
+  automaticStopMs: number
+  automaticStopGraceMs?: number
+  automaticStopPollIntervalMs?: number
+  now?: () => number
   sleep?: (milliseconds: number) => Promise<void>
   log?: (line: string) => void
   secrets?: string[]
@@ -39,8 +44,8 @@ export interface ProductFlowOptions {
 }
 
 const BOX_RUNTIME_LAYOUT: McpRuntimeLayout = {
-  workdir: "/root",
-  markerPath: "/home/user/.waterbox-direct-marker",
+  workdir: "/home/user/workspace",
+  markerPath: "waterbox-direct-marker",
   runtimeLauncher: "/usr/local/bin/waterbox",
   staleRuntimeCommand: "sudo -n rm -f /usr/local/lib/waterbox-cli.js",
   restoredRuntimeCheck: "test -s /usr/local/lib/waterbox-cli.js && test -f /usr/local/lib/waterbox-bootstrap.json",
@@ -52,7 +57,7 @@ export function assertDirectSmokeAuthorized(environment: Record<string, string |
 
 export async function readBoxBaseline(baseUrl: string, apiKey: string, fetch_: typeof fetch = fetch): Promise<BoxBaseline> {
   const [limits, listed] = await Promise.all([boxJson(baseUrl, apiKey, "/limits", fetch_), boxJson(baseUrl, apiKey, "/boxes", fetch_)])
-  if (limits?.ok !== true || limits?.type !== "limits.info" || limits.canStart !== true || !Number.isInteger(limits.activeBoxes) || !Number.isInteger(limits.maxActiveBoxes) || limits.activeBoxes + 1 > limits.maxActiveBoxes) throw new Error("Box account has no capacity for the Direct MCP smoke")
+  if (limits?.ok !== true || limits?.type !== "limits.info" || limits.canStart !== true || !Number.isInteger(limits.activeBoxes) || !Number.isInteger(limits.maxActiveBoxes) || limits.activeBoxes + 2 > limits.maxActiveBoxes) throw new Error("Box account has no capacity for the Direct MCP smoke")
   if (listed?.ok !== true || listed?.type !== "box.list" || !Array.isArray(listed.boxes) || !listed.boxes.every((item: any) => typeof item?.id === "string")) throw new Error("Box preflight returned an invalid response")
   return { ids: new Set(listed.boxes.map((item: any) => item.id)), activeBoxes: limits.activeBoxes }
 }
@@ -83,9 +88,10 @@ export function baselineReconciliationError(result: BaselineReconciliation): Err
 
 export async function runDirectMcpProductFlow(client: DirectSmokeClient, options: ProductFlowOptions): Promise<void> {
   const sleep = options.sleep ?? Bun.sleep
+  const now = options.now ?? Date.now
   const runtime = options.runtime ?? BOX_RUNTIME_LAYOUT
   const report = (stage: string, facts: Record<string, boolean | number>) => options.log?.(redact(JSON.stringify({ stage, ...facts }), options.secrets ?? []))
-  let sandboxId: string | undefined, snapshotId: string | undefined, restoredSandboxId: string | undefined, marker: string | undefined
+  let sandboxId: SandboxId | undefined, snapshotId: SnapshotId | undefined, restoredSandboxId: SandboxId | undefined, marker: string | undefined
   let failure: unknown
 
   try {
@@ -93,9 +99,10 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     let created
     try {
       const result = await callTool(client, { name: "create_sandbox", arguments: { idempotencyKey: `direct-smoke-${crypto.randomUUID()}` } }, 180_000)
-      if (result.isError) throw new Error("create failed")
-      created = SandboxSchema.parse(JSON.parse(resultText(result)))
+      if (result.isError) { trackRecoverySandbox(result, (id) => { sandboxId = id }); throw new Error("create failed") }
+      created = trackedSandbox(result, (id) => { sandboxId = id })
     } catch {
+      if (sandboxId !== undefined) throw new Error("Direct MCP create failed after returning a tracked recovery sandbox")
       throw new Error("Direct MCP create outcome is ambiguous; no public sandbox ID was returned and manual review is required")
     }
     sandboxId = created.sandboxId
@@ -105,6 +112,13 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     const runtimeHealth = await successfulOutput(client, "bash", { ...target, command: `${runtime.runtimeLauncher} health; ${runtime.runtimeLauncher} version`, workdir: runtime.workdir }, sleep)
     if (!runtimeHealth.includes(HEALTH) || !runtimeHealth.includes(VERSION)) throw new Error("Direct MCP current runtime verification failed")
     report("created", { running: true, runtimeCurrent: true })
+
+    const explicitlyStopped = trackedSandbox(await callTool(client, { name: "stop_sandbox", arguments: target }, 180_000))
+    if (explicitlyStopped.state !== "stopped") throw new Error("Direct MCP explicit stop was not resumable")
+    report("explicit-stop", { stopped: true, resumable: true })
+    const explicitResumeOutput = await successfulOutput(client, "bash", { ...target, command: "printf explicit-stop-resumed" }, sleep)
+    if (explicitResumeOutput !== "explicit-stop-resumed") throw new Error("Direct MCP ordinary tool did not resume an explicitly stopped sandbox")
+    report("explicit-stop-ordinary-resume", { resumed: true, logicalToolDispatches: 1 })
 
     await verifySecureTransfer(client, target, options.localSecretPath, runtime, sleep)
     await verifyAsyncBash(client, target, runtime, sleep)
@@ -135,7 +149,7 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     try {
       const result = await callTool(client, { name: "create_snapshot", arguments: { sandboxId } }, 180_000)
       if (result.isError) throw new Error("create failed")
-      snapshot = SnapshotSchema.parse(JSON.parse(resultText(result)))
+      snapshot = trackedSnapshot(result, (id) => { snapshotId = id })
     } catch {
       throw new Error("Direct MCP snapshot creation failed")
     }
@@ -146,9 +160,10 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     let restored
     try {
       const result = await callTool(client, { name: "create_sandbox", arguments: { sourceSnapshotId: snapshotId, idempotencyKey: `direct-smoke-restore-${crypto.randomUUID()}` } }, 180_000)
-      if (result.isError) throw new Error("create failed")
-      restored = SandboxSchema.parse(JSON.parse(resultText(result)))
+      if (result.isError) { trackRecoverySandbox(result, (id) => { restoredSandboxId = id }); throw new Error("create failed") }
+      restored = trackedSandbox(result, (id) => { restoredSandboxId = id })
     } catch {
+      if (restoredSandboxId !== undefined) throw new Error("Direct MCP restored creation failed after returning a tracked recovery sandbox")
       throw new Error("Direct MCP restored sandbox creation failed")
     }
     restoredSandboxId = restored.sandboxId
@@ -157,10 +172,30 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     if (SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "probe_sandbox", arguments: restoredTarget })))).state !== "running") throw new Error("Direct MCP restored sandbox probe was not running")
     report("restored", { running: true })
     if ((await successfulOutput(client, "read", { ...restoredTarget, filePath: runtime.markerPath }, sleep)) !== marker) throw new Error("Direct MCP restored user data verification failed")
-    report("restored-user-data", { preserved: true })
+    const relativeMarker = await successfulOutput(client, "bash", { ...restoredTarget, command: `pwd; cat -- ${runtime.markerPath}` }, sleep)
+    if (!relativeMarker.includes(`${runtime.workdir}\n`) || !relativeMarker.endsWith(marker)) throw new Error("Direct MCP restored default workspace verification failed")
+    report("restored-user-data", { preserved: true, relativePath: true, defaultCommandWorkspace: true })
     const restoredRuntime = await successfulOutput(client, "bash", { ...restoredTarget, command: `${runtime.runtimeLauncher} health; ${runtime.runtimeLauncher} version; ${runtime.restoredRuntimeCheck}`, workdir: runtime.workdir }, sleep)
     if (!restoredRuntime.includes(HEALTH) || !restoredRuntime.includes(VERSION)) throw new Error("Direct MCP restored runtime verification failed")
     report("restored-runtime", { reinstalled: true, current: true })
+
+    const beforeAutomaticStop = trackedSandbox(await callTool(client, { name: "probe_sandbox", arguments: target }))
+    if (beforeAutomaticStop.state === "terminated" || beforeAutomaticStop.state === "failed") throw new Error("Direct MCP source sandbox was not resumable before automatic-stop observation")
+    const armedOutput = await successfulOutput(client, "bash", { ...target, command: "printf automatic-stop-armed" }, sleep)
+    if (armedOutput !== "automatic-stop-armed") throw new Error("Direct MCP could not arm automatic-stop observation from running compute")
+    report("automatic-stop-armed", { running: true, logicalToolDispatches: 1 })
+
+    await waitForAutomaticStop(client, target, {
+      automaticStopMs: options.automaticStopMs,
+      graceMs: options.automaticStopGraceMs ?? 120_000,
+      pollIntervalMs: options.automaticStopPollIntervalMs ?? 1_000,
+      now,
+      sleep,
+    })
+    report("automatic-stop", { stopped: true, resumable: true })
+    const automaticResumeOutput = await successfulOutput(client, "bash", { ...target, command: "printf automatic-stop-resumed" }, sleep)
+    if (automaticResumeOutput !== "automatic-stop-resumed") throw new Error("Direct MCP ordinary tool did not resume an automatically stopped sandbox")
+    report("automatic-stop-ordinary-resume", { resumed: true, logicalToolDispatches: 1 })
   } catch (error) {
     failure = error
   } finally {
@@ -171,6 +206,49 @@ export async function runDirectMcpProductFlow(client: DirectSmokeClient, options
     if (cleanupFailures.length) failure = failure === undefined ? new Error("Direct MCP tracked cleanup requires manual review") : new Error(`${failure instanceof Error ? failure.message : "Direct MCP smoke failed"}; tracked cleanup requires manual review`)
   }
   if (failure !== undefined) throw new Error(redact(failure instanceof Error ? failure.message : "Direct MCP smoke failed", [...(options.secrets ?? []), sandboxId ?? "", snapshotId ?? "", restoredSandboxId ?? "", marker ?? ""]))
+}
+
+async function waitForAutomaticStop(
+  client: DirectSmokeClient,
+  target: { sandboxId: SandboxId },
+  options: { automaticStopMs: number; graceMs: number; pollIntervalMs: number; now: () => number; sleep: (milliseconds: number) => Promise<void> },
+): Promise<void> {
+  if (!Number.isSafeInteger(options.automaticStopMs) || options.automaticStopMs <= 0 || !Number.isSafeInteger(options.graceMs) || options.graceMs < 0 || !Number.isSafeInteger(options.pollIntervalMs) || options.pollIntervalMs <= 0) throw new Error("Direct MCP automatic-stop timing is invalid")
+  const deadline = options.now() + options.automaticStopMs + options.graceMs
+  while (true) {
+    const observed = trackedSandbox(await callTool(client, { name: "probe_sandbox", arguments: target }))
+    if (observed.state === "stopped") return
+    if (observed.state === "terminated" || observed.state === "failed") throw new Error("Direct MCP automatic stop did not preserve resumable sandbox state")
+    if (options.now() >= deadline) throw new Error("Direct MCP automatic stop observation timed out")
+    await options.sleep(options.pollIntervalMs)
+  }
+}
+
+function trackedSandbox(result: unknown, track?: (id: SandboxId) => void) {
+  const value = JSON.parse(resultText(result))
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const candidate = SandboxIdSchema.safeParse((value as { sandboxId?: unknown }).sandboxId)
+    if (candidate.success) track?.(candidate.data)
+  }
+  return SandboxSchema.parse(value)
+}
+
+function trackedSnapshot(result: unknown, track?: (id: SnapshotId) => void) {
+  const value = JSON.parse(resultText(result))
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const candidate = SnapshotIdSchema.safeParse((value as { snapshotId?: unknown }).snapshotId)
+    if (candidate.success) track?.(candidate.data)
+  }
+  return SnapshotSchema.parse(value)
+}
+
+function trackRecoverySandbox(result: unknown, track: (id: SandboxId) => void): void {
+  let message: string
+  try { message = resultText(result) } catch { return }
+  const matches = [...message.matchAll(/(?:^|\s)Recovery sandbox: (sbx_[a-z]+-[a-z]+-[a-z0-9]+)\.(?=\s|$)/g)]
+  if (matches.length !== 1) return
+  const candidate = SandboxIdSchema.safeParse(matches[0]![1])
+  if (candidate.success) track(candidate.data)
 }
 
 async function waitForSnapshotReady(client: DirectSmokeClient, snapshotId: string, sleep: (milliseconds: number) => Promise<void>): Promise<void> {
@@ -211,6 +289,8 @@ async function deleteTrackedSnapshot(client: DirectSmokeClient, snapshotId: stri
 
 export async function runDirectMcpSmoke(environment: Record<string, string | undefined> = process.env) {
   assertDirectSmokeAuthorized(environment)
+  const automaticStopMs = parseAutomaticStopDuration(environment.WATERBOX_AUTO_STOP)
+  if (automaticStopMs === undefined) throw new Error("The Direct MCP smoke requires WATERBOX_AUTO_STOP")
   const boxApiKey = environment.BOX_API_KEY
   if (!boxApiKey) throw new Error("The Direct MCP smoke requires Box credentials")
   const boxApiBaseUrl = (environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1").replace(/\/$/, "")
@@ -227,7 +307,7 @@ export async function runDirectMcpSmoke(environment: Record<string, string | und
   let failure: unknown
   try {
     await client.connect(transport)
-    await runDirectMcpProductFlow(client as DirectSmokeClient, { localSecretPath, secrets: [boxApiKey], log: console.log })
+    await runDirectMcpProductFlow(client as DirectSmokeClient, { localSecretPath, automaticStopMs, secrets: [boxApiKey], log: console.log })
   } catch (error) {
     failure = error
   } finally {
