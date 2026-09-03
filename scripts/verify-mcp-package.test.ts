@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { assertCompleteFriendlyWords, assertSameBytes, assertTarballIdentity, captureTarballIdentity, inspectInstalledArtifacts, resolveOnlyPackedTarball } from "./verify-mcp-package.ts"
+import { assertCliOnlyManifest, assertCompleteFriendlyWords, assertNodeOnlyBundles, assertPackedFileAllowlist, assertSameBytes, assertTarballIdentity, captureTarballIdentity, inspectInstalledArtifacts, resolveOnlyPackedTarball } from "./verify-mcp-package.ts"
 
 const roots: string[] = []
 async function fixture(): Promise<string> { const path = await mkdtemp(join(tmpdir(), "waterbox-package-verifier-test-")); roots.push(path); return path }
@@ -36,6 +36,18 @@ describe("MCP installed-artifact verifier", () => {
     expect(() => assertSameBytes(Buffer.from("notice"), Buffer.from("decoy"), "notice")).toThrow("exact packed artifact")
   })
 
+  test("enforces exact CLI-only package surface and Node-only bundles", () => {
+    const files = ["dist/waterbox.js", "dist/waterbox-cli.js", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "package.json"]
+    expect(() => assertPackedFileAllowlist(files)).not.toThrow()
+    expect(() => assertPackedFileAllowlist([...files, "dist/index.js"])).toThrow("allowlist")
+    expect(() => assertPackedFileAllowlist(files.filter(path => path !== "LICENSE"))).toThrow("allowlist")
+    const manifest = { name: "waterbox", version: "0.1.0", engines: { node: ">=24.15.0" }, license: "MIT", bin: { waterbox: "./dist/waterbox.js" } }
+    expect(() => assertCliOnlyManifest(manifest)).not.toThrow()
+    expect(() => assertCliOnlyManifest({ ...manifest, exports: "./dist/index.js" })).toThrow("only the waterbox executable")
+    expect(() => assertNodeOnlyBundles([["waterbox.js", "#!/usr/bin/env node\n"]])).not.toThrow()
+    expect(() => assertNodeOnlyBundles([["waterbox.js", "Bun.spawn()"]])).toThrow("Bun runtime")
+  })
+
   test("accepts an installed executable through an aliased temporary parent", async () => {
     const { installDirectory, installedPackage, executableTarget } = await installedFixture()
     const artifacts = await inspectInstalledArtifacts(installDirectory, installedPackage)
@@ -62,17 +74,17 @@ async function installedFixture(): Promise<{ installDirectory: string; installed
   const realRoot = join(directory, "real")
   const aliasRoot = join(directory, "alias")
   const realInstall = join(realRoot, "install")
-  const realPackage = join(realInstall, "node_modules/@waterbox/mcp")
+  const realPackage = join(realInstall, "node_modules/waterbox")
   const executableTarget = join(realPackage, "dist/waterbox.js")
   await mkdir(join(realInstall, "node_modules/.bin"), { recursive: true })
   await mkdir(join(realPackage, "dist"), { recursive: true })
   await writeFile(executableTarget, "#!/usr/bin/env node\nconsole.error('Usage: waterbox')\nprocess.exit(2)\n", { mode: 0o755 })
   await writeFile(join(realPackage, "dist/waterbox-cli.js"), "console.log(JSON.stringify({ protocolVersion: 2 }))\n")
-  await symlink("../@waterbox/mcp/dist/waterbox.js", join(realInstall, "node_modules/.bin/waterbox"))
+  await symlink("../waterbox/dist/waterbox.js", join(realInstall, "node_modules/.bin/waterbox"))
   await symlink(realRoot, aliasRoot, "dir")
   return {
     installDirectory: join(aliasRoot, "install"),
-    installedPackage: join(aliasRoot, "install/node_modules/@waterbox/mcp"),
+    installedPackage: join(aliasRoot, "install/node_modules/waterbox"),
     executableTarget,
   }
 }

@@ -1,36 +1,45 @@
 {
-  "name": "@waterbox/mcp",
+  "name": "waterbox",
   "version": "0.1.0",
   "private": false,
   "type": "module",
+  "description": "Run coding tools in isolated, stateful sandboxes through MCP.",
   "bin": {
     "waterbox": "./dist/waterbox.js"
   },
-  "exports": {
-    ".": "./dist/index.js"
-  },
   "files": [
-    "dist/index.js",
     "dist/waterbox.js",
     "dist/waterbox-cli.js",
     "README.md",
+    "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "node ../../scripts/build-waterbox.mjs mcp",
     "prepack": "node ../../scripts/build-waterbox.mjs mcp"
   },
-  "devDependencies": {
-    "@modelcontextprotocol/sdk": "1.25.3",
-    "@waterbox/client": "workspace:*",
-    "@waterbox/contracts": "workspace:*",
-    "@waterbox/control-plane-local": "workspace:*",
-    "@waterbox/core": "workspace:*",
-    "zod": "4.1.8"
-  },
   "engines": {
     "node": ">=24.15.0"
   },
+  "license": "MIT",
+  "author": "Waterbox contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bros4president/waterbox.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/bros4president/waterbox#readme",
+  "bugs": {
+    "url": "https://github.com/bros4president/waterbox/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sandbox",
+    "coding-agent",
+    "ai-agent",
+    "stdio"
+  ],
   "publishConfig": {
     "access": "public"
   },

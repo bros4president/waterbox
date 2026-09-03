@@ -5,7 +5,7 @@ import { SystemVercelProviderClock, VercelSandboxInfrastructure, type VercelProv
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { runDirectMcpProductFlow, type DirectSmokeClient, type McpRuntimeLayout } from "./direct-mcp-smoke.ts"
+import { runEmbeddedMcpProductFlow, type EmbeddedSmokeClient, type McpRuntimeLayout } from "./embedded-mcp-smoke.ts"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_VERCEL_SANDBOX_RESOURCES"
 const MAX_PAGES = 100
@@ -16,7 +16,7 @@ type Environment = Record<string, string | undefined>
 
 const runtime: McpRuntimeLayout = {
   workdir: "/workspace",
-  markerPath: "vercel-direct-marker",
+  markerPath: "vercel-embedded-marker",
   runtimeLauncher: "/workspace/.waterbox/waterbox",
   staleRuntimeCommand: "rm -f /workspace/.waterbox/waterbox-cli.js",
   restoredRuntimeCheck: "test -s /workspace/.waterbox/waterbox-cli.js && test -f /workspace/.waterbox/manifest.json",
@@ -71,7 +71,7 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
   const transport = new StdioClientTransport({
     command: "node",
     args: [resolve(import.meta.dir, "../packages/mcp/dist/waterbox.js")],
-    env: stringEnvironment({ ...environment, WATERBOX_PROVIDER: "vercel", WATERBOX_SQLITE_PATH: join(directory, "direct.sqlite"), WATERBOX_MCP_DIAGNOSTICS: "1" }),
+    env: stringEnvironment({ ...environment, WATERBOX_PROVIDER: "vercel", WATERBOX_SQLITE_PATH: join(directory, "embedded.sqlite"), WATERBOX_MCP_DIAGNOSTICS: "1" }),
     // Diagnostics are already provider-redacted; inheriting stderr prevents a
     // dead child pipe from making the stdio initialization appear successful.
     stderr: "inherit",
@@ -79,7 +79,7 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
   const client = new Client({ name: "waterbox-vercel-smoke", version: "1" })
   try {
     await client.connect(transport)
-    await runDirectMcpProductFlow(client as DirectSmokeClient, { localSecretPath, automaticStopMs, runtime, secrets: [environment.VERCEL_TOKEN!], log: console.log })
+    await runEmbeddedMcpProductFlow(client as EmbeddedSmokeClient, { localSecretPath, automaticStopMs, runtime, secrets: [environment.VERCEL_TOKEN!], log: console.log })
   } catch (error) {
     failure = error
   } finally {

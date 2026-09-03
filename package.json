@@ -12,20 +12,23 @@
     "demo:opencode2": "OPENCODE_CONFIG=$PWD/opencode.v2.json OPENCODE_CONFIG_PROJECT_DISABLE=true node_modules/.bin/opencode2",
     "smoke:pi-mcp": "bun run scripts/pi-mcp-smoke.ts",
     "chat:pi-mcp": "bun run scripts/pi-mcp-chat.ts",
-    "build:box-template": "node scripts/build-waterbox.mjs cli && bun run scripts/build-box-system-template.ts",
     "start:api-local": "bun run --cwd packages/sandbox-cli build && bun run apps/api-local/src/main.ts",
     "test:api-local": "bun test apps/api-local/test/integration.test.ts",
     "test:node-sqlite": "node --experimental-strip-types --experimental-transform-types --test packages/sandbox-repository-sqlite/test/node-compatibility.test.ts",
     "smoke:control-plane-box": "bun run scripts/control-plane-box-smoke.ts",
     "experiment:control-plane-mcp": "bun run --cwd packages/sandbox-cli build && bun run scripts/control-plane-mcp-experiment.ts",
     "chat:control-plane-mcp": "bun run --cwd packages/sandbox-cli build && bun run scripts/control-plane-mcp-experiment.ts --interactive",
+    "build:libraries": "bun run --cwd packages/sandbox-contracts build && bun run --cwd packages/sandbox-core build && bun run --cwd packages/sandbox-api build",
+    "lint:libraries": "publint packages/sandbox-contracts && publint packages/sandbox-core && publint packages/sandbox-api",
+    "verify:libraries": "bun run build:libraries && bun run lint:libraries && bun run scripts/verify-library-packages.ts",
     "build:mcp": "node scripts/build-waterbox.mjs mcp",
-    "smoke:mcp-direct": "bun run build:mcp && bun run scripts/direct-mcp-smoke.ts",
+    "verify:mcp": "bun run build:mcp && publint packages/mcp && bun run scripts/verify-mcp-package.ts",
+    "smoke:mcp-embedded": "bun run build:mcp && bun run scripts/embedded-mcp-smoke.ts",
     "smoke:mcp-vercel": "bun run build:mcp && bun run scripts/vercel-mcp-smoke.ts",
-    "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "test": "bun run build:libraries && bun test",
+    "typecheck": "bun run build:libraries && tsc --noEmit",
     "check:premerge": "bun run typecheck && bun run test && bun run test:node-sqlite && git diff --check \"$(git merge-base HEAD origin/main)\"..HEAD && git diff --check && git diff --cached --check",
-    "check:release": "bun run check:premerge && bun run build:mcp && bun run scripts/verify-mcp-package.ts"
+    "check:release": "bun run check:premerge && bun run verify:libraries && bun run verify:mcp"
   },
   "dependencies": {
     "@aws-sdk/client-iam": "^3.883.0",
@@ -38,11 +41,18 @@
     "@opencode-ai/plugin": "0.0.0-beta-17823"
   },
   "devDependencies": {
+    "@waterbox/client": "workspace:*",
+    "@waterbox/contracts": "workspace:*",
+    "@waterbox/control-plane-local": "workspace:*",
+    "@waterbox/core": "workspace:*",
     "@opencode-ai/cli": "0.0.0-dev-18434",
     "@types/bun": "latest",
     "@types/node": "^24.3.0",
+    "add-mcp": "2.3.0",
     "esbuild": "0.25.9",
-    "typescript": "^5.9.2"
+    "publint": "0.3.24",
+    "typescript": "^5.9.2",
+    "zod": "4.1.8"
   },
   "trustedDependencies": [
     "@opencode-ai/cli"
