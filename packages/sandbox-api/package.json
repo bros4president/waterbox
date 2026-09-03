@@ -1,15 +1,44 @@
 {
   "name": "@waterbox/api",
-  "private": true,
+  "version": "0.1.0-alpha.1",
+  "description": "Provider-neutral Fetch and OpenAPI transport for the Waterbox control plane.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bros4president/waterbox.git",
+    "directory": "packages/sandbox-api"
+  },
+  "homepage": "https://github.com/bros4president/waterbox#readme",
+  "bugs": "https://github.com/bros4president/waterbox/issues",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.1.5",
-    "@waterbox/contracts": "workspace:*",
-    "@waterbox/core": "workspace:*",
+    "@waterbox/contracts": "0.1.0-alpha.1",
+    "@waterbox/core": "0.1.0-alpha.1",
     "hono": "^4.9.6",
     "zod": "^4.1.5"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
   }
 }

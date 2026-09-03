@@ -89,7 +89,10 @@ describe("receiver handler", () => {
   })
 
   test.skipIf(!hasRipgrep)("globs and greps arbitrary sandbox paths with useful no-match and invalid-regex responses", async () => {
-    const root = await workspace()
+    const sandbox = await workspace()
+    const root = join(sandbox, "workspace")
+    await mkdir(root)
+    await writeFile(join(sandbox, "sibling.txt"), "outside workspace\n")
     await mkdir(join(root, "src"))
     await writeFile(join(root, "src/a.ts"), "const alpha = 1\n")
     await writeFile(join(root, "src/b.js"), "const alpha = 2\n")
@@ -104,7 +107,9 @@ describe("receiver handler", () => {
     expect(fileGrep).toMatchObject({ output: "src/b.js:1: const alpha = 2", metadata: { path: "src/b.js", matches: 1 } })
     expect(await (await receiver.handleRequest(post("/v1/tools/grep", { pattern: "absent" }))).json()).toMatchObject({ output: "No matches found", metadata: { matches: 0 } })
     expect((await receiver.handleRequest(post("/v1/tools/grep", { pattern: "[" }))).status).toBe(400)
-    expect((await receiver.handleRequest(post("/v1/tools/glob", { pattern: "*", path: "../" }))).status).toBe(200)
+    const parentGlob = await receiver.handleRequest(post("/v1/tools/glob", { pattern: "*", path: "../" }))
+    expect(parentGlob.status).toBe(200)
+    expect(await parentGlob.json()).toMatchObject({ output: expect.stringContaining("sibling.txt") })
   })
 
   test("edits exact and fuzzy text, reports ambiguity, replaces all, and preserves BOM and mode", async () => {

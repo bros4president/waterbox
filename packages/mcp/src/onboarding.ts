@@ -3,7 +3,7 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { z } from "zod"
 import { ProviderConfigurationIdSchema, type ProviderConfigurationId } from "@waterbox/contracts"
-import { automaticStopEnvironmentValue, deriveProviderConfigurationId, normalizeBoxApiBaseUrl, normalizeVercelApiOrigin, parseAutomaticStopDuration, providerCredential, type LocalProviderBindingInput } from "@waterbox/control-plane-local"
+import { automaticStopEnvironmentValue, deriveProviderConfigurationId, parseAutomaticStopDuration, providerCredential, type LocalProviderBindingInput } from "@waterbox/control-plane-local"
 
 export type Provider = "box" | "vercel"
 export type CredentialState = "available" | "missing" | "inaccessible"
@@ -16,6 +16,8 @@ type LegacyPersistedConfig = PersistedProviderSettings & { version: 1 }
 export type PersistedConfig = LegacyPersistedConfig | (PersistedProviderSettings & { version: 2; providerConfigurationId: ProviderConfigurationId })
 
 export const KEYRING_SERVICE = "waterbox"
+export const OFFICIAL_BOX_API_BASE_URL = "https://ascii.dev/api/box/v1"
+export const OFFICIAL_VERCEL_API_ORIGIN = "https://api.vercel.com/"
 const accounts: Record<Provider, string> = { box: "box-api-key", vercel: "vercel-token" }
 const MAX_CONFIG_BYTES = 64 * 1024
 export const setupGuidance = "Waterbox MCP is not configured. Run waterbox setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Box: BOX_API_KEY; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID). Do not provide credentials in chat or tool arguments."
@@ -93,7 +95,7 @@ export const automaticStopGuidance = "Choose a duration long enough for your lon
 export async function setup(storage: ConfigStorage, credentials: CredentialStore, prompts: SetupPrompts): Promise<Provider> {
   let priorRaw: string | undefined
   try { priorRaw = await storage.read() } catch { throw new OnboardingError("Waterbox configuration is unavailable. Use environment-only setup instead.") }
-  const priorConfig = parsePersistedConfig(priorRaw)
+  const priorConfig = parsePersistedConfigForSetup(priorRaw)
   const provider = await prompts.selectProvider()
   let draft: LegacyPersistedConfig
   try {
@@ -102,8 +104,8 @@ export async function setup(storage: ConfigStorage, credentials: CredentialStore
       : ""
     const automaticStopMs = parseAutomaticStopDuration(await prompts.input(`Automatic stop duration (optional, for example 30m or 2h)\n${automaticStopGuidance}`, priorAutomaticStop), { allowBlank: true })
     draft = provider === "box"
-      ? { version: 1, provider, box: { apiBaseUrl: normalizeBoxApiBaseUrl(await prompts.input("Box API base URL", priorConfig?.provider === "box" ? priorConfig.box!.apiBaseUrl : "https://ascii.dev/api/box/v1")), pollIntervalMs: 1000, pollTimeoutMs: 120000, ...(automaticStopMs === undefined ? {} : { automaticStopMs }) } }
-      : { version: 1, provider, vercel: { apiOrigin: normalizeVercelApiOrigin(await prompts.input("Vercel API origin", priorConfig?.provider === "vercel" ? priorConfig.vercel!.apiOrigin : "https://api.vercel.com/")), teamId: await prompts.input("Vercel team ID", priorConfig?.provider === "vercel" ? priorConfig.vercel!.teamId : ""), projectId: await prompts.input("Vercel project ID", priorConfig?.provider === "vercel" ? priorConfig.vercel!.projectId : ""), pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000, ...(automaticStopMs === undefined ? {} : { automaticStopMs }) } }
+      ? { version: 1, provider, box: { apiBaseUrl: OFFICIAL_BOX_API_BASE_URL, pollIntervalMs: 1000, pollTimeoutMs: 120000, ...(automaticStopMs === undefined ? {} : { automaticStopMs }) } }
+      : { version: 1, provider, vercel: { apiOrigin: OFFICIAL_VERCEL_API_ORIGIN, teamId: await prompts.input("Vercel team ID", priorConfig?.provider === "vercel" ? priorConfig.vercel!.teamId : ""), projectId: await prompts.input("Vercel project ID", priorConfig?.provider === "vercel" ? priorConfig.vercel!.projectId : ""), pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000, ...(automaticStopMs === undefined ? {} : { automaticStopMs }) } }
   } catch { throw new OnboardingError("Waterbox setup values are invalid. No configuration was saved.") }
   if (!legacyPersistedSchema.safeParse(draft).success) throw new OnboardingError("Waterbox setup values are invalid. No configuration was saved.")
   let secret: string
@@ -147,18 +149,21 @@ export function credentialVariable(provider: Provider): string { return provider
 function nonEmpty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 16_384 }
 const automaticStopSchema = z.number().int().positive().safe().refine(value => value % 60_000 === 0)
 const legacyPersistedSchema: z.ZodType<LegacyPersistedConfig> = z.discriminatedUnion("provider", [
-  z.object({ version: z.literal(1), provider: z.literal("box"), box: z.object({ apiBaseUrl: endpointSchema(normalizeBoxApiBaseUrl), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
-  z.object({ version: z.literal(1), provider: z.literal("vercel"), vercel: z.object({ apiOrigin: endpointSchema(normalizeVercelApiOrigin), teamId: z.string().trim().min(1).max(16_384), projectId: z.string().trim().min(1).max(16_384), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), requestTimeoutMs: z.literal(30000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
+  z.object({ version: z.literal(1), provider: z.literal("box"), box: z.object({ apiBaseUrl: z.literal(OFFICIAL_BOX_API_BASE_URL), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
+  z.object({ version: z.literal(1), provider: z.literal("vercel"), vercel: z.object({ apiOrigin: z.literal(OFFICIAL_VERCEL_API_ORIGIN), teamId: z.string().trim().min(1).max(16_384), projectId: z.string().trim().min(1).max(16_384), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), requestTimeoutMs: z.literal(30000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
 ])
 const persistedV2Schema = z.discriminatedUnion("provider", [
-  z.object({ version: z.literal(2), provider: z.literal("box"), providerConfigurationId: ProviderConfigurationIdSchema, box: z.object({ apiBaseUrl: endpointSchema(normalizeBoxApiBaseUrl), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
-  z.object({ version: z.literal(2), provider: z.literal("vercel"), providerConfigurationId: ProviderConfigurationIdSchema, vercel: z.object({ apiOrigin: endpointSchema(normalizeVercelApiOrigin), teamId: z.string().trim().min(1).max(16_384), projectId: z.string().trim().min(1).max(16_384), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), requestTimeoutMs: z.literal(30000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
+  z.object({ version: z.literal(2), provider: z.literal("box"), providerConfigurationId: ProviderConfigurationIdSchema, box: z.object({ apiBaseUrl: z.literal(OFFICIAL_BOX_API_BASE_URL), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
+  z.object({ version: z.literal(2), provider: z.literal("vercel"), providerConfigurationId: ProviderConfigurationIdSchema, vercel: z.object({ apiOrigin: z.literal(OFFICIAL_VERCEL_API_ORIGIN), teamId: z.string().trim().min(1).max(16_384), projectId: z.string().trim().min(1).max(16_384), pollIntervalMs: z.literal(1000), pollTimeoutMs: z.literal(120000), requestTimeoutMs: z.literal(30000), automaticStopMs: automaticStopSchema.optional() }).strict() }).strict(),
 ])
 const persistedSchema: z.ZodType<PersistedConfig> = z.union([legacyPersistedSchema, persistedV2Schema]) as z.ZodType<PersistedConfig>
-function endpointSchema(normalize: (value: string) => string): z.ZodType<string> { return z.string().trim().min(1).max(16_384).refine(value => { try { normalize(value); return true } catch { return false } }) }
-function parsePersistedConfig(raw: string | undefined): PersistedConfig | undefined {
+function parsePersistedConfigForSetup(raw: string | undefined): PersistedConfig | undefined {
   if (raw === undefined) return undefined
-  try { const parsed = persistedSchema.safeParse(JSON.parse(raw)); return parsed.success ? parsed.data : undefined } catch { return undefined }
+  try {
+    const parsed = persistedSchema.safeParse(JSON.parse(raw))
+    if (parsed.success) return parsed.data
+  } catch {}
+  throw new OnboardingError("Waterbox persisted configuration is unsafe or malformed. Remove ~/.waterbox/config.json, then run waterbox setup again, or use complete environment-only configuration. No credential was read or changed.")
 }
 function bindingFor(config: PersistedConfig, secret: string): string {
   const selection: LocalProviderBindingInput = config.provider === "box"

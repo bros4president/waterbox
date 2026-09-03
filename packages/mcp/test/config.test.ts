@@ -30,6 +30,15 @@ describe("Waterbox MCP configuration", () => {
     expect(fromEnvironment.provider.configuration.provider.providerConfigurationId).toBe(fromPersistedSetup.provider.configuration.provider.providerConfigurationId)
   })
 
+  test("retains custom endpoints for complete environment-only configuration", async () => {
+    const box = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", BOX_API_BASE_URL: "https://box.example/api" }, "/users/test")
+    const vercel = await parseMcpConfig({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", VERCEL_API_ORIGIN: "https://vercel.example/" }, "/users/test")
+    if (box.provider.type !== "local" || vercel.provider.type !== "local") throw new Error("Expected local configuration")
+    if (box.provider.configuration.provider.kind !== "box" || vercel.provider.configuration.provider.kind !== "vercel") throw new Error("Expected selected providers")
+    expect(box.provider.configuration.provider.config.apiBaseUrl).toBe("https://box.example/api")
+    expect(vercel.provider.configuration.provider.config.apiOrigin).toBe("https://vercel.example")
+  })
+
   test("acknowledges Waterbox Cloud without local credentials", async () => {
     expect(await parseMcpConfig({ WATERBOX_PROVIDER: "waterbox" })).toEqual({ provider: { type: "waterbox" } })
   })

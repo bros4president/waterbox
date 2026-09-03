@@ -1,6 +1,8 @@
 import { build } from "esbuild"
 import { fileURLToPath } from "node:url"
 import { dirname, resolve } from "node:path"
+import { mkdir, rm } from "node:fs/promises"
+import { verifyBundleClosure } from "./verify-mcp-bundle-closure.mjs"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const mode = process.argv[2]
@@ -22,23 +24,24 @@ if (mode === "cli") {
     outfile: resolve(root, "packages/sandbox-cli/dist/waterbox-cli.js"),
   })
 } else if (mode === "mcp") {
-  await Promise.all([
+  const dist = resolve(root, "packages/mcp/dist")
+  await rm(dist, { recursive: true, force: true })
+  await mkdir(dist, { recursive: true })
+  const results = await Promise.all([
     build({
       ...common,
+      metafile: true,
       entryPoints: [resolve(root, "packages/mcp/src/bin.ts")],
-      outfile: resolve(root, "packages/mcp/dist/waterbox.js"),
+      outfile: resolve(dist, "waterbox.js"),
     }),
     build({
       ...common,
+      metafile: true,
       entryPoints: [resolve(root, "packages/sandbox-cli/src/main.ts")],
-      outfile: resolve(root, "packages/mcp/dist/waterbox-cli.js"),
-    }),
-    build({
-      ...common,
-      entryPoints: [resolve(root, "packages/mcp/src/index.ts")],
-      outfile: resolve(root, "packages/mcp/dist/index.js"),
+      outfile: resolve(dist, "waterbox-cli.js"),
     }),
   ])
+  await verifyBundleClosure(root, results.map(result => result.metafile))
 } else {
   throw new Error("Usage: node scripts/build-waterbox.mjs <cli|mcp>")
 }

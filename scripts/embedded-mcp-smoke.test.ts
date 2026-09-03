@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { assertDirectSmokeAuthorized, baselineReconciliationError, compareBoxBaseline, readBoxBaseline, reconcileBoxBaseline, runDirectMcpProductFlow, runDirectMcpSmoke, type BoxBaseline } from "./direct-mcp-smoke.ts"
+import { assertEmbeddedSmokeAuthorized, baselineReconciliationError, compareBoxBaseline, readBoxBaseline, reconcileBoxBaseline, runEmbeddedMcpProductFlow, runEmbeddedMcpSmoke, type BoxBaseline } from "./embedded-mcp-smoke.ts"
 
 const now = "2026-08-31T12:00:00.000Z"
 const sandboxId = "sbx_silver-forest-a1"
@@ -7,15 +7,15 @@ const restoredSandboxId = "sbx_silver-forest-b2"
 const snapshotId = "snap_silver-forest-c3"
 const tools = "create_sandbox,probe_sandbox,stop_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash".split(",").map((name) => ({ name }))
 
-describe("Direct MCP smoke", () => {
+describe("Embedded MCP smoke", () => {
   test("requires both destructive-operation gates", () => {
-    expect(() => assertDirectSmokeAuthorized({})).toThrow("explicit authorization")
-    expect(() => assertDirectSmokeAuthorized({ WATERBOX_MCP_EXPERIMENT_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES" })).toThrow("explicit authorization")
-    expect(() => assertDirectSmokeAuthorized({ WATERBOX_MCP_EXPERIMENT_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES", WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT: "YES" })).not.toThrow()
+    expect(() => assertEmbeddedSmokeAuthorized({})).toThrow("explicit authorization")
+    expect(() => assertEmbeddedSmokeAuthorized({ WATERBOX_MCP_EXPERIMENT_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES" })).toThrow("explicit authorization")
+    expect(() => assertEmbeddedSmokeAuthorized({ WATERBOX_MCP_EXPERIMENT_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES", WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT: "YES" })).not.toThrow()
   })
 
   test("requires automatic stop before any Box preflight request", async () => {
-    await expect(runDirectMcpSmoke({
+    await expect(runEmbeddedMcpSmoke({
       WATERBOX_MCP_EXPERIMENT_AUTHORIZATION: "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES",
       WATERBOX_BOX_SMOKE_ISOLATED_ACCOUNT: "YES",
       BOX_API_KEY: "test-key",
@@ -25,7 +25,7 @@ describe("Direct MCP smoke", () => {
   test("runs the snapshot restore flow with distinct create keys and ordered tracked cleanup", async () => {
     const fake = fakeClient()
     const lines: string[] = []
-    await runDirectMcpProductFlow(fake.client, { ...productOptions(fake), log: (line) => lines.push(line) })
+    await runEmbeddedMcpProductFlow(fake.client, { ...productOptions(fake), log: (line) => lines.push(line) })
     const creates = fake.calls.filter((call) => call.name === "create_sandbox")
     expect(creates).toHaveLength(2)
     expect(creates[0]!.arguments).not.toHaveProperty("sourceSnapshotId")
@@ -34,19 +34,19 @@ describe("Direct MCP smoke", () => {
     expect(fake.calls).toContainEqual({ name: "create_snapshot", arguments: { sandboxId } })
     expect(fake.calls.filter((call) => call.name === "list_snapshots").length).toBeGreaterThan(1)
     expect(fake.calls).toContainEqual(expect.objectContaining({ name: "bash", arguments: expect.objectContaining({ command: "/usr/local/bin/waterbox health; /usr/local/bin/waterbox version" }) }))
-    expect(fake.calls).toContainEqual(expect.objectContaining({ name: "read", arguments: { sandboxId: restoredSandboxId, filePath: "waterbox-direct-marker" } }))
+    expect(fake.calls).toContainEqual(expect.objectContaining({ name: "read", arguments: { sandboxId: restoredSandboxId, filePath: "waterbox-embedded-marker" } }))
     expect(fake.calls).toContainEqual({ name: "stop_sandbox", arguments: { sandboxId } })
     expect(fake.calls.filter((call) => call.name === "stop_sandbox")).toHaveLength(1)
     expect(fake.calls.filter((call) => call.name === "bash" && call.arguments.command === "printf explicit-stop-resumed")).toHaveLength(1)
     expect(fake.calls.filter((call) => call.name === "bash" && call.arguments.command === "printf automatic-stop-resumed")).toHaveLength(1)
-    const markerCommand = fake.calls.find((call) => call.name === "bash" && call.arguments.command === "pwd; cat -- waterbox-direct-marker")
+    const markerCommand = fake.calls.find((call) => call.name === "bash" && call.arguments.command === "pwd; cat -- waterbox-embedded-marker")
     expect(markerCommand?.arguments).not.toHaveProperty("workdir")
     const indexOf = (predicate: (call: Call) => boolean) => fake.calls.findIndex(predicate)
     const stopAt = indexOf((call) => call.name === "stop_sandbox")
     const explicitResumeAt = indexOf((call) => call.name === "bash" && call.arguments.command === "printf explicit-stop-resumed")
-    const markerWriteAt = indexOf((call) => call.name === "write" && call.arguments.filePath === "waterbox-direct-marker")
+    const markerWriteAt = indexOf((call) => call.name === "write" && call.arguments.filePath === "waterbox-embedded-marker")
     const snapshotAt = indexOf((call) => call.name === "create_snapshot")
-    const restoredReadAt = indexOf((call) => call.name === "read" && call.arguments.sandboxId === restoredSandboxId && call.arguments.filePath === "waterbox-direct-marker")
+    const restoredReadAt = indexOf((call) => call.name === "read" && call.arguments.sandboxId === restoredSandboxId && call.arguments.filePath === "waterbox-embedded-marker")
     const automaticArmAt = indexOf((call) => call.name === "bash" && call.arguments.command === "printf automatic-stop-armed")
     const automaticResumeAt = indexOf((call) => call.name === "bash" && call.arguments.command === "printf automatic-stop-resumed")
     expect(stopAt).toBeLessThan(explicitResumeAt)
@@ -70,15 +70,15 @@ describe("Direct MCP smoke", () => {
   test("proves the Vercel relative marker through the provider default command workspace", async () => {
     const runtime = {
       workdir: "/workspace",
-      markerPath: "vercel-direct-marker",
+      markerPath: "vercel-embedded-marker",
       runtimeLauncher: "/workspace/.waterbox/waterbox",
       staleRuntimeCommand: "rm -f /workspace/.waterbox/waterbox-cli.js",
       restoredRuntimeCheck: "test -s /workspace/.waterbox/waterbox-cli.js && test -f /workspace/.waterbox/manifest.json",
     }
     const fake = fakeClient({ workdir: runtime.workdir, markerPath: runtime.markerPath, sourceStaleAfterSnapshot: true })
-    await runDirectMcpProductFlow(fake.client, { ...productOptions(fake), runtime })
-    expect(fake.calls).toContainEqual({ name: "read", arguments: { sandboxId: restoredSandboxId, filePath: "vercel-direct-marker" } })
-    const markerCommand = fake.calls.find((call) => call.name === "bash" && call.arguments.command === "pwd; cat -- vercel-direct-marker")
+    await runEmbeddedMcpProductFlow(fake.client, { ...productOptions(fake), runtime })
+    expect(fake.calls).toContainEqual({ name: "read", arguments: { sandboxId: restoredSandboxId, filePath: "vercel-embedded-marker" } })
+    const markerCommand = fake.calls.find((call) => call.name === "bash" && call.arguments.command === "pwd; cat -- vercel-embedded-marker")
     expect(markerCommand?.arguments).not.toHaveProperty("workdir")
     expect(fake.calls.filter((call) => call.name === "bash" && call.arguments.command === "printf automatic-stop-armed" && call.arguments.sandboxId === restoredSandboxId)).toHaveLength(1)
     const snapshotAt = fake.calls.findIndex((call) => call.name === "create_snapshot")
@@ -88,7 +88,7 @@ describe("Direct MCP smoke", () => {
 
   test("makes one tracked cleanup attempt after a public ID is returned", async () => {
     const fake = fakeClient({ failRuntime: true })
-    await expect(runDirectMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("runtime unavailable")
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("runtime unavailable")
     expect(fake.deletions).toEqual([sandboxId])
   })
 
@@ -99,19 +99,19 @@ describe("Direct MCP smoke", () => {
     ["restored verification", { failRestoredVerification: true }, [restoredSandboxId, snapshotId, sandboxId]],
   ] as const)("attempts all tracked cleanup after %s failure", async (_stage, options, expectedDeletions) => {
     const fake = fakeClient(options)
-    await expect(runDirectMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow()
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow()
     expect(fake.deletions).toEqual([...expectedDeletions])
   })
 
   test("continues tracked cleanup after an earlier cleanup action fails", async () => {
     const fake = fakeClient({ failRestoredCleanup: true })
-    await expect(runDirectMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("tracked cleanup requires manual review")
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("tracked cleanup requires manual review")
     expect(fake.deletions).toEqual([restoredSandboxId, snapshotId, sandboxId])
   })
 
   test("rejects a terminal Bash result that does not explicitly report a hard timeout", async () => {
     const fake = fakeClient({ hardTimeout: false })
-    await expect(runDirectMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("hard execution timeout")
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("hard execution timeout")
     expect(fake.deletions).toEqual([sandboxId])
   })
 
@@ -119,7 +119,7 @@ describe("Direct MCP smoke", () => {
     const secret = "box-secret-value"
     const calls: Call[] = [], lines: string[] = []
     const client = { async listTools() { return { tools } }, async callTool(request: Call) { calls.push(request); throw new Error(secret) } }
-    await expect(runDirectMcpProductFlow(client, { localSecretPath: "/local/secret", automaticStopMs: 1, sleep: async () => {}, secrets: [secret], log: (line) => lines.push(line) })).rejects.toThrow("manual review")
+    await expect(runEmbeddedMcpProductFlow(client, { localSecretPath: "/local/secret", automaticStopMs: 1, sleep: async () => {}, secrets: [secret], log: (line) => lines.push(line) })).rejects.toThrow("manual review")
     expect(calls.map((call) => call.name)).toEqual(["create_sandbox"])
     expect(lines.join("\n")).not.toContain(secret)
   })
@@ -130,7 +130,7 @@ describe("Direct MCP smoke", () => {
     ["restored sandbox", { malformedRestoredResponse: true }, [restoredSandboxId, snapshotId, sandboxId]],
   ] as const)("tracks the %s identifier before response validation can fail", async (_label, options, expectedDeletions) => {
     const fake = fakeClient(options)
-    await expect(runDirectMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow()
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow()
     expect(fake.deletions).toEqual([...expectedDeletions])
   })
 
@@ -140,7 +140,7 @@ describe("Direct MCP smoke", () => {
   ] as const)("ledgers and redacts a validated %s create recovery sandbox without replay", async (_label, options, recoveryId, expectedDeletions) => {
     const fake = fakeClient(options)
     let message = ""
-    try { await runDirectMcpProductFlow(fake.client, productOptions(fake)) } catch (error) { message = error instanceof Error ? error.message : String(error) }
+    try { await runEmbeddedMcpProductFlow(fake.client, productOptions(fake)) } catch (error) { message = error instanceof Error ? error.message : String(error) }
     expect(message).not.toContain(recoveryId)
     expect(fake.calls.filter((call) => call.name === "create_sandbox")).toHaveLength(recoveryId === restoredSandboxId ? 2 : 1)
     expect(fake.deletions).toEqual([...expectedDeletions])
@@ -164,7 +164,7 @@ describe("Direct MCP smoke", () => {
 
   test("bounds automatic-stop observation, cleans every tracked resource, and never replays a mutation", async () => {
     const fake = fakeClient({ neverAutoStop: true })
-    await expect(runDirectMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("automatic stop observation timed out")
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("automatic stop observation timed out")
     expect(fake.calls.filter((call) => call.name === "stop_sandbox")).toHaveLength(1)
     expect(fake.calls.filter((call) => call.name === "create_snapshot")).toHaveLength(1)
     expect(fake.calls.filter((call) => call.name === "delete_sandbox" && call.arguments.sandboxId === sandboxId)).toHaveLength(1)
@@ -213,7 +213,7 @@ const snapshot = (state = "creating") => ({ snapshotId, provider: "box", sourceS
 function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; failSnapshotCreate?: boolean; failSnapshotReadiness?: boolean; failRestoredCreate?: boolean; failRestoredVerification?: boolean; failRestoredCleanup?: boolean; neverAutoStop?: boolean; malformedSourceResponse?: boolean; malformedSnapshotResponse?: boolean; malformedRestoredResponse?: boolean; sourceRecoveryError?: boolean; restoredRecoveryError?: boolean; sourceStaleAfterSnapshot?: boolean; workdir?: string; markerPath?: string } = {}) {
   const calls: Call[] = [], deletions: string[] = []
   let marker = "", snapshotLists = 0, clock = 0
-  const workdir = options.workdir ?? "/home/user/workspace", markerPath = options.markerPath ?? "waterbox-direct-marker"
+  const workdir = options.workdir ?? "/home/user/workspace", markerPath = options.markerPath ?? "waterbox-embedded-marker"
   const states = new Map([[sandboxId, "running"], [restoredSandboxId, "running"]])
   const probes = new Map<string, number>()
   const output = (value = "") => text({ output: value, metadata: {} })
@@ -242,8 +242,8 @@ function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; fai
       if (request.name === "send_file_securely") return text({ bytes: 5 })
       if (request.name === "write" && request.arguments.filePath === markerPath) { marker = request.arguments.content; return output() }
       if (request.name === "read") return output(request.arguments.filePath === markerPath ? marker : "Alpha\n")
-      if (request.name === "glob") return output(request.arguments.path === workdir ? `${workdir}/direct-smoke.txt\n${workdir}/direct-patched.txt\n` : "")
-      if (request.name === "grep") return output(`${workdir}/direct-smoke.txt:Beta\n`)
+      if (request.name === "glob") return output(request.arguments.path === workdir ? `${workdir}/embedded-smoke.txt\n${workdir}/embedded-patched.txt\n` : "")
+      if (request.name === "grep") return output(`${workdir}/embedded-smoke.txt:Beta\n`)
       const command = String(request.arguments.command)
       if (command === "printf explicit-stop-resumed" || command === "printf automatic-stop-armed" || command === "printf automatic-stop-resumed") { states.set(request.arguments.sandboxId, "running"); return bash(command.replace("printf ", "")) }
       if (command === `pwd; cat -- ${markerPath}`) return bash(`${workdir}\n${marker}`)

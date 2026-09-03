@@ -1,6 +1,6 @@
 # Waterbox MCP npm Launch V0
 
-Status: implementation in progress. Provider implementation, live acceptance, Node 24.15.0/current-Node verification, and installed-artifact verification are complete. Phase 8 package/legal/documentation closure, Phase 9 CI, and Phase 10 publication remain pending.
+Status: implementation in progress. Phase 8 credential-free package, endpoint-safety, legal, documentation, and exact-artifact closure is complete. Phase 9 workflow implementation is present, but hosted CI, protected-environment, and trusted-publisher validation remain pending. Phase 10 publication remains pending.
 
 This is the durable launch plan for publishing the supported local Waterbox MCP as the unscoped npm package `waterbox`, making `npx add-mcp waterbox` the primary installation path, removing Bun and per-account Box system snapshots from the runtime requirements, and adding a controlled npm release process.
 
@@ -79,7 +79,7 @@ The launch command installs configuration. It does not silently choose a provide
 
 ### Safety And Release
 
-- Apache-2.0 is the project license for the public package.
+- MIT is the project license for the public package.
 - Release attribution uses `Waterbox contributors`.
 - The npm tarball includes the project license, project notice, and notices required by embedded dependencies and adapted code.
 - npm publication uses a controlled GitHub Actions workflow with npm trusted publishing, OIDC, and provenance.
@@ -156,7 +156,7 @@ The publishable package manifest must have this effective shape:
   "engines": {
     "node": ">=24.15.0"
   },
-  "license": "Apache-2.0",
+  "license": "MIT",
   "author": "Waterbox contributors",
   "repository": {
     "type": "git",
@@ -192,14 +192,13 @@ dist/waterbox.js
 dist/waterbox-cli.js
 README.md
 LICENSE
-NOTICE
 THIRD_PARTY_NOTICES.md
 package.json
 ```
 
 `server.json` may remain in the repository while official registry publication is deferred. Do not ship metadata with an unowned or knowingly incorrect registry namespace. Add it to the tarball only when its namespace, package identifier, version, environment declarations, and publication path are valid.
 
-Because npm cannot pack files from outside the workspace package automatically, the package directory must contain synchronized release copies of `LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md`. A release check compares each package-local file byte-for-byte with its canonical root source and fails on a missing or stale copy. Do not rely on npm traversing to repository-root legal files.
+Because npm cannot pack files from outside the workspace package automatically, the package directory must contain synchronized release copies of `LICENSE` and `THIRD_PARTY_NOTICES.md`. A release check compares each package-local file byte-for-byte with its canonical root source and fails on a missing or stale copy. Do not rely on npm traversing to repository-root legal files.
 
 The internal `dist/waterbox-cli.js` artifact is package data used for provider bootstrap. It is not a public npm executable or export.
 
@@ -558,13 +557,11 @@ Waterbox does not silently delete a created Box merely because preparation faile
 
 ### Project License
 
-Add the standard Apache License 2.0 text as `LICENSE` at the repository root and make it package-visible. Package metadata uses the SPDX expression:
+Add the standard MIT License text as `LICENSE` at the repository root and make it package-visible. Package metadata uses the SPDX expression:
 
 ```json
-"license": "Apache-2.0"
+"license": "MIT"
 ```
-
-Add `NOTICE` containing factual project attribution to `Waterbox contributors`. Do not add endorsement language or claim ownership of third-party code.
 
 Canonical legal files live at the repository root. Package-local copies under `packages/mcp/` are generated or synchronized for npm packaging and are checked byte-for-byte before pack and publish.
 
@@ -593,7 +590,7 @@ Release verification must:
 - Identify embedded third-party packages from build metadata or metafiles.
 - Compare that closure with `THIRD_PARTY_NOTICES.md`.
 - Fail when a bundled package has no recorded license or required notice text.
-- Confirm `LICENSE`, `NOTICE`, and `THIRD_PARTY_NOTICES.md` are present in the packed tarball.
+- Confirm `LICENSE` and `THIRD_PARTY_NOTICES.md` are present in the packed tarball.
 - Confirm package-local legal files exactly match their canonical root files.
 
 This plan records engineering requirements, not legal advice. Any ownership or commercial-policy concern discovered during publication remains a release blocker.
@@ -924,12 +921,12 @@ Also run the shared mandatory provider expectations against both adapters, optio
 
 ### Phase 8: Package, Legal, And Documentation
 
-Status: pending; Phase 7 and the Phase 4 live prerequisite are complete
+Status: credential-free implementation complete; the exact installed artifact passed Node 24.15.0 and Node 24.20.0 locally, while hosted CI evidence remains pending
 
 Scope:
 
 - Rename the package and executable to `waterbox`, retain its CLI-only contract, and add complete npm metadata.
-- Add Apache-2.0 licensing and exact bundle closure notices, including Hono/OpenAPI/API/client dependencies.
+- Add MIT licensing and exact bundle closure notices, including Hono/OpenAPI/API/client dependencies.
 - Rewrite package and root documentation for the Fetch-backed local architecture and both providers.
 - Remove supported-path system-template documentation and scripts; the Phase 4 snapshot-sourced reinstall and live prerequisite are complete.
 - This phase now includes bounded native-keyring onboarding only: exact-pinned `@napi-rs/keyring@2.0.0` remains external to the bundle and is lazy-loaded; interactive setup never accepts CLI credential arguments; config is atomically persisted without secrets; and status/logout have safe missing-versus-inaccessible-store behavior. This does not complete the remaining package rename, legal, or broad documentation scope.
@@ -958,7 +955,7 @@ The phase must add an installed-tarball test in an external temporary directory 
 
 ### Phase 9: CI And Release Automation
 
-Status: pending; depends on Phase 8
+Status: workflow implementation complete; hosted CI, protected `npm` environment, and npm trusted-publisher validation remain pending
 
 Scope:
 
@@ -1065,15 +1062,12 @@ package.json
 .env.example
 README.md
 LICENSE
-NOTICE
 THIRD_PARTY_NOTICES.md
 .github/workflows/*
 
 packages/mcp/package.json
 packages/mcp/README.md
-packages/mcp/server.json
 packages/mcp/LICENSE
-packages/mcp/NOTICE
 packages/mcp/THIRD_PARTY_NOTICES.md
 packages/mcp/src/main.ts
 packages/mcp/src/config.ts
@@ -1116,13 +1110,10 @@ apps/api-local/README.md
 scripts/embedded-mcp-smoke.ts
 scripts/vercel-sandbox-capability-probe.ts
 scripts/vercel-sandbox-capability-probe.test.ts
-scripts/build-box-system-template.ts
-scripts/build-box-system-template.test.ts
-docs/box-system-template.md
 docs/research/vercel-sandbox-provider-port-audit.md
 ```
 
-The existing `scripts/direct-mcp-smoke.ts` name is pre-refactor terminology. Rename or replace it with the embedded-path smoke in Phase 8; do not retain a direct-core production path merely to preserve the script name.
+The embedded-path smoke is `scripts/embedded-mcp-smoke.ts`; the obsolete direct-path name and system-template files were removed in Phase 8.
 
 The Phase 4 live prerequisite is complete. Remove system-template machinery as a Phase 8 cleanup, not as an assumption in earlier phases.
 
@@ -1181,24 +1172,24 @@ Live tests require explicit isolated-account authorization and must prove:
 - [x] Same-key create resumes only durable preparation safely.
 - [x] Fresh Box creation no longer uses a system snapshot.
 - [x] Snapshot-sourced creation installs the current runtime and preserves user data.
-- [ ] Legacy system-template machinery removed after the snapshot/live gate.
+- [x] Legacy system-template machinery removed after the snapshot/live gate.
 - [x] PR #5 merged upstream as `67a984ddf1761844548a4dad1e8e1d5b611c5d6b`.
 - [x] PR #5 integrated into the current checkout.
 - [x] Post-merge embedded MCP Node-minimum, current-Node, live, and installed-artifact re-verification completed.
 - [x] Vercel Sandbox provider-port audit has an approved follow-up architecture decision.
 - [x] Vercel Sandbox provider implemented only after the approved audit verdict.
-- [ ] npm package renamed to `waterbox`.
-- [ ] Package is CLI-only.
-- [ ] Missing provider is a connected setup state.
-- [ ] Apache-2.0 license and complete notices included.
-- [ ] Package-local legal files match canonical root files exactly.
-- [ ] npm metadata complete and factual.
-- [ ] Root and package docs match released behavior.
+- [x] npm package renamed to `waterbox`.
+- [x] Package is CLI-only.
+- [x] Missing provider is a connected setup state.
+- [x] MIT license and complete notices included.
+- [x] Package-local legal files match canonical root files exactly.
+- [x] npm metadata complete and factual.
+- [x] Root and package docs match released behavior.
 - [x] Box and Vercel Sandbox setup docs and isolated live gates pass.
-- [ ] Exact post-refactor bundle and legal closure verified.
+- [x] Exact post-refactor bundle and legal closure verified.
 - [ ] Pull-request CI complete.
 - [ ] Trusted npm publish workflow protected.
-- [ ] Installed-tarball test passes with no Bun.
+- [x] Installed-tarball test passes with Bun absent on Node 24.15.0 and Node 24.20.0.
 - [ ] Exact tested tarball checksum is preserved through npm publication.
 - [ ] Isolated-account release smoke passes with exact cleanup reconciliation.
 - [ ] `waterbox@0.1.0` published with provenance.
@@ -1207,7 +1198,8 @@ Live tests require explicit isolated-account authorization and must prove:
 
 ## Implementation Log
 
-- 2026-08-31: Plan created from the npm launch review. Settled the unscoped `waterbox` package, CLI-only distribution, provider-neutral explicit configuration, Node 24 local and sandbox runtimes, plain-Box bootstrap, accepted-resource persistence, Apache-2.0 licensing, tarball verification, trusted npm publication, and official registry deferral. No implementation or live provider operation occurred while writing the plan.
+- 2026-08-31: Plan created from the npm launch review. Settled the unscoped `waterbox` package, CLI-only distribution, provider-neutral explicit configuration, Node 24 local and sandbox runtimes, plain-Box bootstrap, accepted-resource persistence, tarball verification, trusted npm publication, and official registry deferral. No implementation or live provider operation occurred while writing the plan.
+- 2026-09-03: Changed the planned project license from Apache-2.0 to MIT after separating the private hosted product from the public Waterbox repository.
 - 2026-08-31: Node 24.15.0 verification passed using the official darwin-arm64 binary: Node build and syntax, `node:sqlite` compatibility, clean pack/install, and npm-bin MCP setup smoke. The official SHASUMS checksum matched; signature verification was unavailable because GPG tooling was absent.
 - 2026-08-31: Phase 3 credential-free implementation verified the existing create operation followed by a durable `preparing` checkpoint and mandatory provider preparation. No create replay, allocation/readiness split, or list-diff correlation was added.
 - 2026-08-31: Phase 4 fresh live flow passed: fresh create, initial incomplete verification, correlated upload, install, final verification, running probe, all tools, secure transfer, async Bash, concurrency, tracked cleanup, and exact baseline comparison. The verifier natural-EOF handling was corrected from this live observation.
@@ -1217,3 +1209,8 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-09-01: Phase 6 completed without adding the Vercel SDK or changing production behavior. Twelve direct-REST fake tests passed request-contract, ambiguity, lifecycle, transient snapshot, bounded-output, redaction, and cleanup cases. The separately authorized isolated-project probe passed fresh named create, Node 24, `rg`, privilege/workspace preparation, gzip-tar upload, command wait/log/kill, stop/resume persistence with replaced session identity, manual and automatic snapshots, snapshot-source restore, deletion/tombstones, and exact baseline reconciliation with zero cleanup errors. The audit in `docs/research/vercel-sandbox-provider-port-audit.md` records exactly one verdict: adapter-local shim needed, port unchanged. Phase 7 approval, production implementation, and configuration selection remain pending; no credential or provider identifier was retained in the plan or report.
 - 2026-09-01: Phase 7 architecture review approved a supplementary provider-neutral implementation plan. The review refined the audit recommendation: Box and Vercel share a direct low-level intersection, while the current provider implementation boundary mixes native sandbox primitives with shared Waterbox preparation, CLI, secure-transfer, and Bash-job logic. Implementation must introduce the primitive port, extract the shared runtime, migrate and live-regress Box, and only then implement and live-accept Vercel. Native `fetch` against the validated REST surface is the settled Vercel transport; no Vercel SDK dependency is planned. No production code or live provider operation occurred while recording this decision.
 - 2026-09-02: Phase 7 complete: the supplementary provider plan completed its provider-neutral primitive boundary, shared runtime, Box migration/regression, Vercel adapter/composition, documentation, and authorized two-provider acceptance. Vercel passed fresh/current preparation, all tools, ciphertext transfer, Bash, concurrency, snapshot restore/repair, stop/resume, cancellation/kill recovery, and owned automatic-snapshot tombstone cleanup with zero active resources; Box passed its direct embedded regression with exact baseline restoration. Final verification passed 474 tests and 2433 expectations, typecheck, MCP build, Node SQLite tests, the default Node composition smoke, and diff checking. `$NODE_24_15_BIN` and `$NODE_24_CURRENT_BIN` were absent, so those named commands were not run and no substitute was used. Phase 8+ package, legal, CI, and npm release work remains pending.
+- 2026-09-03: Issue #10 baseline confirmed `waterbox` remained unclaimed (`npm view` returned E404). The pre-change `bun run check:release` passed 594 tests, Node SQLite, shared-library verification, and the scoped three-artifact package verifier; it reported `$NODE_24_15_BIN` unavailable in that invocation.
+- 2026-09-03: Phase 8 credential-free closure renamed the package to CLI-only `waterbox@0.1.0`, removed stale index and system-template surfaces, restricted persisted endpoints to the exact official Box/Vercel values before keyring reads, synchronized MIT/legal files, mapped the exact esbuild closure, rewrote product docs, and certified one exact isolated tarball. Local release verification passed 588 tests, typecheck, Node SQLite, shared-library gates, publint, two-pack normalized-content equality, isolated install, exact allowlist/legal/corpus/source-path checks, and pinned `add-mcp@2.3.0` OpenCode/Codex configuration. The retained candidate hash for that run was `ad48235cd27651662c5d27adab8ce32ebfd81465444a1e2aa3369d34711ab35d`; protocol initialization, 15-tool listing, unconfigured guidance, adjacent CLI execution, and clean shutdown passed with the official Node v24.15.0 binary. No current Node 24 binary was available, so that gate remains pending rather than using Node v25.2.1 as a substitute.
+- 2026-09-03: Phase 9 workflow code added PR/push release checks across Node 24.15.0 and current Node 24 plus a repository/tag/environment-restricted OIDC/provenance publish path that retains and publishes one verified tarball. Hosted workflow execution, GitHub environment protection, npm package bootstrap/ownership, and trusted-publisher configuration remain external pending gates; no publish, tag, release, commit, push, or provider mutation occurred.
+- 2026-09-03: Supervisor corrections completed the root install/keyring wording, made interactive setup reject unsafe or malformed persisted records before any prompt or credential-store access, and completed the active Direct-to-Embedded smoke terminology migration. The corrected focused suite passed 68 tests and 279 expectations; typecheck and exact Node v24.15.0 package verification passed, superseding the earlier pre-correction candidate.
+- 2026-09-03: Supervisory release hardening made the verifier construct the package twice from independently copied source trees with frozen installs and clean library/MCP builds before packing, executes installed artifacts with a Node-only `PATH`, and validates bundled package manifest licenses plus required notice terms and copyright lines against the reviewed map. The exact candidate passed on Node v24.15.0 and v24.20.0 with SHA-256 `d8f33fbe3c9e1ff23ef334cc4373e65c3b191590f54e24aa2d0c867c2fd6f111`. CI now exports the intended matrix Node binary. The publish workflow pins actions by commit, requires the tagged commit to be reachable from `origin/main`, records release evidence for 90 days, and rechecks the retained tarball SHA-256 immediately before trusted publication. Hosted CI, environment protection, npm bootstrap/trusted-publisher setup, authorized release smokes, and publication remain pending.

@@ -1,17 +1,68 @@
 {
   "name": "@waterbox/contracts",
-  "private": true,
+  "version": "0.1.0-alpha.1",
+  "description": "Runtime contracts for Waterbox clients, control planes, providers, and sandboxes.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bros4president/waterbox.git",
+    "directory": "packages/sandbox-contracts"
+  },
+  "homepage": "https://github.com/bros4president/waterbox#readme",
+  "bugs": "https://github.com/bros4president/waterbox/issues",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./errors": "./src/errors.ts",
-    "./identity": "./src/identity.ts",
-    "./lifecycle": "./src/lifecycle.ts",
-    "./pagination": "./src/pagination.ts",
-    "./resources": "./src/resources.ts",
-    "./tools": "./src/tools.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
+    },
+    "./identity": {
+      "types": "./dist/identity.d.ts",
+      "import": "./dist/identity.js"
+    },
+    "./lifecycle": {
+      "types": "./dist/lifecycle.d.ts",
+      "import": "./dist/lifecycle.js"
+    },
+    "./pagination": {
+      "types": "./dist/pagination.d.ts",
+      "import": "./dist/pagination.js"
+    },
+    "./resources": {
+      "types": "./dist/resources.d.ts",
+      "import": "./dist/resources.js"
+    },
+    "./secure-transfer": {
+      "types": "./dist/secure-transfer.d.ts",
+      "import": "./dist/secure-transfer.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js"
+    }
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "zod": "4.1.8"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
   }
 }

@@ -1,16 +1,60 @@
 {
   "name": "@waterbox/core",
-  "private": true,
+  "version": "0.1.0-alpha.1",
+  "description": "Transport-neutral Waterbox sandbox lifecycle service and integration ports.",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bros4president/waterbox.git",
+    "directory": "packages/sandbox-core"
+  },
+  "homepage": "https://github.com/bros4president/waterbox#readme",
+  "bugs": "https://github.com/bros4president/waterbox/issues",
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./errors": "./src/errors.ts",
-    "./ports": "./src/ports.ts",
-    "./provider": "./src/provider.ts",
-    "./records": "./src/records.ts",
-    "./test-support": "./src/test-support.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
+    },
+    "./ports": {
+      "types": "./dist/ports.d.ts",
+      "import": "./dist/ports.js"
+    },
+    "./provider": {
+      "types": "./dist/provider.d.ts",
+      "import": "./dist/provider.js"
+    },
+    "./records": {
+      "types": "./dist/records.d.ts",
+      "import": "./dist/records.js"
+    },
+    "./test-support": {
+      "types": "./dist/test-support.d.ts",
+      "import": "./dist/test-support.js"
+    }
+  },
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@waterbox/contracts": "workspace:*"
+    "@waterbox/contracts": "0.1.0-alpha.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
   }
 }

@@ -2,6 +2,8 @@
 
 Canonical runtime contracts shared by the Waterbox control plane, providers, runtime, and public API. Zod schemas are the source of truth; TypeScript types are inferred from them.
 
+Prereleases use the `next` dist-tag while the API is being validated against the hosted Waterbox implementation. Pre-1.0 releases may contain breaking changes.
+
 ## Public And Internal Data
 
 The resource schemas in this package describe public data. They deliberately cannot represent account ownership, opaque provider references, provider credentials, protected URLs, tokens, or other provider implementation state. Public API implementations must serialize records through these schemas rather than returning internal records directly.
