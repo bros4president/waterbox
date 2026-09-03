@@ -32,6 +32,15 @@ export class MalformedRepositoryDocumentError extends Error {
   }
 }
 
+export class IncompatibleRepositorySchemaError extends Error {
+  constructor(readonly filename: string) {
+    super(
+      `Incompatible Waterbox SQLite schema at ${filename}. Clean up remote resources using the prior Waterbox build and provider configuration, then move, remove, or reset this local database before starting the current build.`,
+    )
+    this.name = "IncompatibleRepositorySchemaError"
+  }
+}
+
 const JsonValueSchema: z.ZodType<JsonValue> = z.json()
 const ResourceErrorSchema = z.object({ code: ErrorCodeSchema, message: z.string().min(1).max(2_000) }).strict()
 const BaseRecordSchema = z.object({
@@ -78,6 +87,29 @@ type IdempotencyDocumentRow = {
   document: string
 }
 type CursorPayload = { v: 1; after: string }
+type TableColumnRow = { name: string; type: string; notnull: number | bigint; pk: number | bigint }
+
+const REPOSITORY_TABLE_COLUMNS = {
+  sandbox_documents: [
+    ["account_id", "TEXT", 1, 1],
+    ["resource_id", "TEXT", 1, 2],
+    ["version", "INTEGER", 1, 0],
+    ["document", "TEXT", 1, 0],
+  ],
+  snapshot_documents: [
+    ["account_id", "TEXT", 1, 1],
+    ["resource_id", "TEXT", 1, 2],
+    ["version", "INTEGER", 1, 0],
+    ["document", "TEXT", 1, 0],
+  ],
+  idempotency_documents: [
+    ["account_id", "TEXT", 1, 1],
+    ["scope", "TEXT", 1, 2],
+    ["idempotency_key", "TEXT", 1, 3],
+    ["version", "INTEGER", 1, 0],
+    ["document", "TEXT", 1, 0],
+  ],
+} as const
 
 const CURSOR_FORMAT_VERSION = 1
 class CursorCodec {
@@ -179,6 +211,21 @@ function parseIdempotency(
 
 function serialize(value: unknown): string {
   return JSON.stringify(value)
+}
+
+function hasCurrentRepositorySchema(database: RepositoryDatabase): boolean {
+  return Object.entries(REPOSITORY_TABLE_COLUMNS).every(([table, expected]) => {
+    const columns = database.prepare(`PRAGMA table_info(${table})`).all() as TableColumnRow[]
+    if (columns.length !== expected.length) return false
+    return columns.every((column, index) => {
+      const expectedColumn = expected[index]
+      return expectedColumn !== undefined
+        && column.name === expectedColumn[0]
+        && column.type.toUpperCase() === expectedColumn[1]
+        && Number(column.notnull) === expectedColumn[2]
+        && Number(column.pk) === expectedColumn[3]
+    })
+  })
 }
 
 export class SqliteSandboxRepository implements SandboxRepository {
@@ -374,6 +421,11 @@ export class SqliteRepositoryStore {
         PRIMARY KEY (account_id, scope, idempotency_key)
       ) WITHOUT ROWID;
     `)
+    if (!hasCurrentRepositorySchema(this.database)) {
+      this.database.close()
+      this.#closed = true
+      throw new IncompatibleRepositorySchemaError(filename)
+    }
     this.sandboxes = new SqliteSandboxRepository(this.database, cursors)
     this.snapshots = new SqliteSnapshotRepository(this.database, cursors)
     this.idempotency = new SqliteIdempotencyRepository(this.database)

@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { existsSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { IdempotencyRecord, SandboxRecord, SnapshotRecord } from "@waterbox/core/records"
 import {
+  IncompatibleRepositorySchemaError,
   MalformedRepositoryDocumentError,
   SQLITE_REPOSITORY_MAX_PAGE_LIMIT,
   SqliteRepositoryStore,
@@ -65,6 +67,37 @@ function idempotency(accountId = "acct-a", suffix = "1", version = 1): Idempoten
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
   }
+}
+
+function createPrePolishRepository(filename: string, populated: boolean): void {
+  const database = new Database(filename, { create: true })
+  database.exec(`
+    CREATE TABLE sandbox_documents (
+      account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
+      PRIMARY KEY (account_id, resource_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE snapshot_documents (
+      account_id TEXT NOT NULL, resource_id TEXT NOT NULL, version INTEGER NOT NULL, document TEXT NOT NULL,
+      PRIMARY KEY (account_id, resource_id)
+    ) WITHOUT ROWID;
+    CREATE TABLE idempotency_documents (
+      account_id TEXT NOT NULL, scope TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+      version INTEGER NOT NULL, expires_at TEXT NOT NULL, document TEXT NOT NULL,
+      PRIMARY KEY (account_id, scope, idempotency_key)
+    ) WITHOUT ROWID;
+  `)
+  if (populated) {
+    const legacyDocument = JSON.stringify({
+      accountId: "acct-legacy",
+      sandboxId: "sbx_legacy",
+      provider: "box",
+      providerRef: { id: "remote-reference-must-stay-local" },
+    })
+    database.query(`INSERT INTO sandbox_documents
+      (account_id, resource_id, version, document) VALUES (?, ?, ?, ?)`)
+      .run("acct-legacy", "sbx_legacy", 1, legacyDocument)
+  }
+  database.close()
 }
 
 describe("SQLite repository conformance", () => {
@@ -156,6 +189,65 @@ describe("atomic sandbox creation reservations", () => {
 })
 
 describe("SQLite durability and isolation", () => {
+  test("a fresh database receives and reopens with the current schema", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-fresh-"))
+    directories.push(directory)
+    const filename = join(directory, "repository.sqlite")
+    const first = store(filename)
+    expect(first.database.prepare("PRAGMA table_info(idempotency_documents)").all()
+      .map((column) => column.name)).toEqual(["account_id", "scope", "idempotency_key", "version", "document"])
+    first.close()
+    stores.splice(stores.indexOf(first), 1)
+    const reopened = store(filename)
+    expect(reopened.database.prepare("SELECT count(*) AS count FROM sandbox_documents").get()).toEqual({ count: 0 })
+  })
+
+  test("an empty pre-polish database fails closed with path-specific reset guidance", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-legacy-empty-"))
+    directories.push(directory)
+    const filename = join(directory, "repository.sqlite")
+    createPrePolishRepository(filename, false)
+
+    let startupError: unknown
+    try {
+      new SqliteRepositoryStore(filename)
+    } catch (error) {
+      startupError = error
+    }
+    expect(startupError).toBeInstanceOf(IncompatibleRepositorySchemaError)
+    expect(String(startupError)).toContain(filename)
+    expect(String(startupError)).toContain("Clean up remote resources using the prior Waterbox build and provider configuration")
+    expect(String(startupError)).toContain("move, remove, or reset this local database")
+    expect(() => new SqliteRepositoryStore(filename, { readonly: true, create: false }))
+      .toThrow(IncompatibleRepositorySchemaError)
+
+    const unchanged = new Database(filename, { readonly: true })
+    const legacyColumns = unchanged.query("PRAGMA table_info(idempotency_documents)").all() as { name: string }[]
+    expect(legacyColumns.map((column) => column.name)).toContain("expires_at")
+    unchanged.close()
+  })
+
+  test("a populated pre-polish database fails before exposing unbound records", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-legacy-populated-"))
+    directories.push(directory)
+    const filename = join(directory, "repository.sqlite")
+    createPrePolishRepository(filename, true)
+
+    let startupError: unknown
+    try {
+      new SqliteRepositoryStore(filename)
+    } catch (error) {
+      startupError = error
+    }
+    expect(startupError).toBeInstanceOf(IncompatibleRepositorySchemaError)
+    expect(String(startupError)).toContain(filename)
+    expect(String(startupError)).not.toContain("remote-reference-must-stay-local")
+
+    const unchanged = new Database(filename, { readonly: true })
+    expect(unchanged.query("SELECT count(*) AS count FROM sandbox_documents").get()).toEqual({ count: 1 })
+    unchanged.close()
+  })
+
   test("create false rejects a missing file without creating it", async () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-sqlite-create-"))
     directories.push(directory)

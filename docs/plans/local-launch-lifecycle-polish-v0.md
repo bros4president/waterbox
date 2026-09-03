@@ -768,3 +768,10 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun run check:release` passed: `bun run typecheck`, `bun test` (544 passed), `bun run test:node-sqlite` (1 passed), merge-base/worktree/index diff checks, MCP build, and installed-artifact/tarball verification for the Friendly Words corpus and notices. A final `git diff --check` passed.
 - Live evidence: no live calls ran. `BOX_API_KEY`, `BOX_API_BASE_URL`, `VERCEL_TOKEN`, `VERCEL_TEAM_ID`, `VERCEL_PROJECT_ID`, `WATERBOX_PROVIDER`, and `WATERBOX_AUTO_STOP` were absent, and the supported `/root` persisted configuration/keyring lookup reported `configured:false`; no scoped provider account or project was available for safe mutation or cleanup reconciliation.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 item 1 remediation
+
+- Implemented: added an exact startup schema boundary for the three SQLite repository tables. Fresh and current databases open normally; empty and populated pre-polish databases fail closed before repositories are exposed, preserve the legacy file unchanged, and report the exact database path with guidance to clean remote resources using the prior build and provider configuration before moving, removing, or resetting the local database. No legacy document or provider reference is read into a repository.
+- Verification: `bun test packages/sandbox-repository-sqlite/test/repositories.test.ts` passed (30 tests); `bun run test:node-sqlite` passed (1 test); `bun run typecheck` passed; `bun test` passed (547 tests); `git diff --check` passed.
+- Live evidence: not run; this remediation performs no provider access and authorizes no live provider mutation.
+- Deviations: automatic recreation of an empty pre-polish database was not implemented; it fails unchanged with the same safe guidance as a populated incompatible database.
