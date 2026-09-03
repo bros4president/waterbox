@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId } from "@waterbox/contracts"
 import { SandboxService } from "@waterbox/core"
-import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { decodeInvocation } from "@waterbox/cli/protocol"
 import { createHash } from "node:crypto"
 import { BOX_RUNTIME_PATH_PROVISIONER, BOX_RUNTIME_PROFILE, BoxSandboxInfrastructure, BoxSandboxProvider, type BoxProviderClock } from "../src/index.ts"
@@ -255,13 +255,16 @@ describe("Box primitive contracts", () => {
     })
     const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository()
+    const snapshots = new InMemorySnapshotRepository()
+    const idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
     await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z" })
     const service = new SandboxService({
       sandboxes,
-      snapshots: new InMemorySnapshotRepository(),
-      idempotency: new InMemoryIdempotencyRepository(),
+      snapshots,
+      idempotency,
+      sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
       providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -286,11 +289,11 @@ describe("assembled Box compatibility", () => {
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
-    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository()
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
     await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]) })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-2p9x"]) })
 
     const created = await service.createSnapshot(identity, sandboxId, {})
     expect(created).toMatchObject({ state: "ready" })

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
 import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH, type SandboxId } from "@waterbox/contracts"
-import { FakeSandboxProvider, FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { FakeSandboxProvider, FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { ProviderError } from "@waterbox/core/provider"
 import { createWaterboxApi, type IdentityResolver, type WaterboxCore } from "../src/index.ts"
 
@@ -192,11 +192,14 @@ describe("Waterbox API", () => {
 
   test("preserves core probe reconciliation semantics across the authenticated API boundary", async () => {
     const sandboxes = new InMemorySandboxRepository()
+    const snapshots = new InMemorySnapshotRepository()
+    const idempotency = new InMemoryIdempotencyRepository()
     const provider = new FakeSandboxProvider()
     const core = new SandboxService({
       sandboxes,
-      snapshots: new InMemorySnapshotRepository(),
-      idempotency: new InMemoryIdempotencyRepository(),
+      snapshots,
+      idempotency,
+      sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
       providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -252,12 +255,15 @@ describe("Waterbox API", () => {
   test("returns canonical recovery errors when referenced provisioning preparation fails through get or probe", async () => {
     const secret = "provider preparation detail must stay private"
     const sandboxes = new InMemorySandboxRepository()
+    const snapshots = new InMemorySnapshotRepository()
+    const idempotency = new InMemoryIdempotencyRepository()
     const provider = new FakeSandboxProvider()
     provider.prepareError = new ProviderError("failure", secret)
     const core = new SandboxService({
       sandboxes,
-      snapshots: new InMemorySnapshotRepository(),
-      idempotency: new InMemoryIdempotencyRepository(),
+      snapshots,
+      idempotency,
+      sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
       providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

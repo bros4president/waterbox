@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId, SnapshotId } from "@waterbox/contracts"
-import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
+import { DomainError, SandboxRecoveryError, SandboxService, type SandboxServiceConfig, type SandboxServiceDependencies } from "@waterbox/core"
 import type { ListRepositoryInput, RepositoryPage, SandboxRepository } from "@waterbox/core/ports"
 import {
   ProviderError,
@@ -22,6 +22,16 @@ const alice: Identity = { accountId: "acct-alice" }
 const bob: Identity = { accountId: "acct-bob" }
 const binding = "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
+function inMemorySandboxService(
+  dependencies: Omit<SandboxServiceDependencies, "sandboxCreations"> | SandboxServiceDependencies,
+  config: SandboxServiceConfig = {},
+): SandboxService {
+  const sandboxCreations = "sandboxCreations" in dependencies
+    ? dependencies.sandboxCreations
+    : new InMemorySandboxCreationRepository(dependencies.sandboxes, dependencies.idempotency)
+  return new SandboxService({ ...dependencies, sandboxCreations }, config)
+}
+
 function harness(options: {
   sandboxIds?: string[]
   snapshotIds?: string[]
@@ -33,12 +43,13 @@ function harness(options: {
   const sandboxes = new InMemorySandboxRepository()
   const snapshots = new InMemorySnapshotRepository()
   const idempotency = options.idempotency ?? new InMemoryIdempotencyRepository()
+  const sandboxCreations = new InMemorySandboxCreationRepository(sandboxes, idempotency)
   const provider = options.provider ?? new FakeSandboxProvider()
-  const service = new SandboxService({
+  const service = inMemorySandboxService({
     sandboxes,
     snapshots,
     idempotency,
-    sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
+    sandboxCreations,
     providers: new Map([[provider.name, provider]]),
     defaultProvider: provider.name,
     providerConfigurationId: options.providerConfigurationId ?? binding,
@@ -48,7 +59,7 @@ function harness(options: {
       options.snapshotIds ?? ["snap_silver-forest-a1", "snap_warm-meadow-b2"],
     ),
   }, options.serviceConfig)
-  return { service, sandboxes, snapshots, idempotency, provider }
+  return { service, sandboxes, snapshots, idempotency, sandboxCreations, provider }
 }
 
 async function expectDomainError(promise: Promise<unknown>, code: DomainError["code"]): Promise<DomainError> {
@@ -155,7 +166,7 @@ describe("provider configuration binding", () => {
     expect(provider.inspectSandboxCalls).toBe(0)
 
     const otherProvider = new FakeSandboxProvider({ name: "other" })
-    const alternate = new SandboxService({
+    const alternate = inMemorySandboxService({
       sandboxes,
       snapshots: new InMemorySnapshotRepository(),
       idempotency: new InMemoryIdempotencyRepository(),
@@ -172,7 +183,7 @@ describe("provider configuration binding", () => {
   test("switching back to the exact binding restores access", async () => {
     const { service, sandboxes, snapshots, idempotency, provider } = harness()
     const sandbox = await service.createSandbox(alice, {})
-    const switched = new SandboxService({
+    const switched = inMemorySandboxService({
       sandboxes,
       snapshots,
       idempotency,
@@ -330,7 +341,7 @@ describe("durable create idempotency", () => {
     const base = new InMemorySandboxRepository()
     const sandboxes = new FailingSandboxCasRepository(base)
     const provider = new FakeSandboxProvider()
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes,
       snapshots: new InMemorySnapshotRepository(),
       idempotency: new InMemoryIdempotencyRepository(),
@@ -452,22 +463,38 @@ describe("durable create idempotency", () => {
     expect(provider.createCalls).toBe(2)
   })
 
-  test("concurrent same-key creation reserves one ID and provisions one provider resource", async () => {
+  test("two service instances sharing repositories reserve one ID and dispatch one provider create", async () => {
     const gate = deferred()
     const started = deferred()
     const provider = new FakeSandboxProvider()
     provider.createBarrier = gate.promise
     provider.createStarted = started.resolve
-    const { service, idempotency } = harness({ provider })
+    const { service, sandboxes, snapshots, idempotency, sandboxCreations } = harness({ provider })
+    const secondService = inMemorySandboxService({
+      sandboxes,
+      snapshots,
+      idempotency,
+      sandboxCreations,
+      providers: new Map([[provider.name, provider]]),
+      defaultProvider: provider.name,
+      providerConfigurationId: binding,
+      clock: new FixedClock(),
+      ids: new SequenceIdGenerator(["sbx_blue-river-b2"]),
+    })
 
     const first = service.createSandbox(alice, {}, { idempotencyKey: "concurrent" })
+    const second = expectDomainError(
+      secondService.createSandbox(alice, {}, { idempotencyKey: "concurrent" }),
+      "idempotency_in_progress",
+    )
     await started.promise
-    const second = service.createSandbox(alice, {}, { idempotencyKey: "concurrent" })
-    await expectDomainError(second, "idempotency_in_progress")
+    await second
 
     const reserved = await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "concurrent" })
     expect(reserved?.resourceId).toBe("sbx_calm-cactus-a1")
     expect(reserved?.state).toBe("in_progress")
+    expect((await sandboxes.list({ accountId: alice.accountId, limit: 10 })).items.map((item) => item.sandboxId))
+      .toEqual(["sbx_calm-cactus-a1"])
     expect(provider.createCalls).toBe(1)
 
     gate.resolve()
@@ -485,7 +512,7 @@ describe("durable create idempotency", () => {
     provider.prepareBarrier = gate.promise
     provider.prepareStarted = () => (provider.prepareCalls === 1 ? firstStarted : secondStarted).resolve()
     const first = harness({ provider })
-    const secondService = new SandboxService({
+    const secondService = inMemorySandboxService({
       sandboxes: first.sandboxes,
       snapshots: first.snapshots,
       idempotency: first.idempotency,
@@ -543,7 +570,7 @@ describe("durable create idempotency", () => {
     const sandboxes = new FailingRunningCommitRepository(base)
     const idempotency = new InMemoryIdempotencyRepository()
     const provider = new FakeSandboxProvider()
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes,
       snapshots: new InMemorySnapshotRepository(),
       idempotency,
@@ -572,7 +599,7 @@ describe("durable create idempotency", () => {
     const sandboxes = new RejectFailedSandboxRepository(base)
     const provider = new FakeSandboxProvider()
     provider.prepareError = new ProviderError("failure", "private failure")
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes,
       snapshots: new InMemorySnapshotRepository(),
       idempotency: new InMemoryIdempotencyRepository(),
@@ -652,7 +679,7 @@ describe("lifecycle and optional groups", () => {
     const provider = new FakeSandboxProvider()
     const unsupported = { ...provider, name: provider.name, prepareSandbox: undefined } as unknown as FakeSandboxProvider
 
-    expect(() => new SandboxService({
+    expect(() => inMemorySandboxService({
       sandboxes: new InMemorySandboxRepository(),
       snapshots: new InMemorySnapshotRepository(),
       idempotency: new InMemoryIdempotencyRepository(),
@@ -816,7 +843,7 @@ describe("lifecycle and optional groups", () => {
     const racing = new RacingSandboxRepository(base, false)
     const snapshots = new InMemorySnapshotRepository()
     const provider = new FakeSandboxProvider()
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes: racing,
       snapshots,
       idempotency: new InMemoryIdempotencyRepository(),
@@ -859,7 +886,7 @@ describe("lifecycle and optional groups", () => {
     provider.sandboxStates.set(sandboxId, "running")
     provider.createSnapshotObservation = { state: "ready", providerRef: { privateSnapshotId: "snap_silver-forest-a1" }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } } }
     const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: binding, clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_silver-forest-a1"]) }
-    const service = new SandboxService(dependencies, { metadataConflictRetries: 1 })
+    const service = inMemorySandboxService(dependencies, { metadataConflictRetries: 1 })
 
     const created = await service.createSnapshot(alice, sandboxId, {})
 
@@ -868,7 +895,7 @@ describe("lifecycle and optional groups", () => {
     expect((await base.get(alice.accountId, sandboxId))?.state).toBe("running")
     sandboxes.allow()
     provider.sandboxStates.set(sandboxId, "stopped")
-    const recovered = new SandboxService(dependencies)
+    const recovered = inMemorySandboxService(dependencies)
     expect((await recovered.getSnapshot(alice, created.snapshotId)).state).toBe("ready")
     expect((await base.get(alice.accountId, sandboxId))?.state).toBe("stopped")
   })
@@ -883,12 +910,12 @@ describe("lifecycle and optional groups", () => {
     provider.createSnapshotObservation = { state: "failed", providerRef: { privateSnapshotId: snapshotId }, sourceSandbox: { state: "stopped", providerRef: { fakeSandbox: sandboxId } } }
     const dependencies = { sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: binding, clock: new FixedClock(), ids: new SequenceIdGenerator([], [snapshotId]) }
 
-    expect((await new SandboxService(dependencies).createSnapshot(alice, sandboxId, {})).state).toBe("creating")
+    expect((await inMemorySandboxService(dependencies).createSnapshot(alice, sandboxId, {})).state).toBe("creating")
     expect((await snapshots.get(alice.accountId, snapshotId))?.providerRef).toEqual({ privateSnapshotId: snapshotId })
     sandboxes.allow()
     provider.snapshotStates.set(snapshotId, "failed")
     provider.sandboxStates.set(sandboxId, "stopped")
-    expect((await new SandboxService(dependencies).getSnapshot(alice, snapshotId)).state).toBe("failed")
+    expect((await inMemorySandboxService(dependencies).getSnapshot(alice, snapshotId)).state).toBe("failed")
     expect((await base.get(alice.accountId, sandboxId))?.state).toBe("stopped")
   })
 
@@ -1016,7 +1043,7 @@ describe("lifecycle and optional groups", () => {
       ...snapshotRecord(alice.accountId, snapshotId, "sbx_source-cloud-a1", "ready"),
       provider: sourceProvider.name,
     })
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes: new InMemorySandboxRepository(),
       snapshots,
       idempotency: new InMemoryIdempotencyRepository(),
@@ -1043,7 +1070,7 @@ describe("lifecycle and optional groups", () => {
       ...snapshotRecord(alice.accountId, snapshotId, "sbx_source-cloud-a1", "ready"),
       provider: sourceProvider.name,
     })
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes,
       snapshots,
       idempotency,
@@ -1601,7 +1628,7 @@ describe("records and compare-and-swap", () => {
     const base = new InMemorySandboxRepository()
     const racing = new RacingSandboxRepository(base)
     const provider = new FakeSandboxProvider()
-    const service = new SandboxService({
+    const service = inMemorySandboxService({
       sandboxes: racing,
       snapshots: new InMemorySnapshotRepository(),
       idempotency: new InMemoryIdempotencyRepository(),

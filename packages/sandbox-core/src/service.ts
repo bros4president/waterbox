@@ -50,7 +50,7 @@ export interface SandboxServiceDependencies {
   snapshots: SnapshotRepository
   idempotency: IdempotencyRepository
   /** Atomic ownership of a generated row and optional idempotency record. */
-  sandboxCreations?: SandboxCreationRepository
+  sandboxCreations: SandboxCreationRepository
   providers: ReadonlyMap<string, SandboxProvider>
   defaultProvider: string
   /** The only provider resource scope this embedded service may operate. */
@@ -143,7 +143,10 @@ export class SandboxService {
         createdAt: now,
         updatedAt: now,
       }
-      const allocation = await this.#reserveSandboxCreation(candidate, candidateReservation)
+      const allocation = await this.#deps.sandboxCreations.reserve({
+        sandbox: candidate,
+        ...(candidateReservation === undefined ? {} : { idempotency: candidateReservation }),
+      })
       if (allocation.outcome === "candidate_collision") continue
       if (allocation.outcome === "request_mismatch") {
         throw new DomainError("idempotency_conflict", "The idempotency key was used with a different request")
@@ -597,32 +600,6 @@ export class SandboxService {
       await this.#learnSandboxFromOperationalFailure(sandbox, error, signal)
       throw mapProviderError(error)
     }
-  }
-
-  async #reserveSandboxCreation(
-    sandbox: SandboxRecord,
-    idempotency?: IdempotencyRecord,
-  ): Promise<import("./ports.ts").SandboxCreationReservation> {
-    if (this.#deps.sandboxCreations !== undefined) {
-      return this.#deps.sandboxCreations.reserve({ sandbox, ...(idempotency === undefined ? {} : { idempotency }) })
-    }
-    // The injected local control plane always supplies the atomic port. This
-    // fallback is retained only for isolated, non-durable test doubles.
-    if (idempotency !== undefined) {
-      const existing = await this.#deps.idempotency.get({ accountId: idempotency.accountId, scope: idempotency.scope, key: idempotency.key })
-      if (existing !== undefined) return existing.requestHash === idempotency.requestHash
-        ? { outcome: "existing_match", reservation: existing }
-        : { outcome: "request_mismatch", reservation: existing }
-    }
-    if (!await this.#deps.sandboxes.createIfAbsent(sandbox)) return { outcome: "candidate_collision" }
-    if (idempotency !== undefined && !await this.#deps.idempotency.createIfAbsent(idempotency)) {
-      const existing = await this.#deps.idempotency.get({ accountId: idempotency.accountId, scope: idempotency.scope, key: idempotency.key })
-      if (existing !== undefined) return existing.requestHash === idempotency.requestHash
-        ? { outcome: "existing_match", reservation: existing }
-        : { outcome: "request_mismatch", reservation: existing }
-      throw new DomainError("conflict", "The idempotency reservation changed")
-    }
-    return { outcome: "new", ...(idempotency === undefined ? {} : { reservation: idempotency }) }
   }
 
   async #resolveExistingCreate(identity: Identity, key: string, requestHash: string, signal: AbortSignal): Promise<Sandbox> {

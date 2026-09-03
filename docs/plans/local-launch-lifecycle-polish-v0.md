@@ -775,3 +775,10 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun test packages/sandbox-repository-sqlite/test/repositories.test.ts` passed (30 tests); `bun run test:node-sqlite` passed (1 test); `bun run typecheck` passed; `bun test` passed (547 tests); `git diff --check` passed.
 - Live evidence: not run; this remediation performs no provider access and authorizes no live provider mutation.
 - Deviations: automatic recreation of an empty pre-polish database was not implemented; it fails unchanged with the same safe guidance as a populated incompatible database.
+
+### 2026-09-03 - Issue #9 item 2 remediation
+
+- Implemented: made the atomic sandbox-creation repository a mandatory `SandboxService` dependency and removed the split sandbox/idempotency write fallback. Every production and test composition now supplies an atomic implementation: durable local composition uses the SQLite transaction-backed repository, while isolated tests use the serialized in-memory repository. Added a two-service concurrency regression over shared repositories and one shared allocation port that proves one sandbox row, one matching idempotency reservation, and one provider create dispatch while provider I/O remains outside the reservation boundary.
+- Verification: the focused core/API/control-plane/Box/Vercel composition suite passed (190 tests); the two-service allocation race passed 20 repeated runs; the focused SQLite repository suite passed (30 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (547 tests); `git diff --check` passed.
+- Live evidence: not run; this remediation performs no provider access and authorizes no live provider mutation.
+- Deviations: none.

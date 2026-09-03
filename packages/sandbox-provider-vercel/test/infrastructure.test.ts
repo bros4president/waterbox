@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId } from "@waterbox/contracts"
 import { SandboxService } from "@waterbox/core"
-import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
+import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { WaterboxSandboxBackend, type SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 import { createHash } from "node:crypto"
 import { gunzipSync } from "node:zlib"
@@ -322,11 +322,11 @@ describe("Vercel primitive REST adapter", () => {
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     const provider = new WaterboxSandboxBackend(value, { artifact })
-    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository()
+    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-river-a1" as SandboxId
     await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef, state: "running", version: 1, createdAt: "2026-09-02T00:00:00.000Z", updatedAt: "2026-09-02T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency: new InMemoryIdempotencyRepository(), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_calm-river-a5"]) })
+    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator([], ["snap_calm-river-a5"]) })
 
     const snapshot = await service.createSnapshot(identity, sandboxId, {})
 
