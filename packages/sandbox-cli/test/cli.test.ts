@@ -139,17 +139,26 @@ describe("Waterbox one-shot CLI", () => {
     const jobRoot = join(root, "jobs")
     const worker = new URL("./async-worker.ts", import.meta.url).pathname
     const controller = new AbortController()
-    const call = runCli(["run", encodeInvocation("bash", { command: "sleep 0.3; printf survived" })], {
+    const call = runCli(["run", encodeInvocation("bash", { command: "sleep 1; printf survived" })], {
       workspaceRoot: root,
       signal: controller.signal,
       asyncBash: { jobRoot, workerExecutable: process.execPath, workerArguments: [worker, root, jobRoot], yieldAfterMs: 2_000 },
       io: { stdout: () => {}, stderr: () => {} },
     })
-    await Bun.sleep(50)
+    let jobId: string | undefined
+    for (let attempt = 0; attempt < 400 && jobId === undefined; attempt += 1) {
+      const [candidate] = await readdir(jobRoot).catch(() => [])
+      if (candidate !== undefined) {
+        try {
+          const status = JSON.parse(await readFile(join(jobRoot, candidate, "status.json"), "utf8"))
+          if (status.state === "running") jobId = candidate
+        } catch {}
+      }
+      if (jobId === undefined) await Bun.sleep(5)
+    }
+    expect(jobId).toBeDefined()
     controller.abort()
     expect(await call).toBe(2)
-    const [jobId] = await readdir(jobRoot)
-    expect(jobId).toBeDefined()
     const outputPath = join(jobRoot, jobId!, "output.log")
     let output = ""
     for (let attempt = 0; attempt < 40 && output !== "survived"; attempt += 1) {

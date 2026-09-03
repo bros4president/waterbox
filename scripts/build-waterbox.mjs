@@ -8,6 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const mode = process.argv[2]
 
 const common = {
+  absWorkingDir: root,
   bundle: true,
   format: "esm",
   platform: "node",

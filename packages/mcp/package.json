@@ -1,6 +1,6 @@
 {
   "name": "waterbox",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "private": false,
   "type": "module",
   "description": "Run coding tools in isolated, stateful sandboxes through MCP.",
@@ -41,7 +41,8 @@
     "stdio"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "tag": "next"
   },
   "dependencies": {
     "@inquirer/prompts": "7.8.6",

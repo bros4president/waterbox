@@ -14,17 +14,18 @@ MCP client -> waterbox stdio -> bundled client -> authenticated in-process API
 Node.js 24.15.0 or newer is required.
 
 ```sh
-npx add-mcp waterbox
+npx add-mcp waterbox@next
 ```
 
-`add-mcp` installs client configuration whose command is `npx -y waterbox`; it
-does not run provider onboarding or collect credentials. `npx waterbox` starts
+This prerelease is distributed under the npm `next` tag. `add-mcp` installs
+client configuration whose command is `npx -y waterbox@next`; it does not run
+provider onboarding or collect credentials. `npx waterbox@next` starts
 the stdio MCP, while these explicit commands use terminal-only onboarding:
 
 ```sh
-npx waterbox setup
-npx waterbox status
-npx waterbox logout
+npx waterbox@next setup
+npx waterbox@next status
+npx waterbox@next logout
 ```
 
 Setup requires an interactive terminal. It stores Box API keys and Vercel
@@ -96,7 +97,7 @@ file permitted by the invoking user when `send_file_securely` is approved, so
 client-side tool permissions remain important.
 
 Official MCP registry/catalog publication is deferred. Direct npm installation
-through `npx add-mcp waterbox` does not depend on registry metadata.
+through `npx add-mcp waterbox@next` does not depend on registry metadata.
 
 See [`packages/mcp/README.md`](packages/mcp/README.md) for all environment
 settings and [`CONTRIBUTING.md`](CONTRIBUTING.md) for release gates.
