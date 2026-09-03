@@ -187,9 +187,13 @@ describe("local control-plane composition", () => {
   })
 
   test("owns direct environment parsing below composition and keeps values out of errors", () => {
-    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "token", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toMatchObject({ sqlitePath: "/users/test/.waterbox/direct.sqlite", provider: { kind: "vercel" } })
+    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "token", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toMatchObject({ sqlitePath: "/users/test/.waterbox/direct.sqlite", provider: { kind: "vercel", config: { token: "token" } } })
     const secret = "do-not-render"
     try { parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: secret, VERCEL_TEAM_ID: "team" }) } catch (error) { expect(String(error)).not.toContain(secret) }
+    for (const whitespaceSecret of [" token", "token ", "\ttoken", "token\n"]) {
+      expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: whitespaceSecret, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toThrow("VERCEL_TOKEN")
+      expect(() => deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: "https://api.vercel.com", token: whitespaceSecret, teamId: "team", projectId: "project", polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 } } })).toThrow("credential")
+    }
   })
 
   test("configured Vercel composition traverses embedded authentication, API, SQLite, core, and the shared runtime", async () => {

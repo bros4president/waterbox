@@ -79,10 +79,17 @@ export class LocalProviderConfigurationError extends Error {
  * a one-way fingerprint.
  */
 export function deriveProviderConfigurationId(selection: LocalProviderBindingInput): ProviderConfigurationId {
+  if (selection.kind === "vercel") providerCredential(selection.config.token)
   const material = selection.kind === "box"
-    ? ["waterbox-provider-binding-v1", "box", normalizeBoxApiBaseUrl(selection.config.apiBaseUrl), sha256(selection.config.apiKey)]
+    ? ["waterbox-provider-binding-v1", "box", normalizeBoxApiBaseUrl(selection.config.apiBaseUrl), sha256(providerCredential(selection.config.apiKey))]
     : ["waterbox-provider-binding-v1", "vercel", normalizeVercelApiOrigin(selection.config.apiOrigin), selection.config.teamId.trim(), selection.config.projectId.trim()]
   return `pcfg_${createHash("sha256").update(JSON.stringify(material)).digest("base64url")}`
+}
+
+/** Provider credentials are opaque bytes represented as strings. Never trim them. */
+export function providerCredential(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 16_384 || value.trim() !== value) throw new TypeError("Provider credential is invalid")
+  return value
 }
 
 /**
@@ -97,7 +104,7 @@ export function parseLocalProviderConfiguration(
   const sqlitePath = nonEmpty(environment.WATERBOX_SQLITE_PATH) ? environment.WATERBOX_SQLITE_PATH!.trim() : join(homeDirectory, ".waterbox", "direct.sqlite")
   if (!validSqlitePath(sqlitePath)) throw new LocalProviderConfigurationError()
   if (provider === "box") {
-    const apiKey = required(environment.BOX_API_KEY, "BOX_API_KEY", "Box")
+    const apiKey = requiredCredential(environment.BOX_API_KEY, "BOX_API_KEY", "Box")
     const intervalMs = positive(environment.BOX_POLL_INTERVAL_MS, 1_000), timeoutMs = positive(environment.BOX_POLL_TIMEOUT_MS, 120_000)
     let apiBaseUrl: string
     try { apiBaseUrl = normalizeBoxApiBaseUrl(environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1") } catch { throw new LocalProviderConfigurationError() }
@@ -107,7 +114,7 @@ export function parseLocalProviderConfiguration(
     return { sqlitePath, provider: { kind: "box", config, providerConfigurationId: deriveProviderConfigurationId({ kind: "box", config }) } }
   }
   if (provider === "vercel") {
-    const token = required(environment.VERCEL_TOKEN, "VERCEL_TOKEN", "Vercel")
+    const token = requiredCredential(environment.VERCEL_TOKEN, "VERCEL_TOKEN", "Vercel")
     const teamId = required(environment.VERCEL_TEAM_ID, "VERCEL_TEAM_ID", "Vercel")
     const projectId = required(environment.VERCEL_PROJECT_ID, "VERCEL_PROJECT_ID", "Vercel")
     const intervalMs = positive(environment.VERCEL_POLL_INTERVAL_MS, 1_000), timeoutMs = positive(environment.VERCEL_POLL_TIMEOUT_MS, 120_000), requestTimeoutMs = positive(environment.VERCEL_REQUEST_TIMEOUT_MS, 30_000)
@@ -294,6 +301,10 @@ function constantTimeEqual(left: string, right: string): boolean {
 function required(value: string | undefined, variable: string, provider: string): string {
   if (!nonEmpty(value)) throw new LocalProviderConfigurationError(`${variable} is required for the ${provider} provider. Set WATERBOX_PROVIDER explicitly and configure ${variable} using your MCP client's secret or environment mechanism, then restart the client. Do not provide credentials in chat or as tool arguments.`)
   return value.trim()
+}
+function requiredCredential(value: string | undefined, variable: string, provider: string): string {
+  try { return providerCredential(value) }
+  catch { throw new LocalProviderConfigurationError(`${variable} is required for the ${provider} provider. Set WATERBOX_PROVIDER explicitly and configure ${variable} using your MCP client's secret or environment mechanism, then restart the client. Do not provide credentials in chat or as tool arguments.`) }
 }
 function nonEmpty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 16_384 }
 function positive(value: string | undefined, fallback: number): number { if (value === undefined) return fallback; if (!/^\d+$/.test(value)) throw new LocalProviderConfigurationError(); const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 1) throw new LocalProviderConfigurationError(); return parsed }

@@ -796,3 +796,11 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun test packages/sandbox-core/test/service.test.ts` passed (78 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (551 tests); `git diff --check` passed.
 - Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 items 6-7 remediation
+
+- Implemented: bumped newly written setup configuration to version 2 and persisted the non-secret `providerConfigurationId` solely as provider-switch warning metadata. Setup compares the prospective binding to that metadata even when the prior credential is missing, while runtime hydration continues to derive its active binding from the validated provider identity values and exact credential bytes. Version 1 remains readable for the narrow setup transition: Vercel scope can be established without its excluded token, Box uses an available valid prior key, and setup warns conservatively when the prior binding cannot be established. Operational-only changes with a proven unchanged binding do not warn. Inactive credentials remain retained, decline remains side-effect free, and an attempted configuration write is now rollback-eligible before it executes so a commit-then-throw result restores the prior configuration and both credentials.
+- Credential boundary: setup prompts, native keyring hydration/storage, environment parsing, direct binding derivation, and composed runtime configuration share exact-byte validation. Non-empty credentials with leading or trailing whitespace are rejected rather than trimmed, before keyring mutation, SQLite creation, or provider construction; accepted bytes are preserved unchanged and failures remain secret-free.
+- Verification: `bun test packages/mcp/test packages/control-plane-local/test` passed (85 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (557 tests); `git diff --check` passed.
+- Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
+- Deviations: none.
