@@ -956,7 +956,7 @@ The phase must add an installed-tarball test in an external temporary directory 
 
 ### Phase 9: CI And Release Automation
 
-Status: workflow implementation and hosted CI complete; protected `npm` environment and npm trusted-publisher validation remain pending
+Status: workflow implementation, hosted CI, and protected `npm` environment complete; first-package bootstrap and npm trusted-publisher validation remain pending
 
 Scope:
 
@@ -982,7 +982,7 @@ Publish workflow requirements:
 - GitHub-hosted runner.
 - `contents: read` and `id-token: write` only, plus any minimal release permission intentionally required.
 - npm CLI and Node versions compatible with trusted publishing.
-- No long-lived npm publish token.
+- No long-lived npm publish token. The initial unclaimed-package bootstrap may use only the short-lived token procedure below.
 - A protected GitHub environment with required approval is preferred.
 - Build and test from the exact tag commit.
 - Verify tag, package, MCP implementation, artifact manifest, and optional `server.json` versions agree.
@@ -990,6 +990,14 @@ Publish workflow requirements:
 - Select one `.tgz`, record its SHA-256, install and test that exact file, and publish that exact inspected `.tgz`. Do not publish the package directory, because npm would repack it.
 - Retain npm provenance.
 - Never publish from `pull_request_target` or untrusted checked-out code.
+
+First-package bootstrap procedure:
+
+- Create a granular npm token owned by `lucho-mzmz`, with the shortest practical expiration, package read/write access, and 2FA bypass because GitHub Actions cannot answer an interactive OTP. The unclaimed package may require selecting all packages when the token is created.
+- Store the token only as the `NPM_BOOTSTRAP_TOKEN` secret in the protected GitHub `npm` environment. Do not store it as a repository secret, local file, workflow input, log output, or chat message.
+- Permit only the exact `v0.1.0-alpha.1` deployment tag and require the configured environment approval before the publish job receives the secret.
+- The publish job must authenticate as `lucho-mzmz` before publishing the retained tarball with provenance under `next`.
+- Immediately after successful publication, configure npm trusted publishing for `bros4president/waterbox`, workflow `publish.yml`, and environment `npm`; then delete the GitHub environment secret and revoke the npm token.
 
 Acceptance criteria:
 
@@ -1190,7 +1198,7 @@ Live tests require explicit isolated-account authorization and must prove:
 - [x] Box and Vercel Sandbox setup docs and isolated live gates pass.
 - [x] Exact post-refactor bundle and legal closure verified.
 - [x] Pull-request CI complete.
-- [ ] Trusted npm publish workflow protected.
+- [x] Trusted npm publish workflow protected; npm-side binding remains pending until the package exists.
 - [x] Installed-tarball test passes with Bun absent on Node 24.15.0 and Node 24.20.0.
 - [ ] Exact tested tarball checksum is preserved through npm publication.
 - [ ] Isolated-account release smoke passes with exact cleanup reconciliation.
@@ -1217,3 +1225,4 @@ Live tests require explicit isolated-account authorization and must prove:
 - 2026-09-03: Supervisor corrections completed the root install/keyring wording, made interactive setup reject unsafe or malformed persisted records before any prompt or credential-store access, and completed the active Direct-to-Embedded smoke terminology migration. The corrected focused suite passed 68 tests and 279 expectations; typecheck and exact Node v24.15.0 package verification passed, superseding the earlier pre-correction candidate.
 - 2026-09-03: Supervisory release hardening made the verifier construct the package twice from independently copied source trees with frozen installs and clean library/MCP builds before packing, executes installed artifacts with a Node-only `PATH`, and validates bundled package manifest licenses plus required notice terms and copyright lines against the reviewed map. The exact candidate passed on Node v24.15.0 and v24.20.0 with SHA-256 `d8f33fbe3c9e1ff23ef334cc4373e65c3b191590f54e24aa2d0c867c2fd6f111`. CI now exports the intended matrix Node binary. The publish workflow pins actions by commit, requires the tagged commit to be reachable from `origin/main`, records release evidence for 90 days, and rechecks the retained tarball SHA-256 immediately before trusted publication. Hosted CI, environment protection, npm bootstrap/trusted-publisher setup, authorized release smokes, and publication remain pending.
 - 2026-09-03: PR #14 merged the launch implementation after hosted CI passed on Node v24.15.0 and current Node 24. The first CLI publication policy then changed from stable to `waterbox@0.1.0-alpha.1` under `next`; package, runtime, installer, workflow, evidence, and documentation contracts were aligned without assigning `latest`. Local release verification passed 589 tests and 3021 expectations, typecheck, Node SQLite, shared-library gates, publint, reproducible isolated builds, installed-artifact protocol checks on Node v24.15.0, and pinned `add-mcp@2.3.0` configuration. A package-directory npm dry run also exposed and fixed cwd-dependent bundle-closure verification. The retained alpha candidate SHA-256 is `57fe657ef2fd7e13ada6585e1d2f0790c7a1b742bfa2293fec1001968a553518`; current Node 24 remains a hosted-CI gate for the follow-up PR.
+- 2026-09-03: PR #15 passed the Node v24.15.0 and current Node 24 hosted gates and merged the alpha contract as `1f3f371107f660776e3969b193d518f2d558931e`. A full-history and checkout Gitleaks v8.30.1 audit found no leaks before the repository became public. The GitHub `npm` environment now requires review, disables administrator bypass, and permits only deployment tag `v0.1.0-alpha.1`. Because npm cannot bind a trusted publisher before the unclaimed package exists, the publish workflow documents and consumes a protected, short-lived `NPM_BOOTSTRAP_TOKEN` for this first publication only, verifies the npm identity, and requires immediate trusted-publisher setup and token revocation afterward. No package, tag, or provider resource was created.
