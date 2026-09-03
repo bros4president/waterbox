@@ -176,7 +176,7 @@ export class SandboxService {
         if (providerSignal.aborted && !isAmbiguousExecution(error)) {
           if (observation !== undefined) {
             try {
-              if (observation.state === "running") await this.#checkpointPreparation(record, observation)
+              if (observation.state === "running") await this.#checkpointPreparation(record, "provisioning", observation)
               else await this.#applySandboxObservation(record, "provisioning", observation)
             } catch {}
           }
@@ -201,7 +201,7 @@ export class SandboxService {
 
       let preparing: SandboxRecord
       try {
-        preparing = await this.#checkpointPreparation(record, observation)
+        preparing = await this.#checkpointPreparation(record, "provisioning", observation)
       } catch (error) {
         const domainError = error instanceof DomainError ? error : mapProviderError(error)
         await this.#failSandbox({ ...record, providerRef: observation.providerRef }, "provisioning", domainError)
@@ -280,6 +280,10 @@ export class SandboxService {
         }
         return toSandbox(current)
       }
+      if (current.state === "resuming" && observation.state === "running") {
+        const preparing = await this.#checkpointPreparation(current, "resuming", observation)
+        return toSandbox(await this.#finishPreparation(preparing, provider, signal))
+      }
       if (isTransitionalSandbox(current.state)) return toSandbox(await this.#applySandboxObservation(current, current.state, observation))
       if (!isAllowedLiveSandboxObservation(current.state, observation.state)) {
         throw new DomainError("provider_failure", "The provider returned an invalid live sandbox state")
@@ -343,7 +347,7 @@ export class SandboxService {
     providerSignal.throwIfAborted()
     const initial = await this.#getSandboxRecord(identity, sandboxId)
     this.#requireStopResume(this.#provider(initial.provider))
-    if (initial.state !== "running" && initial.state !== "stopped" && initial.state !== "resuming") {
+    if (initial.state !== "running" && initial.state !== "stopped" && initial.state !== "resuming" && initial.state !== "preparing") {
       throw invalidState("resume", initial.state)
     }
     return toSandbox(await this.#resumeRecord(identity, sandboxId, providerSignal, true))
@@ -653,6 +657,7 @@ export class SandboxService {
 
   async #checkpointPreparation(
     original: SandboxRecord,
+    transition: "provisioning" | "resuming",
     observation: { state: SandboxState; providerRef: JsonValue },
   ): Promise<SandboxRecord> {
     if (observation.state !== "running" || observation.providerRef === null) {
@@ -661,7 +666,7 @@ export class SandboxService {
     if (original.providerRef !== null && !jsonEquals(original.providerRef, observation.providerRef)) {
       throw new DomainError("provider_failure", "The provider returned a mismatched sandbox reference")
     }
-    return this.#applySandboxObservation(original, "provisioning", {
+    return this.#applySandboxObservation(original, transition, {
       state: "preparing",
       providerRef: observation.providerRef,
     })
@@ -977,7 +982,12 @@ export class SandboxService {
       // newer than our cached stable checkpoint. Persist any valid stable
       // drift, but do not convert the rejected user operation into success.
       if (isStableSandboxObservation(observation.state)) {
-        await this.#replaceSandboxTransitionWithObservation(record, transition, observation)
+        if (transition === "resuming" && observation.state === "running") {
+          const preparing = await this.#checkpointPreparation(record, "resuming", observation)
+          await this.#finishPreparation(preparing, this.#provider(record.provider), signal)
+        } else {
+          await this.#replaceSandboxTransitionWithObservation(record, transition, observation)
+        }
       }
       return undefined
     }
@@ -985,6 +995,9 @@ export class SandboxService {
     // checkpoint. Canonical already-state results and conclusive observations
     // after ambiguity reach this path; proven rejections above still surface.
     if (observation.state === successState) {
+      if (transition === "resuming") {
+        return this.#checkpointPreparation(record, "resuming", observation)
+      }
       return this.#applySandboxObservation(record, transition, observation)
     }
     if (observation.state === previous) return undefined
@@ -1126,6 +1139,10 @@ export class SandboxService {
       if (signal.aborted) throw signal.reason
       throw mapProviderError(error)
     }
+    if (record.state === "resuming" && observation.state === "running") {
+      const preparing = await this.#checkpointPreparation(record, "resuming", observation)
+      return this.#finishPreparation(preparing, provider, signal)
+    }
     return this.#applySandboxObservation(record, record.state, observation)
   }
 
@@ -1138,7 +1155,7 @@ export class SandboxService {
       throw new DomainError("provider_failure", "The provider returned an invalid sandbox state")
     }
     if (observation.state !== "running") return this.#applySandboxObservation(record, "provisioning", observation)
-    const preparing = await this.#checkpointPreparation(record, observation)
+    const preparing = await this.#checkpointPreparation(record, "provisioning", observation)
     return this.#finishPreparation(preparing, this.#provider(record.provider), signal)
   }
 
@@ -1188,6 +1205,9 @@ export class SandboxService {
     const operationKey = `${identity.accountId}\u0000${sandboxId}`
     for (let attempt = 0; attempt < this.#reconciliationAttempts; attempt++) {
       const current = await this.#getSandboxRecord(identity, sandboxId)
+      if (current.state === "preparing") {
+        return this.#finishPreparation(current, this.#provider(current.provider), signal)
+      }
       if (current.state === "running" && !forceProviderOperation) return current
       if (current.state === "resuming") {
         const active = this.#resumeOperations.get(operationKey)
@@ -1240,26 +1260,35 @@ export class SandboxService {
     previous: SandboxState,
     signal: AbortSignal,
   ): Promise<SandboxRecord> {
+    let observation: ProviderSandboxObservation
     try {
-      const observation = await stopResume.resume({
+      observation = await stopResume.resume({
         accountId: record.accountId,
         providerRef: record.providerRef,
         signal,
       })
       signal.throwIfAborted()
-      return await this.#applySandboxObservation(record, "resuming", observation)
     } catch (error) {
       if (signal.aborted && !isAmbiguousExecution(error)) throw signal.reason
       const recovered = await this.#investigateSandboxLifecycle(record, "resuming", previous, "running", error, signal)
-      if (recovered !== undefined) return recovered
+      if (recovered !== undefined) {
+        return recovered.state === "preparing"
+          ? this.#finishPreparation(recovered, this.#provider(record.provider), signal)
+          : recovered
+      }
       throw mapProviderError(error)
     }
+    const preparing = await this.#checkpointPreparation(record, "resuming", observation)
+    return this.#finishPreparation(preparing, this.#provider(record.provider), signal)
   }
 
   async #ensureRunning(identity: Identity, sandboxId: SandboxId, signal: AbortSignal): Promise<SandboxRecord> {
     for (let attempt = 0; attempt < this.#reconciliationAttempts; attempt++) {
       const current = await this.#getSandboxRecord(identity, sandboxId)
       if (current.state === "running") return current
+      if (current.state === "preparing") {
+        return this.#finishPreparation(current, this.#provider(current.provider), signal)
+      }
       if (current.state === "stopped" || current.state === "resuming") {
         this.#requireStopResume(this.#provider(current.provider))
         const resumed = await this.#resumeRecord(identity, sandboxId, signal)
@@ -1404,7 +1433,7 @@ function isAllowedSandboxObservation(transition: SandboxState, observed: Sandbox
   if (transition === "preparing") return observed === "running" || observed === "terminated"
   if (transition === "failed") return observed === "terminated"
   if (transition === "stopping") return observed === "stopped" || observed === "terminated"
-  if (transition === "resuming") return observed === "running" || observed === "terminated"
+  if (transition === "resuming") return observed === "preparing" || observed === "running" || observed === "terminated"
   if (transition === "terminating") return observed === "terminated"
   return false
 }

@@ -11,25 +11,19 @@ class Clock implements BoxProviderClock {
   async sleep(_milliseconds: number, signal: AbortSignal): Promise<void> { signal.throwIfAborted() }
 }
 
-class AdvancingClock implements BoxProviderClock {
-  #now = 0
-  now(): Date { return new Date(this.#now) }
-  async sleep(milliseconds: number, signal: AbortSignal): Promise<void> { signal.throwIfAborted(); this.#now += milliseconds }
-}
-
 const signal = () => new AbortController().signal
 const sandboxRef = { kind: "box-sandbox-v2", boxId: "bx_23456789" } as const
 const artifactBytes = new TextEncoder().encode("#!/usr/bin/env node\nconsole.log('waterbox')\n")
 const artifact = { bytes: artifactBytes, sha256: createHash("sha256").update(artifactBytes).digest("hex"), cliProtocolVersion: 2 as const, artifactVersion: "0.1.0" }
 
-function infrastructure(handler: (request: Request) => Response | Promise<Response>, clock: BoxProviderClock = new Clock()) {
+function infrastructure(handler: (request: Request) => Response | Promise<Response>) {
   const requests: Request[] = []
   const fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const request = new Request(input, init)
     requests.push(request)
     return handler(request)
   }
-  const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock, fetch })
+  const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch })
   return { value, requests, fetch }
 }
 
@@ -204,78 +198,13 @@ describe("Box primitive contracts", () => {
     await expect(terminalAbsence.value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "exact_absence", knownObservation: { resource: "sandbox", observation: { state: "terminated", providerRef: sandboxRef } } })
   })
 
-  test("polls exact command readiness after accepted resume without replaying the lifecycle mutation", async () => {
-    let resumeDispatches = 0
-    let readinessProbes = 0
-    const { value, requests } = infrastructure(async request => {
-      const path = new URL(request.url).pathname
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/resume`)) {
-        resumeDispatches++
-        return Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
-      }
-      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) return box("ready")
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/commands`)) {
-        readinessProbes++
-        expect(await request.json()).toMatchObject({ command: "'/usr/local/bin/waterbox' health" })
-        return readinessProbes === 1 ? command("", { success: false, exitCode: 1 }) : command('{"ok":true}\n')
-      }
-      throw new Error(`unexpected ${request.method} ${path}`)
-    })
+  test("uses only bounded native readiness polling after accepted resume", async () => {
+    const { value, requests } = infrastructure(request => request.method === "POST"
+      ? Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
+      : box("ready"))
 
     await expect(value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "running", providerRef: sandboxRef })
-    expect(resumeDispatches).toBe(1)
-    expect(readinessProbes).toBe(2)
-    expect(requests.map(request => request.method)).toEqual(["POST", "GET", "POST", "POST"])
-  })
-
-  test("does not replay resume or its readiness probe after a lost probe response", async () => {
-    let resumeDispatches = 0
-    let readinessProbes = 0
-    const { value } = infrastructure(request => {
-      const path = new URL(request.url).pathname
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/resume`)) {
-        resumeDispatches++
-        return Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
-      }
-      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) return box("idle")
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/commands`)) {
-        readinessProbes++
-        throw new TypeError("readiness response lost")
-      }
-      throw new Error(`unexpected ${request.method} ${path}`)
-    })
-
-    await expect(value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
-    expect(resumeDispatches).toBe(1)
-    expect(readinessProbes).toBe(1)
-  })
-
-  test("bounds deterministic post-resume not-ready probes without redispatching resume", async () => {
-    let resumeDispatches = 0
-    let readinessProbes = 0
-    const clock = new AdvancingClock()
-    const requests: Request[] = []
-    const fetch = async (input: string | URL | Request, init?: RequestInit) => {
-      const request = new Request(input, init)
-      requests.push(request)
-      const path = new URL(request.url).pathname
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/resume`)) {
-        resumeDispatches++
-        return Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
-      }
-      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) return box("ready")
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/commands`)) {
-        readinessProbes++
-        return command("", { success: false, exitCode: 1 })
-      }
-      throw new Error(`unexpected ${request.method} ${path}`)
-    }
-    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 5, timeoutMs: 10 } }, { clock, fetch })
-
-    await expect(value.stopResume.resume({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
-    expect(resumeDispatches).toBe(1)
-    expect(readinessProbes).toBe(2)
-    expect(requests.map(request => request.method)).toEqual(["POST", "GET", "POST", "POST"])
+    expect(requests.map(request => request.method)).toEqual(["POST", "GET"])
   })
 
   test("classifies every dispatched lifecycle response that cannot prove its result as ambiguous without retrying", async () => {
@@ -452,46 +381,6 @@ describe("Box primitive contracts", () => {
 })
 
 describe("assembled Box compatibility", () => {
-  test("waits through resumed-but-not-command-ready before dispatching one ordinary tool command", async () => {
-    let resumeDispatches = 0
-    let readinessProbes = 0
-    let userCommandDispatches = 0
-    const { fetch } = infrastructure(async request => {
-      const path = new URL(request.url).pathname
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/resume`)) {
-        resumeDispatches++
-        return Response.json({ ok: true, type: "box.resuming", id: sandboxRef.boxId, status: "resuming" }, { status: 202 })
-      }
-      if (request.method === "GET" && path.endsWith(`/boxes/${sandboxRef.boxId}`)) return box("ready")
-      if (request.method === "POST" && path.endsWith(`/boxes/${sandboxRef.boxId}/commands`)) {
-        const body = await request.json() as { command: string }
-        if (body.command === "'/usr/local/bin/waterbox' health") {
-          readinessProbes++
-          return readinessProbes === 1 ? command("", { success: false, exitCode: 1 }) : command('{"ok":true}\n')
-        }
-        userCommandDispatches++
-        expect(body.command).toStartWith("'/usr/local/bin/waterbox' run ")
-        return command(`${JSON.stringify({ type: "result", title: "bash", output: "resumed", outcome: "completed", metadata: { command: "printf resumed", workdir: "/home/user/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } })}\n`)
-      }
-      throw new Error(`unexpected ${request.method} ${path}`)
-    })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
-    const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
-    const identity: Identity = { accountId: "account" }
-    const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
-    await sandboxes.createIfAbsent({ accountId: identity.accountId, sandboxId, provider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", providerRef: sandboxRef, state: "stopped", version: 1, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z" })
-    const service = new SandboxService({ sandboxes, snapshots, idempotency, sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency), providers: new Map([[provider.name, provider]]), defaultProvider: provider.name, providerConfigurationId: "pcfg_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", clock: new FixedClock(), ids: new SequenceIdGenerator() })
-
-    const events = []
-    for await (const event of await service.executeTool(identity, sandboxId, "bash", { command: "printf resumed" })) events.push(event)
-    expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({ type: "result", outcome: "completed", output: "resumed" })
-    expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("running")
-    expect(resumeDispatches).toBe(1)
-    expect(readinessProbes).toBe(2)
-    expect(userCommandDispatches).toBe(1)
-  })
-
   test("returns exact stopped completion and enables one subsequent delete", async () => {
     let stopDispatches = 0
     let deleteDispatches = 0

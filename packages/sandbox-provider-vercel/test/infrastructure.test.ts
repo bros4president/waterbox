@@ -185,7 +185,10 @@ describe("Vercel primitive REST adapter", () => {
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
     const automaticStatuses = ["stopping", "snapshotting", "stopped"] as const
     const requests: Request[] = []
+    const commandOutput = new Map<string, string>()
     let automaticRead = 0
+    let commandCount = 0
+    let userCommandDispatches = 0
     const provider = new VercelSandboxProvider(config, {
       clock: new Clock(),
       artifact,
@@ -197,11 +200,24 @@ describe("Vercel primitive REST adapter", () => {
           if (automaticRead < automaticStatuses.length) return created(name(), automaticStatuses[automaticRead++]!, "session-1")
           return created(name(), "running", "session-2")
         }
-        if (request.method === "POST" && path.endsWith("/cmd")) return Response.json({ command: { id: "command-user", sessionId: "session-2", exitCode: null } })
-        if (request.method === "GET" && path.endsWith("/cmd/command-user")) return Response.json({ command: { id: "command-user", sessionId: "session-2", exitCode: 0 } })
-        if (request.method === "GET" && path.endsWith("/cmd/command-user/logs")) {
-          const event = { type: "result", title: "complete", output: "ok", metadata: { filePath: "marker.txt", type: "text", offset: 1, lines: 1, totalLines: 1 } }
-          return new Response(`${JSON.stringify({ stream: "stdout", data: `${JSON.stringify(event)}\n` })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+        if (request.method === "POST" && path.endsWith("/cmd")) {
+          const body = await request.clone().json() as { args: string[] }
+          const script = body.args[1] ?? ""
+          const commandId = `command-${++commandCount}`
+          if (script.includes("waterbox-bootstrap")) commandOutput.set(commandId, "waterbox-bootstrap-ok\n")
+          else if (script.includes(" run ")) {
+            userCommandDispatches++
+            const event = { type: "result", title: "complete", output: "ok", metadata: { filePath: "marker.txt", type: "text", offset: 1, lines: 1, totalLines: 1 } }
+            commandOutput.set(commandId, `${JSON.stringify(event)}\n`)
+          } else commandOutput.set(commandId, "")
+          return Response.json({ command: { id: commandId, sessionId: "session-2", exitCode: null } })
+        }
+        const commandMatch = /\/cmd\/(command-\d+)(?:\/logs)?$/.exec(path)
+        if (request.method === "GET" && commandMatch?.[1] !== undefined) {
+          if (path.endsWith("/logs")) {
+            return new Response(`${JSON.stringify({ stream: "stdout", data: commandOutput.get(commandMatch[1]) ?? "" })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+          }
+          return Response.json({ command: { id: commandMatch[1], sessionId: "session-2", exitCode: 0 } })
         }
         throw new Error(`unexpected ${request.method} ${path}`)
       },
@@ -223,7 +239,7 @@ describe("Vercel primitive REST adapter", () => {
     expect(events).toHaveLength(1)
     expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("running")
     expect(requests.filter(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "true")).toHaveLength(1)
-    expect(requests.filter(request => request.method === "POST" && new URL(request.url).pathname.endsWith("/cmd"))).toHaveLength(1)
+    expect(userCommandDispatches).toBe(1)
   })
 
   test("accepts command logs only at exact v2 status 200", async () => {

@@ -469,12 +469,12 @@ describe("durable create idempotency", () => {
     const provider = new FakeSandboxProvider()
     provider.createBarrier = gate.promise
     provider.createStarted = started.resolve
-    const { service, sandboxes, snapshots, idempotency } = harness({ provider })
+    const { service, sandboxes, snapshots, idempotency, sandboxCreations } = harness({ provider })
     const secondService = inMemorySandboxService({
       sandboxes,
       snapshots,
       idempotency,
-      sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
+      sandboxCreations,
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
       providerConfigurationId: binding,
@@ -516,6 +516,7 @@ describe("durable create idempotency", () => {
       sandboxes: first.sandboxes,
       snapshots: first.snapshots,
       idempotency: first.idempotency,
+      sandboxCreations: first.sandboxCreations,
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
       providerConfigurationId: binding,
@@ -691,16 +692,13 @@ describe("lifecycle and optional groups", () => {
     })).toThrow("does not implement sandbox preparation")
   })
 
-  test("preparing gates mutations and operations while deletion remains available", async () => {
+  test("preparing gates unrelated mutations and direct job operations while deletion remains available", async () => {
     const { service, sandboxes, provider } = harness()
     const sandboxId = "sbx_preparing-cloud-a1" as SandboxId
     await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "preparing"))
 
     await expectDomainError(service.stopSandbox(alice, sandboxId), "invalid_state")
-    await expectDomainError(service.resumeSandbox(alice, sandboxId), "invalid_state")
     await expectDomainError(service.createSnapshot(alice, sandboxId, {}), "invalid_state")
-    await expectDomainError(service.executeTool(alice, sandboxId, "read", { filePath: "/workspace/a" }), "invalid_state")
-    await expectDomainError(service.initiateSecureFileTransfer(alice, sandboxId), "invalid_state")
     await expectDomainError(service.observeBashJob(alice, sandboxId, `job_${"a".repeat(32)}`, 0, 64), "invalid_state")
     await expectDomainError(service.cleanupBashJob(alice, sandboxId, `job_${"a".repeat(32)}`), "invalid_state")
 
@@ -784,6 +782,70 @@ describe("lifecycle and optional groups", () => {
     expect(provider.stopCalls).toBe(2)
     expect(provider.resumeCalls).toBe(2)
     expect(provider.deleteCalls).toBe(1)
+  })
+
+  test("resume checkpoints preparing before runtime preparation and returns only after running", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, sandboxes } = harness({ provider })
+    const sandbox = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, sandbox.sandboxId)
+    const gate = deferred()
+    const started = deferred()
+    provider.prepareBarrier = gate.promise
+    provider.prepareStarted = started.resolve
+
+    const resuming = service.resumeSandbox(alice, sandbox.sandboxId)
+    await started.promise
+    expect(await sandboxes.get(alice.accountId, sandbox.sandboxId)).toMatchObject({
+      state: "preparing",
+      providerRef: { privateSandboxId: sandbox.sandboxId },
+    })
+    gate.resolve()
+
+    expect((await resuming).state).toBe("running")
+    expect(provider.resumeCalls).toBe(1)
+    expect(provider.prepareCalls).toBe(2)
+  })
+
+  test("canonical already-running and reconstructed resuming outcomes prepare before use", async () => {
+    const canonical = harness()
+    const sandbox = await canonical.service.createSandbox(alice, {})
+    await canonical.service.stopSandbox(alice, sandbox.sandboxId)
+    canonical.provider.resumeError = new ProviderError("known_state", "already running", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "running", providerRef: { privateSandboxId: sandbox.sandboxId } },
+      },
+    })
+
+    expect((await canonical.service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
+    expect(canonical.provider.resumeCalls).toBe(1)
+    expect(canonical.provider.prepareCalls).toBe(2)
+
+    const reconstructed = harness()
+    const reconstructedId = "sbx_reconstructed-resume-a1" as SandboxId
+    await reconstructed.sandboxes.createIfAbsent(sandboxRecord(alice.accountId, reconstructedId, "resuming"))
+    reconstructed.provider.sandboxStates.set(reconstructedId, "running")
+    await collect(await reconstructed.service.executeTool(alice, reconstructedId, "read", { filePath: "marker" }))
+
+    expect(reconstructed.provider.inspectSandboxCalls).toBe(1)
+    expect(reconstructed.provider.resumeCalls).toBe(0)
+    expect(reconstructed.provider.prepareCalls).toBe(1)
+    expect(reconstructed.provider.executeCalls).toBe(1)
+    expect((await reconstructed.sandboxes.get(alice.accountId, reconstructedId))?.state).toBe("running")
+  })
+
+  test("a durable preparing checkpoint completes without another resume mutation", async () => {
+    const { service, sandboxes, provider } = harness()
+    const sandboxId = "sbx_durable-preparing-a1" as SandboxId
+    await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "preparing"))
+
+    await collect(await service.executeTool(alice, sandboxId, "read", { filePath: "marker" }))
+
+    expect(provider.resumeCalls).toBe(0)
+    expect(provider.prepareCalls).toBe(1)
+    expect(provider.executeCalls).toBe(1)
+    expect((await sandboxes.get(alice.accountId, sandboxId))?.state).toBe("running")
   })
 
   test("explicit stop and resume correct provider drift and keep canonical target results idempotent", async () => {
@@ -1764,13 +1826,15 @@ describe("execution and reconciliation", () => {
     const reconciling = service.getSandbox(alice, created.sandboxId)
     await started.promise
     expect(await sandboxes.get(alice.accountId, created.sandboxId)).toMatchObject({ state: "preparing" })
-    await expectDomainError(service.executeTool(alice, created.sandboxId, "read", { filePath: "/workspace/a" }), "invalid_state")
+    const execution = service.executeTool(alice, created.sandboxId, "read", { filePath: "/workspace/a" })
     expect(provider.executeCalls).toBe(0)
     gate.resolve()
     expect((await reconciling).state).toBe("running")
+    expect(await collect(await execution)).toHaveLength(1)
     expect(provider.createCalls).toBe(1)
     expect(provider.inspectSandboxCalls).toBe(1)
-    expect(provider.prepareCalls).toBe(1)
+    expect(provider.prepareCalls).toBe(2)
+    expect(provider.executeCalls).toBe(1)
   })
 
   test("async readiness cannot persist provider-reported preparing", async () => {

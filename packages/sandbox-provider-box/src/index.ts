@@ -60,9 +60,6 @@ export const BOX_RUNTIME_PROFILE: FullLinuxRuntimeProfile = {
   privilegeStrategy: "adapter-provided non-interactive capability",
 }
 
-const BOX_RESUME_READINESS_SCRIPT = `${quotePosixShellWord(BOX_RUNTIME_PROFILE.persistentPaths.launcherPath)} health`
-const BOX_RESUME_READINESS_COMMAND_TIMEOUT_MS = 5_000
-
 /** Box's validated non-interactive full-Linux privilege mechanics. */
 export const BOX_RUNTIME_PATH_PROVISIONER: RuntimePathProvisioner = {
   provision(profile) {
@@ -191,7 +188,6 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
     const accepted = await this.#dispatchedLifecycleMutation(input.signal, async () => actionBox(await this.#json("POST", `/boxes/${segment(ref.boxId)}/resume`, input.signal, { statuses: [202], dispatchedMutation: true }), ref.boxId, "box.resuming"))
     try {
       const ready = await this.#waitReady(accepted, input.signal, ref)
-      await this.#waitCommandReady(input, ref)
       return observation(mapSandboxState(ready.state), ref)
     } catch (error) {
       throw postDispatchResumeError(error, ref)
@@ -271,30 +267,6 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
       current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
     }
     return current
-  }
-  async #waitCommandReady(input: InfrastructureSandboxInput, ref: SandboxRef): Promise<void> {
-    const deadline = this.#now() + this.#config.polling.timeoutMs
-    while (true) {
-      const remainingMs = deadline - this.#now()
-      if (remainingMs <= 0) throw new ProviderError("failure", "Box resume did not become command-ready")
-      const probeSignal = AbortSignal.any([input.signal, AbortSignal.timeout(remainingMs)])
-      const result = await this.runCommand({
-        ...input,
-        providerRef: ref,
-        signal: probeSignal,
-        script: BOX_RESUME_READINESS_SCRIPT,
-        cwd: BOX_RUNTIME_PROFILE.workspacePath,
-        timeoutMs: Math.min(BOX_RESUME_READINESS_COMMAND_TIMEOUT_MS, remainingMs),
-        maxStdoutBytes: MAX_JSON_BYTES,
-        maxStderrBytes: MAX_JSON_BYTES,
-      })
-      if (result.exitCode === 0 && !result.timedOut && !result.stdoutTruncated && !result.stderrTruncated && result.stderr.byteLength === 0) return
-      if (result.exitCode === null || result.timedOut || result.stdoutTruncated || result.stderrTruncated || result.stderr.byteLength !== 0) throw new ProviderError("ambiguous_execution", "Box resume command readiness is unknown")
-      // Only an exact, deterministic rejection retries this side-effect-free probe.
-      // The accepted resume and the eventual user command are never replayed here.
-      if (this.#now() >= deadline) throw new ProviderError("failure", "Box resume did not become command-ready")
-      await this.#clock.sleep(this.#config.polling.intervalMs, input.signal)
-    }
   }
   async #waitDeletion(operationId: string, boxId: string, signal: AbortSignal): Promise<void> {
     const deadline = this.#now() + this.#config.polling.timeoutMs
