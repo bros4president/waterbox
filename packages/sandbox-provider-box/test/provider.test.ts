@@ -125,6 +125,14 @@ describe("Box primitive contracts", () => {
     expect(requests[0]!.method).toBe("GET")
   })
 
+  test("waits through automatic archiving during exact inspection", async () => {
+    let polls = 0
+    const { value, requests } = infrastructure(() => box(++polls === 1 ? "archiving" : "archived"))
+
+    await expect(value.inspect({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "stopped", providerRef: sandboxRef })
+    expect(requests.map(request => request.method)).toEqual(["GET", "GET"])
+  })
+
   test("reports lost responses for every dispatched sandbox mutation as ambiguous without changing read failures", async () => {
     const lost = () => { throw new Error("connection closed after dispatch") }
     const created = infrastructure(lost).value

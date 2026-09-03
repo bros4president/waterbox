@@ -130,7 +130,11 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async inspect(input: InfrastructureSandboxInput): Promise<InfrastructureSandboxObservation> {
     input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
-    try { return observation(mapSandboxState(infoBox(await this.#json("GET", `/boxes/${segment(ref.boxId)}`, input.signal, { statuses: [200] }), ref.boxId).state), ref) }
+    try {
+      const initial = infoBox(await this.#json("GET", `/boxes/${segment(ref.boxId)}`, input.signal, { statuses: [200] }), ref.boxId)
+      const settled = initial.state === "archiving" ? await this.#waitStableInspection(initial, input.signal) : initial
+      return observation(mapSandboxState(settled.state), ref)
+    }
     catch (error) { if (error instanceof BoxHttpError && error.status === 404) return observation("terminated", ref); throw error }
   }
 
@@ -263,6 +267,16 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
     while (current.state !== "archived") {
       if (current.state === "error") throw new ProviderError("known_state", "Box could not stop", { knownObservation: { resource: "sandbox", observation: coreObservation("failed", ref) } })
       if (this.#now() >= deadline) throw new ProviderError("failure", "Box could not stop")
+      await this.#clock.sleep(this.#config.polling.intervalMs, signal)
+      current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
+    }
+    return current
+  }
+  async #waitStableInspection(initial: BoxDto, signal: AbortSignal): Promise<BoxDto> {
+    let current = initial
+    const deadline = this.#now() + this.#config.polling.timeoutMs
+    while (current.state === "archiving") {
+      if (this.#now() >= deadline) throw new ProviderError("failure", "Box inspection did not settle")
       await this.#clock.sleep(this.#config.polling.intervalMs, signal)
       current = infoBox(await this.#json("GET", `/boxes/${segment(initial.id)}`, signal, { statuses: [200] }), initial.id)
     }

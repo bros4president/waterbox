@@ -1,6 +1,6 @@
 # Local Launch Lifecycle Polish V0
 
-Status: credential-free implementation complete; live acceptance pending
+Status: complete
 
 This is the standalone implementation plan for the remaining local Waterbox launch work around provider-bound resources, provider workspace durability, automatic stop configuration, request-time state convergence, model-visible lifecycle control, provider-default snapshot retention, and readable resource identifiers.
 
@@ -426,7 +426,7 @@ Make setup changes explicit and reversible without pretending to manage inactive
 
 ## Phase 4: Provider Workspace Durability
 
-Status: credential-free implementation complete; live acceptance pending
+Status: complete
 
 ### Scope
 
@@ -452,7 +452,7 @@ Use provider-selected snapshot-durable workspaces and remove the universal `/wor
 
 ## Phase 5: Automatic-Stop Configuration And Snapshot Defaults
 
-Status: credential-free implementation complete; live acceptance pending
+Status: complete
 
 Prerequisite: Phase 1, because operational settings must be proven not to affect binding.
 
@@ -623,7 +623,7 @@ Vendor the corpus and replace the current small-word-plus-suffix generator.
 
 ## Phase 10: Documentation And Full Verification
 
-Status: credential-free implementation complete; live acceptance pending
+Status: complete
 
 Prerequisites: Phases 1-9.
 
@@ -838,5 +838,12 @@ Do not mark a phase complete based on intent or partial implementation.
 - Implemented: retained the issue #9 credential, provider-binding, exact-state reconciliation, package-verification, and no-mutation-retry repairs; routed every authoritative resume-to-running outcome through the shared durable `preparing` checkpoint and provider-neutral runtime preparation; removed the superseded Box launcher-health loop while retaining native readiness polling; reduced SQLite startup validation to transactional initialization or exact three-table structural acceptance without a schema marker; and restored explicit per-instance in-memory creation serialization shared by multi-service tests.
 - Verification: the focused core, runtime, Box, Vercel, SQLite, package-verifier, and smoke suite passed (232 tests); `bun run typecheck` passed; and `bun run check:release` passed, including typecheck, the full Bun suite (593 tests), the Node SQLite compatibility test (1 test), merge-base/worktree/index diff checks, MCP builds, and installed-package verification under the current compatible Node. `NODE_24_15_BIN` was unavailable, so exact Node v24.15.0 execution was not run; the verifier reported this explicitly. A final `git diff --check` passed.
 - Live evidence: earlier separately authorized runs established that Box stop completion requires polling to `archived`, resumed Box compute can lose `/run/waterbox/bash-jobs`, and Vercel automatic stop can expose native `stopping` and `snapshotting` transients. The Box run's tracked sandbox cleanup completed and its visible-ID and active-count baselines converged; the Vercel run's tracked cleanup also completed. The Box launcher-health workaround was superseded because observation could not repair the missing ephemeral runtime.
-- Remaining live gates: rerun Box stop followed by ordinary-tool resume through core preparation, rerun the corrected Vercel automatic-stop flow on the restored target, and complete provider workspace-durability and automatic-stop acceptance. Provider live acceptance remains pending and no live call is authorized by this record.
+- Remaining live gates at this checkpoint: rerun Box stop followed by ordinary-tool resume through core preparation, rerun the corrected Vercel automatic-stop flow on the restored target, and complete provider workspace-durability and automatic-stop acceptance.
 - Deviations: none.
+
+### 2026-09-03 - Final live acceptance
+
+- Implemented: made exact Box inspection wait through the provider-native `archiving` transient so automatic stop converges to stable `stopped` without persisting a Waterbox-owned workflow checkpoint.
+- Verification: `bun test packages/sandbox-provider-box/test/provider.test.ts` passed; the final `bun run check:release` passed under current Node and exact Node v24.15.0, including typecheck, the full Bun suite, Node SQLite compatibility, MCP builds, installed-package execution, and diff checks.
+- Live evidence: the authorized isolated Box flow passed with a one-minute automatic-stop setting, including explicit stop and preparation-backed ordinary resume, snapshot workspace durability, restored runtime repair, automatic stop and ordinary resume, tracked cleanup, and exact visible-set and active-count restoration. The authorized isolated Vercel flow passed with a three-minute setting, including the same product flow plus native cancellation without replay, automatic snapshot ownership and cleanup, and exact sandbox/snapshot baseline restoration.
+- Deviations: an initial Vercel run used a one-minute setting that stopped the source during the deliberately long pre-acceptance command sequence; cleanup and exact baseline reconciliation passed before the successful bounded rerun. Box runs that exposed the transient-inspection defect also completed tracked cleanup and exact baseline reconciliation before the corrected run.
