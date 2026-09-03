@@ -832,3 +832,38 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun run check:release` passed, including `bun run typecheck`, `bun test` (562 tests), `bun run test:node-sqlite` (1 test), all merge-base/worktree/index diff checks, the MCP build, and exact installed-artifact verification; a separate `bun run test:node-sqlite` passed (1 test), and `git diff --check` passed. Current Node v24.19.0 satisfied the declared `>=24.15.0` engine; `NODE_24_15_BIN` was absent, so exact declared-minimum execution remained unavailable and was reported as such by the package verifier.
 - Live evidence: no live calls ran. All Box, Vercel, provider-selection, and automatic-stop environment variables were absent, and the supported read-only `waterbox status` command reported `Waterbox status: not configured. Run waterbox setup.` with exit code 0. No scoped Box account or Vercel project was available for safe mutation and cleanup reconciliation, so workspace durability, automatic-stop behavior, stop/ordinary-resume behavior, and overall live acceptance remain pending.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 re-review blocker 2
+
+- Implemented: made exact stable provider observations authoritative after a proven pre-dispatch lifecycle rejection even when they differ from the cached pre-transition state. Stop and resume now persist opposite-state external drift and surface the original canonical rejection; the same observations after ambiguous dispatch retain `stopping` or `resuming`. Canonical already-state observations and authoritative terminal stop/delete outcomes remain idempotent, and no lifecycle mutation is redispatched automatically.
+- Verification: `bun test packages/sandbox-core/test/service.test.ts` passed (79 tests), including cached-stopped/provider-running and cached-running/provider-stopped vectors for both definite and ambiguous outcomes; `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `git diff --check` passed.
+- Live evidence: not run; this correction performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
+
+### 2026-09-03 - Issue #9 re-review blocker 5
+
+- Implemented: moved the in-memory sandbox-creation serialization boundary from each wrapper instance to the exact shared sandbox/idempotency repository pair. Independently constructed wrappers over the same backing pair now coordinate one atomic reservation boundary; nested weak identity maps avoid cross-pair serialization and permit unused repositories and boundaries to be collected. The cross-service race regression now constructs independent wrappers and proves one sandbox row, one matching reservation, and one provider dispatch.
+- Verification: the independent-wrapper race passed 20 repeated runs; `bun test packages/sandbox-core/test/service.test.ts` passed (79 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `git diff --check` passed.
+- Live evidence: not run; this correction performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
+
+### 2026-09-03 - Issue #9 re-review blocker 3
+
+- Implemented: introduced a durable version-1 Waterbox repository-schema marker and moved all existing-schema inspection ahead of table creation. A database with no Waterbox schema objects initializes the marker and all three document tables atomically; any existing unversioned, wrong-version, partial, extra, or structurally incompatible Waterbox schema fails uniformly at constructor startup with the exact database path and the existing prior-build/provider cleanup and local reset guidance. Marked databases are revalidated for the complete table set, column keys/types/nullability, `WITHOUT ROWID` layout, and exact singleton schema version before repositories are exposed. No document normalization, binding inference, or missing-table creation occurs at the compatibility boundary.
+- Verification: `bun test packages/sandbox-repository-sqlite/test/repositories.test.ts` passed (39 tests), including fresh/current reopening, canonical empty and populated legacy databases, an unversioned current-looking layout, wrong-version and marked-partial layouts, and all seven non-empty subsets of populated legacy document tables; every subset test proves the table set and rows remain unchanged after startup rejection. `bun run test:node-sqlite` passed (1 test); `bun run typecheck` passed; `git diff --check` passed.
+- Live evidence: not run; this remediation performs no provider access and authorizes no live provider mutation.
+- Deviations: automatic recreation of an empty unversioned Waterbox schema remains intentionally unimplemented; it fails unchanged at the same safe reset boundary.
+
+### 2026-09-03 - Issue #9 re-review blocker 4
+
+- Implemented: made installed-artifact containment comparisons operate only on `realpath`-canonicalized parent and child paths, eliminating macOS `/var` to `/private/var` alias failures while retaining exact package-target checks. The verifier now validates executable mode and the exact Node shebang on the installed npm bin target, invokes the actual `node_modules/.bin/waterbox` path under the current compatible Node environment, and continues to use the resolved packaged JavaScript target only when an explicitly supplied `NODE_24_15_BIN` selects the declared-minimum interpreter. The adjacent runtime artifact remains constrained to the canonical installed package.
+- Verification: `bun test scripts/verify-mcp-package.test.ts` passed (6 tests), including a symlink-aliased temporary parent that canonicalizes differently plus missing-executable-mode and invalid-shebang rejection vectors; `bun run typecheck` passed; `bun run build:mcp && bun run scripts/verify-mcp-package.ts` passed using one retained and installed tarball, direct installed-bin execution, exact notices, and both complete pinned corpora; `git diff --check` passed. `NODE_24_15_BIN` was absent, so exact Node v24.15.0 execution was unavailable and current compatible Node execution passed.
+- Live evidence: not run; package verification performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
+
+### 2026-09-03 - Issue #9 re-review blocker 1
+
+- Implemented: split Box and Vercel resume handling at the first validated provider acknowledgement of the resume dispatch. Definite pre-acceptance 4xx and rate-limit responses retain their canonical failure or limit classification. After acceptance, readiness-poll transport errors, timeouts, non-authoritative failures, 4xx responses, and rate limits map to `ambiguous_execution`; exact terminal absence remains `exact_absence`, native failed observations remain `known_state`, and exact stopped observations accompany ambiguity without authorizing rollback or redispatch. No mutation retry was added. Provider and assembled-service regressions cover post-acceptance 400/429 behavior, retained durable `resuming`, bounded read-only reconciliation, and exactly one resume dispatch for both providers.
+- Verification: `bun test packages/sandbox-provider-box/test/provider.test.ts packages/sandbox-provider-vercel/test/infrastructure.test.ts` passed (57 tests); `bun test packages/sandbox-provider-runtime/test packages/sandbox-core/test/service.test.ts` passed (96 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `git diff --check` passed.
+- Live evidence: not run; this correction performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
