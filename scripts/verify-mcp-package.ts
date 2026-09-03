@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { execFile } from "node:child_process"
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -12,6 +12,14 @@ const packageRoot = resolve(root, "packages/mcp")
 const requiredFiles = ["dist/waterbox.js", "dist/waterbox-cli.js", "dist/index.js", "README.md", "THIRD_PARTY_NOTICES.md"] as const
 
 export interface TarballIdentity { path: string; sha256: string }
+
+export interface InstalledArtifacts {
+  executablePath: string
+  executableTarget: string
+  runtimeArtifact: string
+  canonicalInstallDirectory: string
+  canonicalInstalledPackage: string
+}
 
 export async function resolveOnlyPackedTarball(directory: string, reportedFilename: string): Promise<string> {
   if (basename(reportedFilename) !== reportedFilename || !reportedFilename.endsWith(".tgz")) throw new Error("npm pack reported an invalid tarball filename")
@@ -95,16 +103,33 @@ async function verifyInstalledContent(extractedPackage: string, installedPackage
   assertSameBytes(expectedNotice, installedNotice, "Installed THIRD_PARTY_NOTICES.md")
 }
 
+export async function inspectInstalledArtifacts(installDirectory: string, installedPackage: string): Promise<InstalledArtifacts> {
+  const executablePath = join(installDirectory, "node_modules/.bin/waterbox")
+  const [canonicalInstallDirectory, canonicalInstalledPackage, executableTarget, expectedExecutable] = await Promise.all([
+    realpath(installDirectory),
+    realpath(installedPackage),
+    realpath(executablePath),
+    realpath(join(installedPackage, "dist/waterbox.js")),
+  ])
+  if (executableTarget !== expectedExecutable || !isWithin(canonicalInstallDirectory, executableTarget)) throw new Error("Installed waterbox executable does not resolve to the retained package")
+
+  const runtimeArtifact = await realpath(join(dirname(executableTarget), "waterbox-cli.js"))
+  if (!isWithin(canonicalInstalledPackage, runtimeArtifact)) throw new Error("Installed adjacent runtime artifact resolves outside the retained package")
+
+  const executableMode = (await stat(executablePath)).mode
+  if ((executableMode & 0o111) === 0) throw new Error("Installed waterbox executable does not have executable mode")
+  const executableSource = await readFile(executableTarget, "utf8")
+  if (!executableSource.startsWith("#!/usr/bin/env node\n")) throw new Error("Installed waterbox executable does not have the expected Node shebang")
+
+  return { executablePath, executableTarget, runtimeArtifact, canonicalInstallDirectory, canonicalInstalledPackage }
+}
+
 async function verifyInstalledExecution(installDirectory: string, installedPackage: string): Promise<void> {
-  const executable = await realpath(join(installDirectory, "node_modules/.bin/waterbox"))
-  const expectedExecutable = await realpath(join(installedPackage, "dist/waterbox.js"))
-  if (executable !== expectedExecutable || !isWithin(installDirectory, executable)) throw new Error("Installed waterbox executable does not resolve to the retained package")
-  const runtimeArtifact = await realpath(join(dirname(executable), "waterbox-cli.js"))
-  if (!isWithin(installedPackage, runtimeArtifact)) throw new Error("Installed adjacent runtime artifact resolves outside the retained package")
+  const artifacts = await inspectInstalledArtifacts(installDirectory, installedPackage)
 
   const currentVersion = await nodeVersion("node")
   if (!nodeSatisfiesDeclaredMinimum(currentVersion)) throw new Error(`Current Node ${currentVersion} does not satisfy the packed >=24.15.0 engine`)
-  await exerciseArtifacts("node", executable, runtimeArtifact, installDirectory)
+  await exerciseInstalledBin(artifacts.executablePath, artifacts.runtimeArtifact, artifacts.canonicalInstallDirectory)
 
   const minimumNode = process.env.NODE_24_15_BIN
   if (minimumNode === undefined) {
@@ -113,12 +138,19 @@ async function verifyInstalledExecution(installDirectory: string, installedPacka
   }
   const minimumVersion = await nodeVersion(minimumNode)
   if (minimumVersion !== "v24.15.0") throw new Error(`NODE_24_15_BIN must identify Node v24.15.0, received ${minimumVersion}`)
-  await exerciseArtifacts(minimumNode, executable, runtimeArtifact, installDirectory)
+  await exerciseArtifactsWithNode(minimumNode, artifacts.executableTarget, artifacts.runtimeArtifact, artifacts.canonicalInstallDirectory)
   console.log("Declared-minimum execution passed with NODE_24_15_BIN (Node v24.15.0).")
 }
 
-async function exerciseArtifacts(node: string, executable: string, runtimeArtifact: string, cwd: string): Promise<void> {
-  const cli = await runExpectingExit(node, [executable, "--package-verification"], 2, cwd)
+async function exerciseInstalledBin(executablePath: string, runtimeArtifact: string, cwd: string): Promise<void> {
+  const cli = await runExpectingExit(executablePath, ["--package-verification"], 2, cwd)
+  if (!cli.stderr.includes("Usage: waterbox")) throw new Error("Installed waterbox executable did not run its packaged CLI")
+  const runtime = await runExpectingExit("node", [runtimeArtifact, "version"], 0, cwd)
+  if (runtime.stdout.trim() !== '{"protocolVersion":2}') throw new Error("Installed adjacent runtime artifact returned an unexpected version")
+}
+
+async function exerciseArtifactsWithNode(node: string, executableTarget: string, runtimeArtifact: string, cwd: string): Promise<void> {
+  const cli = await runExpectingExit(node, [executableTarget, "--package-verification"], 2, cwd)
   if (!cli.stderr.includes("Usage: waterbox")) throw new Error("Installed waterbox executable did not run its packaged CLI")
   const runtime = await runExpectingExit(node, [runtimeArtifact, "version"], 0, cwd)
   if (runtime.stdout.trim() !== '{"protocolVersion":2}') throw new Error("Installed adjacent runtime artifact returned an unexpected version")
@@ -143,7 +175,7 @@ function nodeSatisfiesDeclaredMinimum(version: string): boolean {
   const [, major, minor, patch] = match.map(Number)
   return major! > 24 || (major === 24 && (minor! > 15 || (minor === 15 && patch! >= 0)))
 }
-function isWithin(parent: string, child: string): boolean { const path = relative(resolve(parent), resolve(child)); return path === "" || (!path.startsWith("..") && !isAbsolute(path)) }
+function isWithin(canonicalParent: string, canonicalChild: string): boolean { const path = relative(canonicalParent, canonicalChild); return path === "" || (!path.startsWith("..") && !isAbsolute(path)) }
 function sha256(value: Uint8Array): string { return createHash("sha256").update(value).digest("hex") }
 
 function parsePackResult(output: string): { filename: string; files: Array<{ path: string }> } {

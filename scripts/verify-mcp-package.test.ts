@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { assertCompleteFriendlyWords, assertSameBytes, assertTarballIdentity, captureTarballIdentity, resolveOnlyPackedTarball } from "./verify-mcp-package.ts"
+import { assertCompleteFriendlyWords, assertSameBytes, assertTarballIdentity, captureTarballIdentity, inspectInstalledArtifacts, resolveOnlyPackedTarball } from "./verify-mcp-package.ts"
 
 const roots: string[] = []
 async function fixture(): Promise<string> { const path = await mkdtemp(join(tmpdir(), "waterbox-package-verifier-test-")); roots.push(path); return path }
@@ -35,4 +35,44 @@ describe("MCP installed-artifact verifier", () => {
     expect(() => assertSameBytes(Buffer.from("notice"), Buffer.from("notice"), "notice")).not.toThrow()
     expect(() => assertSameBytes(Buffer.from("notice"), Buffer.from("decoy"), "notice")).toThrow("exact packed artifact")
   })
+
+  test("accepts an installed executable through an aliased temporary parent", async () => {
+    const { installDirectory, installedPackage, executableTarget } = await installedFixture()
+    const artifacts = await inspectInstalledArtifacts(installDirectory, installedPackage)
+    expect(artifacts.executableTarget).toBe(executableTarget)
+    expect(artifacts.canonicalInstallDirectory).not.toBe(installDirectory)
+    expect(artifacts.canonicalInstalledPackage).not.toBe(installedPackage)
+  })
+
+  test("rejects an installed executable without executable mode", async () => {
+    const { installDirectory, installedPackage, executableTarget } = await installedFixture()
+    await chmod(executableTarget, 0o644)
+    await expect(inspectInstalledArtifacts(installDirectory, installedPackage)).rejects.toThrow("executable mode")
+  })
+
+  test("rejects an installed executable without the expected Node shebang", async () => {
+    const { installDirectory, installedPackage, executableTarget } = await installedFixture()
+    await writeFile(executableTarget, "#!/bin/sh\nexit 2\n", { mode: 0o755 })
+    await expect(inspectInstalledArtifacts(installDirectory, installedPackage)).rejects.toThrow("expected Node shebang")
+  })
 })
+
+async function installedFixture(): Promise<{ installDirectory: string; installedPackage: string; executableTarget: string }> {
+  const directory = await fixture()
+  const realRoot = join(directory, "real")
+  const aliasRoot = join(directory, "alias")
+  const realInstall = join(realRoot, "install")
+  const realPackage = join(realInstall, "node_modules/@waterbox/mcp")
+  const executableTarget = join(realPackage, "dist/waterbox.js")
+  await mkdir(join(realInstall, "node_modules/.bin"), { recursive: true })
+  await mkdir(join(realPackage, "dist"), { recursive: true })
+  await writeFile(executableTarget, "#!/usr/bin/env node\nconsole.error('Usage: waterbox')\nprocess.exit(2)\n", { mode: 0o755 })
+  await writeFile(join(realPackage, "dist/waterbox-cli.js"), "console.log(JSON.stringify({ protocolVersion: 2 }))\n")
+  await symlink("../@waterbox/mcp/dist/waterbox.js", join(realInstall, "node_modules/.bin/waterbox"))
+  await symlink(realRoot, aliasRoot, "dir")
+  return {
+    installDirectory: join(aliasRoot, "install"),
+    installedPackage: join(aliasRoot, "install/node_modules/@waterbox/mcp"),
+    executableTarget,
+  }
+}
