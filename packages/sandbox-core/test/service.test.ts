@@ -469,12 +469,12 @@ describe("durable create idempotency", () => {
     const provider = new FakeSandboxProvider()
     provider.createBarrier = gate.promise
     provider.createStarted = started.resolve
-    const { service, sandboxes, snapshots, idempotency, sandboxCreations } = harness({ provider })
+    const { service, sandboxes, snapshots, idempotency } = harness({ provider })
     const secondService = inMemorySandboxService({
       sandboxes,
       snapshots,
       idempotency,
-      sandboxCreations,
+      sandboxCreations: new InMemorySandboxCreationRepository(sandboxes, idempotency),
       providers: new Map([[provider.name, provider]]),
       defaultProvider: provider.name,
       providerConfigurationId: binding,
@@ -823,6 +823,54 @@ describe("lifecycle and optional groups", () => {
     expect((await service.resumeSandbox(alice, sandbox.sandboxId)).state).toBe("running")
     expect(provider.resumeCalls).toBe(3)
     expect(provider.inspectSandboxCalls).toBe(0)
+  })
+
+  test("definite lifecycle rejection persists exact external drift while ambiguity retains the transition", async () => {
+    const provider = new FakeSandboxProvider()
+    const { service, provider: fake, sandboxes } = harness({
+      provider,
+      sandboxIds: [
+        "sbx_calm-cactus-a1",
+        "sbx_blue-river-b2",
+        "sbx_soft-cloud-c3",
+        "sbx_warm-meadow-d4",
+      ],
+    })
+
+    const definiteStop = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, definiteStop.sandboxId)
+    fake.sandboxStates.set(definiteStop.sandboxId, "running")
+    fake.stopError = new ProviderError("limit", "stop rejected")
+    await expectDomainError(service.stopSandbox(alice, definiteStop.sandboxId), "provider_limit")
+    expect((await sandboxes.get(alice.accountId, definiteStop.sandboxId))?.state).toBe("running")
+    expect(fake.stopCalls).toBe(2)
+    fake.stopError = undefined
+
+    const definiteResume = await service.createSandbox(alice, {})
+    fake.sandboxStates.set(definiteResume.sandboxId, "stopped")
+    fake.resumeError = new ProviderError("failure", "resume rejected")
+    await expectDomainError(service.resumeSandbox(alice, definiteResume.sandboxId), "provider_failure")
+    expect((await sandboxes.get(alice.accountId, definiteResume.sandboxId))?.state).toBe("stopped")
+    expect(fake.resumeCalls).toBe(1)
+    fake.resumeError = undefined
+
+    const ambiguousStop = await service.createSandbox(alice, {})
+    await service.stopSandbox(alice, ambiguousStop.sandboxId)
+    fake.sandboxStates.set(ambiguousStop.sandboxId, "running")
+    fake.stopError = new ProviderError("ambiguous_execution", "stop response lost")
+    await expectDomainError(service.stopSandbox(alice, ambiguousStop.sandboxId), "ambiguous_execution")
+    expect((await sandboxes.get(alice.accountId, ambiguousStop.sandboxId))?.state).toBe("stopping")
+    expect(fake.stopCalls).toBe(4)
+    fake.stopError = undefined
+
+    const ambiguousResume = await service.createSandbox(alice, {})
+    fake.sandboxStates.set(ambiguousResume.sandboxId, "stopped")
+    fake.resumeError = new ProviderError("ambiguous_execution", "resume response lost")
+    await expectDomainError(service.resumeSandbox(alice, ambiguousResume.sandboxId), "ambiguous_execution")
+    expect((await sandboxes.get(alice.accountId, ambiguousResume.sandboxId))?.state).toBe("resuming")
+    expect(fake.resumeCalls).toBe(2)
+
+    expect(fake.inspectSandboxCalls).toBe(4)
   })
 
   test("mutation cancellation is preflighted and in-flight stop remains reconcilable", async () => {
@@ -1212,9 +1260,15 @@ describe("execution and reconciliation", () => {
     const resumeTarget = await service.createSandbox(alice, {})
     await service.stopSandbox(alice, resumeTarget.sandboxId)
     provider.sandboxStates.set(resumeTarget.sandboxId, "running")
-    provider.resumeError = new ProviderError("failure", "already running")
+    provider.resumeError = new ProviderError("known_state", "already running", {
+      knownObservation: {
+        resource: "sandbox",
+        observation: { state: "running", providerRef: { privateSandboxId: resumeTarget.sandboxId } },
+      },
+    })
     expect((await service.resumeSandbox(alice, resumeTarget.sandboxId)).state).toBe("running")
     expect(provider.resumeCalls).toBe(1)
+    expect(provider.inspectSandboxCalls).toBe(0)
     provider.resumeError = undefined
 
     const deleteTarget = await service.createSandbox(alice, {})

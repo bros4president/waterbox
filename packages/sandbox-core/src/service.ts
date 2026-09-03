@@ -967,27 +967,30 @@ export class SandboxService {
         return undefined
       }
     }
+    // Authoritative absence satisfies stop's no-running-compute promise and
+    // delete's terminal promise, even after an otherwise definite error.
+    if (observation.state === "terminated" && (transition === "stopping" || transition === "terminating")) {
+      return this.#applySandboxObservation(record, transition, observation)
+    }
+    if (isDefiniteLifecycleRejection(error)) {
+      // A proven pre-dispatch rejection makes the exact provider observation
+      // newer than our cached stable checkpoint. Persist any valid stable
+      // drift, but do not convert the rejected user operation into success.
+      if (isStableSandboxObservation(observation.state)) {
+        await this.#replaceSandboxTransitionWithObservation(record, transition, observation)
+      }
+      return undefined
+    }
     // The requested target is idempotent even when it was also our last local
-    // checkpoint. This matters when an adapter reports already-stopped or
-    // already-running instead of returning a normal mutation observation.
+    // checkpoint. Canonical already-state results and conclusive observations
+    // after ambiguity reach this path; proven rejections above still surface.
     if (observation.state === successState) {
       return this.#applySandboxObservation(record, transition, observation)
     }
-    if (observation.state === previous) {
-      if (!isDefiniteLifecycleRejection(error)) return undefined
-      // This is a definite pre-dispatch rejection: the exact read permits us
-      // to restore the local stable checkpoint, but it does not convert the
-      // rejected user operation into a success.
-      await this.#restoreSandboxTransition(record, transition, previous)
-      return undefined
-    }
+    if (observation.state === previous) return undefined
     if (!isAllowedSandboxObservation(transition, observation.state) && !isStaleSandboxObservation(transition, observation.state)) return undefined
     const applied = await this.#applySandboxObservation(record, transition, observation)
     if (applied.state === successState) return applied
-    // Stop's canonical promise (no running compute) is also satisfied by
-    // authoritative absence. Resume records absence but still surfaces the
-    // original rejection because no running sandbox exists.
-    if (applied.state === "terminated" && transition === "stopping") return applied
     return undefined
   }
 
@@ -1020,11 +1023,22 @@ export class SandboxService {
     return applied.state === "deleted" ? applied : undefined
   }
 
-  async #restoreSandboxTransition(original: SandboxRecord, transition: SandboxState, state: SandboxState): Promise<SandboxRecord> {
+  async #replaceSandboxTransitionWithObservation(
+    original: SandboxRecord,
+    transition: SandboxState,
+    observation: { state: SandboxState; providerRef: JsonValue },
+  ): Promise<SandboxRecord> {
     let current = original
     for (let attempt = 0; attempt < this.#metadataConflictRetries; attempt++) {
       if (current.state !== transition) return current
-      const updated = { ...current, state, version: current.version + 1, updatedAt: this.#now(), lastError: undefined }
+      const updated: SandboxRecord = {
+        ...current,
+        providerRef: observation.providerRef,
+        state: observation.state,
+        version: current.version + 1,
+        updatedAt: this.#now(),
+        lastError: undefined,
+      }
       if (await this.#deps.sandboxes.compareAndSwap(updated, current.version)) return updated
       const next = await this.#deps.sandboxes.get(current.accountId, current.sandboxId)
       if (next === undefined) throw new DomainError("conflict", "The sandbox disappeared")
@@ -1400,6 +1414,10 @@ function isStaleSandboxObservation(transition: SandboxState, observed: SandboxSt
   if (transition === "resuming") return observed === "stopped"
   if (transition === "terminating") return observed === "running" || observed === "stopped"
   return false
+}
+
+function isStableSandboxObservation(state: SandboxState): boolean {
+  return state === "running" || state === "stopped" || state === "failed" || state === "terminated"
 }
 
 function isAllowedLiveSandboxObservation(current: SandboxState, observed: SandboxState): boolean {
