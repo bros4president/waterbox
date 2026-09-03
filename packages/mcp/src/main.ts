@@ -58,6 +58,6 @@ function unavailableClient(error: Error): WaterboxClient {
 }
 
 export function startupMessage(error: unknown): string {
-  if (error instanceof Error && ["McpConfigurationError", "UnsupportedMcpProviderError"].includes(error.name)) return error.message
+  if (error instanceof Error && ["IncompatibleRepositorySchemaError", "McpConfigurationError", "UnsupportedMcpProviderError"].includes(error.name)) return error.message
   return "Waterbox MCP failed to start"
 }

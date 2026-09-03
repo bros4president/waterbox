@@ -10,13 +10,20 @@ import { existsSync } from "node:fs"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createStartupClient } from "../src/main.ts"
+import { createStartupClient, startupMessage } from "../src/main.ts"
 import { createWaterboxMcpServer } from "../src/server.ts"
 import { readLocalFile } from "../src/secure-transfer.ts"
 
 const sandbox: Sandbox = { sandboxId: "sbx_calm-forest-abc1", provider: "box", state: "running", version: 1, createdAt: "2026-08-27T00:00:00.000Z", updatedAt: "2026-08-27T00:00:00.000Z" }
 
 describe("Waterbox MCP client renderer", () => {
+  test("renders actionable incompatible-schema startup guidance without exposing unknown errors", () => {
+    const incompatible = new Error("Incompatible Waterbox SQLite schema at /users/test/.waterbox/direct.sqlite. Move the database before starting the current build.")
+    incompatible.name = "IncompatibleRepositorySchemaError"
+    expect(startupMessage(incompatible)).toBe(incompatible.message)
+    expect(startupMessage(new Error("secret internal detail"))).toBe("Waterbox MCP failed to start")
+  })
+
   test("preserves the exact tool inventory and maps ordinary tools to one client command", async () => {
     let reads = 0
     const commands = stubClient({
