@@ -57,6 +57,14 @@ export const VERCEL_RUNTIME_PROFILE: FullLinuxRuntimeProfile = FULL_LINUX_RUNTIM
  * than a provider conditional in the shared runtime.
  */
 export const VERCEL_RUNTIME_PATH_PROVISIONER: RuntimePathProvisioner = {
+  prepareWorkspace(profile) {
+    return [
+      "set -eu",
+      "uid=$(id -u); gid=$(id -g)",
+      "if test \"$uid\" = 0; then install_bin=install; else sudo -n true; install_bin='sudo -n install'; fi",
+      `$install_bin -d -m 0755 -o \"$uid\" -g \"$gid\" ${quote(profile.workspacePath)}`,
+    ].join("\n")
+  },
   provision(profile) {
     return [
       "uid=$(id -u); gid=$(id -g)",
@@ -154,20 +162,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     let commandId: string
     try {
       const body = { command: "/bin/sh", args: ["-c", input.script], ...(input.cwd === undefined ? {} : { cwd: input.cwd }), env: input.environment ?? {}, sudo: false, timeout: input.timeoutMs }
-      let created: unknown
-      try {
-        created = await this.#json("POST", `/v2/sandboxes/sessions/${segment(native.sessionId)}/cmd`, input.signal, { query: { teamId: this.#config.teamId }, body, mutation: true })
-      } catch (error) {
-        // A new Vercel sandbox rejects a non-existent cwd before dispatch.
-        // The shared full-Linux profile deliberately uses /workspace, which
-        // the installation command creates. A definite 400 is the only
-        // proven pre-dispatch case, so one equivalent default-cwd submission
-        // is safe; losses, 5xx, and every other mutation outcome are never
-        // replayed.
-        if (!(error instanceof VercelHttpError && error.status === 400 && input.cwd === "/workspace")) throw error
-        const { cwd: _cwd, ...defaultCwdBody } = body
-        created = await this.#json("POST", `/v2/sandboxes/sessions/${segment(native.sessionId)}/cmd`, input.signal, { query: { teamId: this.#config.teamId }, body: defaultCwdBody, mutation: true })
-      }
+      const created = await this.#json("POST", `/v2/sandboxes/sessions/${segment(native.sessionId)}/cmd`, input.signal, { query: { teamId: this.#config.teamId }, body, mutation: true })
       commandId = command(created, native.sessionId).id
     } catch (error) { throw mutationError(error, "Vercel command outcome is unknown") }
     try {

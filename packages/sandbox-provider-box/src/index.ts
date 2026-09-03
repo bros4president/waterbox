@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { type SandboxState, type SnapshotState } from "@waterbox/contracts"
 import { ProviderError, type SandboxProvider } from "@waterbox/core/provider"
 import type { JsonValue } from "@waterbox/core/records"
@@ -195,7 +196,7 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   }
   async #createSnapshot(input: InfrastructureCreateSnapshotInput): Promise<InfrastructureSnapshotObservation> {
     const sandbox = sandboxRef(input.providerRef)
-    const name = await snapshotName(input.accountId, input.snapshotId)
+    const name = snapshotName(input.accountId, input.snapshotId)
     const source = infoBox(await this.#json("GET", `/boxes/${segment(sandbox.boxId)}`, input.signal, { statuses: [200] }), sandbox.boxId)
     if (mapSandboxState(source.state) !== "running") throw new ProviderError("failure", "The snapshot source is not running")
     try {
@@ -335,5 +336,9 @@ function exact(value: unknown, required: readonly string[], optional: readonly s
 function media(response: Response): void { if (response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") throw new Error("invalid media type") }
 async function safeError(response: Response, signal: AbortSignal): Promise<{ code: string; message: string }> { try { media(response); const value = await json(response, signal, MAX_JSON_BYTES); return object(value) && typeof value.code === "string" ? { code: value.code, message: typeof value.message === "string" ? value.message : "" } : { code: "", message: "" } } catch { return { code: "", message: "" } } }
 async function json(response: Response, signal: AbortSignal, maximum: number): Promise<unknown> { if (!response.body) throw new Error("missing body"); const reader = response.body.getReader(); const chunks: Uint8Array[] = []; let length = 0, done = false; try { while (true) { signal.throwIfAborted(); const next = await reader.read(); if (next.done) { done = true; break } length += next.value.byteLength; if (length > maximum) throw new Error("response too large"); chunks.push(next.value) } } finally { if (!done) await reader.cancel().catch(() => undefined); reader.releaseLock() } const bytes = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength } return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
-async function snapshotName(accountId: string, snapshotId: string): Promise<string> { const hash = async (value: string) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))).slice(0, 6)].map(byte => byte.toString(16).padStart(2, "0")).join(""); const slug = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 8) || "id"; return `waterbox-${slug(accountId)}-${await hash(accountId)}-${slug(snapshotId)}-${await hash(snapshotId)}` }
+function snapshotName(accountId: string, snapshotId: string): string {
+  const hint = snapshotId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 12) || "snapshot"
+  const digest = createHash("sha256").update(accountId).update("\u0000").update(snapshotId).digest("hex").slice(0, 32)
+  return `waterbox-${hint}-${digest}`
+}
 export { loadSandboxRuntimeArtifact } from "@waterbox/provider-runtime"

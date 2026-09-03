@@ -57,7 +57,7 @@ describe("Box primitive contracts", () => {
     expect(await requests[0]!.json()).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" }, ttlSeconds: 5_400 })
   })
 
-  test("maps a longest Friendly Words snapshot ID to its stable truncated and hashed Box name", async () => {
+  test("maps a longest Friendly Words snapshot ID to one readable 128-bit composite Box name", async () => {
     const snapshotId = "snap_quintessential-quintessential-gigantspinosaurus" as never
     let name: string | undefined
     const { value } = infrastructure(async request => {
@@ -67,8 +67,55 @@ describe("Box primitive contracts", () => {
       return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name: body.name, sourceBoxId: sandboxRef.boxId, status: "saving" } }, { status: 202 })
     })
     await expect(value.snapshots.create({ accountId: "account", snapshotId, providerRef: sandboxRef, expectedState: "running", signal: signal() })).resolves.toMatchObject({ state: "creating" })
-    const hash = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 12)
-    expect(name).toBe(`waterbox-account-${hash("account")}-snap-qui-${hash(snapshotId)}`)
+    const digest = createHash("sha256").update("account").update("\u0000").update(snapshotId).digest("hex").slice(0, 32)
+    expect(name).toBe(`waterbox-snap-quintes-${digest}`)
+    expect(name).toMatch(/^[a-z0-9][a-z0-9-]{0,62}$/)
+    expect(name!.length).toBeLessThanOrEqual(63)
+  })
+
+  test("binds Box snapshot names to the account and full ID beyond their shared readable hint", async () => {
+    const firstId = "snap_quintessential-quintessential-gigantspinosaurus" as never
+    const secondId = "snap_quintessential-quintessential-giganotosaurus" as never
+    const names: string[] = []
+    const { value } = infrastructure(async request => {
+      if (request.method === "GET") return box("ready")
+      const body = await request.json() as { name: string }
+      names.push(body.name)
+      return Response.json({ ok: true, type: "snapshot.named.saving", status: "saving", snapshot: { name: body.name, sourceBoxId: sandboxRef.boxId, status: "saving" } }, { status: 202 })
+    })
+    await value.snapshots.create({ accountId: "account", snapshotId: firstId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    await value.snapshots.create({ accountId: "account", snapshotId: secondId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    await value.snapshots.create({ accountId: "other-account", snapshotId: firstId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    expect(new Set(names).size).toBe(3)
+    expect(names.every(name => name.startsWith("waterbox-snap-quintes-"))).toBeTrue()
+  })
+
+  test("reconciles a lost Box snapshot response through the same name persisted for inspect and delete", async () => {
+    const snapshotId = "snap_silver-forest-2p9x" as never
+    const paths: string[] = []
+    let expectedName = ""
+    const { value } = infrastructure(async request => {
+      const path = new URL(request.url).pathname
+      paths.push(`${request.method} ${path}`)
+      if (request.method === "GET" && path.includes("/boxes/")) return box("ready")
+      if (request.method === "POST") {
+        expectedName = (await request.json() as { name: string }).name
+        throw new TypeError("snapshot response lost")
+      }
+      if (request.method === "GET") return Response.json({ ok: true, type: "snapshot.named.info", snapshot: { name: expectedName, sourceBoxId: sandboxRef.boxId, status: "ready", snapshotId: "native-snapshot" } })
+      if (request.method === "DELETE") return Response.json({ ok: true, type: "snapshot.named.deleted", name: expectedName, status: "deleted" })
+      throw new Error("unexpected request")
+    })
+    const created = await value.snapshots.create({ accountId: "account", snapshotId, providerRef: sandboxRef, expectedState: "running", signal: signal() })
+    expect(created).toEqual({ state: "ready", providerRef: { kind: "box-named-snapshot-v2", name: expectedName } })
+    await expect(value.snapshots.inspect({ accountId: "account", snapshotId, providerRef: created.providerRef, signal: signal() })).resolves.toMatchObject({ state: "ready" })
+    await expect(value.snapshots.delete({ accountId: "account", snapshotId, providerRef: created.providerRef, signal: signal() })).resolves.toMatchObject({ state: "deleted" })
+    const encoded = encodeURIComponent(expectedName)
+    expect(paths.filter(path => path.endsWith(`/named-snapshots/${encoded}`))).toEqual([
+      `GET /v1/named-snapshots/${encoded}`,
+      `GET /v1/named-snapshots/${encoded}`,
+      `DELETE /v1/named-snapshots/${encoded}`,
+    ])
   })
 
   test("keeps exact inspection side-effect free and preserves persisted references", async () => {

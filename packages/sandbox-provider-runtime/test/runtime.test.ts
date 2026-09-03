@@ -176,6 +176,7 @@ describe("shared Waterbox runtime backend", () => {
 
   test("uses an injected non-interactive path provisioner without a provider branch", async () => {
     const { infrastructure, backend } = await backendWith(input => {
+      if (input.script.startsWith("prepare-workspace")) return line("")
       if (input.script.includes("waterbox-bootstrap-installed")) return line("waterbox-bootstrap-installed\n")
       if (input.script.includes("waterbox-bootstrap")) return line(infrastructure.writes.length === 0 ? "waterbox-bootstrap-incomplete\n" : "waterbox-bootstrap-ok\n")
       throw new Error("unexpected command")
@@ -188,8 +189,11 @@ describe("shared Waterbox runtime backend", () => {
       executableDiscovery: "PATH then adapter-validated absolute executable" as const,
       privilegeStrategy: "adapter-provided non-interactive capability" as const,
     }
-    const configured = new WaterboxSandboxBackend(infrastructure, { artifact, runtimeProfile, pathProvisioner: { provision: profile => `prepare-owned ${profile.persistentPaths.runtimeDirectory} ${profile.ephemeralPaths.jobsDirectory}` } })
+    const configured = new WaterboxSandboxBackend(infrastructure, { artifact, runtimeProfile, pathProvisioner: { prepareWorkspace: profile => `prepare-workspace ${profile.workspacePath}`, provision: profile => `prepare-owned ${profile.persistentPaths.runtimeDirectory} ${profile.ephemeralPaths.jobsDirectory}` } })
     await configured.prepareSandbox(sandboxInput)
+    expect(infrastructure.commands[0]).toMatchObject({ script: "prepare-workspace /home/user/workspace" })
+    expect(infrastructure.commands[0]?.cwd).toBe("/")
+    expect(infrastructure.commands.slice(1).every(command => command.cwd === "/home/user/workspace")).toBeTrue()
     const bootstrap = infrastructure.commands.find(command => command.script.includes("waterbox-bootstrap-installed"))?.script
     expect(bootstrap).toContain("prepare-owned /runtime/waterbox /run/waterbox/bash-jobs")
     expect(bootstrap).toContain("'/runtime/waterbox/cli.js'")

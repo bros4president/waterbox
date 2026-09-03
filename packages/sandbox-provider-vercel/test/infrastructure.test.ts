@@ -30,7 +30,7 @@ function name() { return "waterbox-sbx-calm-river-a1-e3ec51d770cb" }
 describe("Vercel primitive REST adapter", () => {
   test("assembles the native primitive through the shared runtime with Vercel-only path mechanics", async () => {
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
-    const scripts: string[] = []
+    const commands: { args: string[]; cwd?: string }[] = []
     let output = 0
     const provider = new VercelSandboxProvider(config, {
       clock: new Clock(),
@@ -39,9 +39,9 @@ describe("Vercel primitive REST adapter", () => {
         const request = new Request(input, init), path = new URL(request.url).pathname
         if (request.method === "GET" && path === `/v2/sandboxes/${name()}`) return created(name())
         if (request.method === "POST" && path.endsWith("/fs/write")) return Response.json({ ok: true })
-        if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[] }; scripts.push(body.args[1] ?? ""); return Response.json({ command: { id: `command-${scripts.length}`, sessionId: "session-1", exitCode: null } }) }
+        if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[]; cwd?: string }; commands.push(body); return Response.json({ command: { id: `command-${commands.length}`, sessionId: "session-1", exitCode: null } }) }
         if (request.method === "GET" && /\/cmd\/command-\d+$/.test(path)) return Response.json({ command: { id: path.split("/").at(-1), sessionId: "session-1", exitCode: 0 } })
-        if (request.method === "GET" && path.endsWith("/logs")) return new Response(JSON.stringify({ stream: "stdout", data: ["waterbox-bootstrap-incomplete\n", "waterbox-bootstrap-installed\n", "waterbox-bootstrap-ok\n"][output++] }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
+        if (request.method === "GET" && path.endsWith("/logs")) return new Response(JSON.stringify({ stream: "stdout", data: ["", "waterbox-bootstrap-incomplete\n", "waterbox-bootstrap-installed\n", "waterbox-bootstrap-ok\n"][output++] }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
         throw new Error(`unexpected ${request.method} ${path}`)
       },
     })
@@ -49,6 +49,10 @@ describe("Vercel primitive REST adapter", () => {
     expect(prepared).toMatchObject({ state: "running" })
     expect(VERCEL_RUNTIME_PROFILE.workspacePath).toBe("/workspace")
     expect(VERCEL_RUNTIME_PROFILE.persistentPaths.workspace).toBe("/workspace")
+    const scripts = commands.map(command => command.args[1] ?? "")
+    expect(commands[0]?.cwd).toBe("/")
+    expect(scripts[0]).toContain(`install_bin -d -m 0755 -o "$uid" -g "$gid" '/workspace'`)
+    expect(commands.slice(1).every(command => command.cwd === "/workspace")).toBeTrue()
     const installer = scripts.find(script => script.includes("base64 -d > '/workspace/.waterbox/waterbox'"))
     const launcher = Buffer.from(installer?.match(/printf %s '([A-Za-z0-9+/=]+)' \| base64 -d > '\/workspace\/\.waterbox\/waterbox'/)?.[1] ?? "", "base64").toString("utf8")
     expect(launcher).toContain("cd '/workspace'")
@@ -159,26 +163,20 @@ describe("Vercel primitive REST adapter", () => {
     expect(commands).toBe(1)
   })
 
-  test("uses one default-cwd bootstrap command only after Vercel definitively rejects a fresh /workspace cwd", async () => {
+  test("surfaces a definite cwd rejection after exactly one unchanged command POST", async () => {
     const requests: Request[] = []
     const { value } = fixture(async request => {
       requests.push(request)
       const path = new URL(request.url).pathname
       if (path === `/v2/sandboxes/${name()}`) return created(name())
-      if (path.endsWith("/cmd") && request.method === "POST") {
-        const body = await request.clone().json() as { cwd?: string }
-        return body.cwd === "/workspace" ? Response.json({}, { status: 400 }) : Response.json({ command: { id: "bootstrap-command", sessionId: "session-1", exitCode: null } })
-      }
-      if (path.endsWith("/cmd/bootstrap-command")) return Response.json({ command: { id: "bootstrap-command", sessionId: "session-1", exitCode: 0 } })
-      if (path.endsWith("/logs")) return new Response(`${JSON.stringify({ stream: "stdout", data: "ok\n" })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+      if (path.endsWith("/cmd") && request.method === "POST") return Response.json({}, { status: 400 })
       throw new Error(`unexpected ${request.method} ${path}`)
     })
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
-    await expect(value.runCommand({ accountId: "account", providerRef, script: "true", cwd: "/workspace", timeoutMs: 1000, signal: signal() })).resolves.toMatchObject({ exitCode: 0 })
+    await expect(value.runCommand({ accountId: "account", providerRef, script: "true", cwd: "/workspace", timeoutMs: 1000, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     const commands = requests.filter(request => request.method === "POST" && new URL(request.url).pathname.endsWith("/cmd"))
-    expect(commands).toHaveLength(2)
+    expect(commands).toHaveLength(1)
     expect(await commands[0]!.clone().json()).toMatchObject({ cwd: "/workspace" })
-    expect(await commands[1]!.clone().json()).not.toHaveProperty("cwd")
   })
 
   test("never replays dispatched Vercel mutations when their acknowledgements are unprovable", async () => {

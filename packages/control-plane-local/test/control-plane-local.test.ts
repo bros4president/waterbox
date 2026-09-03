@@ -199,6 +199,7 @@ describe("local control-plane composition", () => {
   test("configured Vercel composition traverses embedded authentication, API, SQLite, core, and the shared runtime", async () => {
     const originalFetch = globalThis.fetch
     const commands = new Map<string, string>()
+    const commandCwds = new Map<string, string | undefined>()
     let createdSandbox: { name: string; tags: Record<string, string> } | undefined
     globalThis.fetch = (async (input, init) => {
       const request = new Request(input, init), url = new URL(request.url), path = url.pathname
@@ -208,9 +209,9 @@ describe("local control-plane composition", () => {
         return Response.json({ sandbox: { name: body.name, currentSessionId: "session-1", status: "running", tags: body.tags }, session: { id: "session-1", projectId: "project" } })
       }
       if (request.method === "GET" && path.startsWith("/v2/sandboxes/") && !path.includes("/sessions/")) return Response.json({ sandbox: { name: createdSandbox?.name, currentSessionId: "session-1", status: "running", tags: createdSandbox?.tags }, session: { id: "session-1", projectId: "project" } })
-      if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[] }; commands.set("command-1", body.args[1] ?? ""); return Response.json({ command: { id: "command-1", sessionId: "session-1", exitCode: null } }) }
-      if (request.method === "GET" && path.endsWith("/cmd/command-1")) return Response.json({ command: { id: "command-1", sessionId: "session-1", exitCode: 0 } })
-      if (request.method === "GET" && path.endsWith("/logs")) return new Response(JSON.stringify({ stream: "stdout", data: "waterbox-bootstrap-ok\n" }) + "\n", { headers: { "content-type": "application/x-ndjson" } })
+      if (request.method === "POST" && path.endsWith("/cmd")) { const body = await request.json() as { args: string[]; cwd?: string }; const id = `command-${commands.size + 1}`; commands.set(id, body.args[1] ?? ""); commandCwds.set(id, body.cwd); return Response.json({ command: { id, sessionId: "session-1", exitCode: null } }) }
+      if (request.method === "GET" && /\/cmd\/command-\d+$/.test(path)) { const id = path.split("/").at(-1)!; return Response.json({ command: { id, sessionId: "session-1", exitCode: 0 } }) }
+      if (request.method === "GET" && path.endsWith("/logs")) { const id = path.split("/").at(-2)!; return new Response(JSON.stringify({ stream: "stdout", data: id === "command-1" ? "" : "waterbox-bootstrap-ok\n" }) + "\n", { headers: { "content-type": "application/x-ndjson" } }) }
       throw new Error(`unexpected Vercel request ${request.method} ${path}`)
     }) as typeof fetch
     try {
@@ -220,6 +221,8 @@ describe("local control-plane composition", () => {
       const created = await client.createSandbox({}, { idempotencyKey: "configured-vercel", signal: new AbortController().signal })
       expect(created).toMatchObject({ sandboxId, provider: "vercel", state: "running" })
       expect([...commands.values()].some(script => script.includes("waterbox-bootstrap"))).toBeTrue()
+      expect(commandCwds.get("command-1")).toBe("/")
+      expect(commandCwds.get("command-2")).toBe("/workspace")
     } finally { globalThis.fetch = originalFetch }
   })
 

@@ -804,3 +804,10 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun test packages/mcp/test packages/control-plane-local/test` passed (85 tests); `bun run typecheck` passed; `bun run test:node-sqlite` passed (1 test); `bun test` passed (557 tests); `git diff --check` passed.
 - Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 items 8-9 remediation
+
+- Implemented: removed Vercel's automatic command retry without `cwd`; each attempted command now performs at most one command POST, and a definite 400 remains a canonical provider failure. Added an explicit provider/runtime preparation boundary that idempotently establishes Vercel's `/workspace` from the explicit filesystem-root cwd before any workspace-bound runtime verification or user command; no command moves to the provider default cwd. Replaced Box's separately truncated snapshot-name components with a readable 12-character snapshot hint and a 128-bit SHA-256 digest over `accountId + NUL + full snapshotId`; create, response-loss reconciliation, persisted references, inspection, and deletion use the same exact name within Box's 63-character limit.
+- Verification: `bun test packages/sandbox-provider-vercel/test/infrastructure.test.ts packages/sandbox-provider-box/test/provider.test.ts packages/sandbox-provider-runtime/test/runtime.test.ts packages/sandbox-provider-runtime/test/primitives.test.ts packages/control-plane-local/test/control-plane-local.test.ts` passed (83 tests); `bun run test:node-sqlite` passed (1 test); `bun run typecheck` passed in the owner verification shell; `git diff --check` passed. Two full `bun test` runs passed 558 of 559 tests and failed only the unrelated existing detached-worker 500 ms wall-clock assertion at 526 ms and 506 ms under full-suite load; that exact test passed in isolation.
+- Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
+- Deviations: none.
