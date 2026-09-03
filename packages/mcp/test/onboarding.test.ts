@@ -17,6 +17,7 @@ function boxBinding(apiKey: string, apiBaseUrl = boxSettings.apiBaseUrl) { retur
 function vercelBinding(settings = vercelSettings) { return deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: settings.apiOrigin, token: "credential-excluded", teamId: settings.teamId, projectId: settings.projectId, polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 } } }) }
 function persistedV2Box(apiKey: string, settings = boxSettings) { return JSON.stringify({ version: 2, provider: "box", providerConfigurationId: boxBinding(apiKey, settings.apiBaseUrl), box: settings }) }
 function persistedV2Vercel(settings = vercelSettings) { return JSON.stringify({ version: 2, provider: "vercel", providerConfigurationId: vercelBinding(settings), vercel: settings }) }
+async function loadBoxConfig(storage: ConfigStorage) { const config = await loadPersisted(storage); if (config?.provider !== "box") throw new Error("Expected persisted Box configuration"); return config }
 
 describe("native-keyring onboarding", () => {
   test("resolves persisted Box and Vercel settings only when provider is absent", async () => {
@@ -38,7 +39,7 @@ describe("native-keyring onboarding", () => {
     }
     const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
     await setup(storage, fakeCredentials({ box: "box-secret" }), prompts)
-    expect((await loadPersisted(storage))?.box?.automaticStopMs).toBe(5_400_000)
+    expect((await loadBoxConfig(storage)).box.automaticStopMs).toBe(5_400_000)
     expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment.WATERBOX_AUTO_STOP).toBe("90m")
     expect(messages).toContain(`Automatic stop duration (optional, for example 30m or 2h)\n${automaticStopGuidance}`)
   })
@@ -56,13 +57,14 @@ describe("native-keyring onboarding", () => {
       const persisted = await loadPersisted(storage)
       expect(persisted?.version).toBe(2)
       expect(persisted).toHaveProperty("providerConfigurationId")
+      if (persisted?.version !== 2) throw new Error("Expected version 2 persisted configuration")
       const hydrated = await resolvedEnvironment({}, storage, credentials)
       const fromKeyring = parseLocalProviderConfiguration(hydrated.environment, "/users/test")
       const fromEnvironment = provider === "box"
         ? parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "box-secret", BOX_API_BASE_URL: boxSettings.apiBaseUrl }, "/users/test")
         : parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "vercel-secret", VERCEL_API_ORIGIN: vercelSettings.apiOrigin, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")
       expect(fromKeyring.provider.providerConfigurationId).toBe(fromEnvironment.provider.providerConfigurationId)
-      expect(fromKeyring.provider.providerConfigurationId).toBe(persisted?.version === 2 ? persisted.providerConfigurationId : undefined)
+      expect(fromKeyring.provider.providerConfigurationId).toBe(persisted.providerConfigurationId)
     }
 
     const misleadingMetadata = fakeStorage(JSON.stringify({ version: 2, provider: "box", providerConfigurationId: boxBinding("different-key"), box: boxSettings }))
@@ -73,7 +75,7 @@ describe("native-keyring onboarding", () => {
   test("blank automatic-stop setup persists no provider override", async () => {
     const storage = fakeStorage()
     await setup(storage, fakeCredentials(), boxPrompts)
-    expect((await loadPersisted(storage))?.box).not.toHaveProperty("automaticStopMs")
+    expect((await loadBoxConfig(storage)).box).not.toHaveProperty("automaticStopMs")
     expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment).not.toHaveProperty("WATERBOX_AUTO_STOP")
   })
 
@@ -206,7 +208,7 @@ describe("native-keyring onboarding", () => {
       async confirm() { confirmations += 1; return true },
     })
     expect(confirmations).toBe(0)
-    expect((await loadPersisted(storage))?.box?.automaticStopMs).toBe(2_700_000)
+    expect((await loadBoxConfig(storage)).box.automaticStopMs).toBe(2_700_000)
   })
 
   test("Box and Vercel origin changes require confirmation and persist canonical endpoints", async () => {
@@ -225,7 +227,7 @@ describe("native-keyring onboarding", () => {
     const stored = fakeStorage()
     const persisted: SetupPrompts = { async selectProvider() { return "box" }, async input(message) { return message.startsWith("Automatic stop") ? "" : "https://box.example/api/" }, async secret() { return "box-key" }, async confirm() { return true } }
     await setup(stored, fakeCredentials(), persisted)
-    expect((await loadPersisted(stored))?.box?.apiBaseUrl).toBe("https://box.example/api")
+    expect((await loadBoxConfig(stored)).box.apiBaseUrl).toBe("https://box.example/api")
     expect((await resolvedEnvironment({}, stored, fakeCredentials({ box: "box-key" }))).environment.BOX_API_BASE_URL).toBe("https://box.example/api")
   })
 

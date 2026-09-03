@@ -98,7 +98,7 @@ export async function setup(storage: ConfigStorage, credentials: CredentialStore
   let draft: LegacyPersistedConfig
   try {
     const priorAutomaticStop = priorConfig?.provider === provider
-      ? automaticStopEnvironmentValue(provider === "box" ? priorConfig.box!.automaticStopMs : priorConfig.vercel!.automaticStopMs) ?? ""
+      ? automaticStopEnvironmentValue(priorConfig.provider === "box" ? priorConfig.box.automaticStopMs : priorConfig.vercel.automaticStopMs) ?? ""
       : ""
     const automaticStopMs = parseAutomaticStopDuration(await prompts.input(`Automatic stop duration (optional, for example 30m or 2h)\n${automaticStopGuidance}`, priorAutomaticStop), { allowBlank: true })
     draft = provider === "box"

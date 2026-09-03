@@ -811,3 +811,10 @@ Do not mark a phase complete based on intent or partial implementation.
 - Verification: `bun test packages/sandbox-provider-vercel/test/infrastructure.test.ts packages/sandbox-provider-box/test/provider.test.ts packages/sandbox-provider-runtime/test/runtime.test.ts packages/sandbox-provider-runtime/test/primitives.test.ts packages/control-plane-local/test/control-plane-local.test.ts` passed (83 tests); `bun run test:node-sqlite` passed (1 test); `bun run typecheck` passed in the owner verification shell; `git diff --check` passed. Two full `bun test` runs passed 558 of 559 tests and failed only the unrelated existing detached-worker 500 ms wall-clock assertion at 526 ms and 506 ms under full-suite load; that exact test passed in isolation.
 - Live evidence: not run; this remediation performs no live provider access and authorizes no live provider mutation.
 - Deviations: none.
+
+### 2026-09-03 - Issue #9 items 6-7 type-safety correction
+
+- Corrected: expressed the provider/version checks as explicit discriminant guards before accessing provider-specific settings or version-2 binding metadata. This is a type-surface correction only; strict persisted-schema validation, runtime binding derivation, switch-warning behavior, and credential handling are unchanged.
+- Verification: `bun run typecheck` passed; `bun test packages/mcp/test packages/control-plane-local/test` passed (85 tests); `bun run test:node-sqlite` passed (1 test); `git diff --check` passed.
+- Live evidence: not run; this correction performs no provider access and authorizes no live provider mutation.
+- Deviations: none.
