@@ -36,11 +36,12 @@ describe("Waterbox MCP client renderer", () => {
     const connection = await connected(commands)
     try {
       const listedTools = (await connection.client.listTools()).tools
-      expect(connection.client.getInstructions()).toBe("These Waterbox instructions are a work in progress.\n\nWhen the current task is complete and any material outcomes the user expects outside the sandbox have been exported or otherwise preserved, stop the sandbox to avoid unnecessary compute costs. Do not stop it merely because a conversational turn has ended while work remains active.")
-      expect(listedTools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "stop_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
-      expect(listedTools.find(tool => tool.name === "create_snapshot")?.description).toBe("Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.")
+      expect(connection.client.getInstructions()).toBe("These Waterbox instructions are a work in progress.\n\nBefore starting work on a project, use `list_snapshots` to look for a suitable reusable environment. If none exists, ask whether the user wants to create one to avoid repeating setup in future work. Prefer creating the snapshot after reusable setup is complete and before task-specific work begins. Preserve dependencies, tools, CLIs, and other reusable environment preparation. Keep task-specific work in source control or another definitive external store.\n\nWhen the current task is complete and any material outcomes the user expects outside the sandbox have been exported or otherwise preserved, stop the sandbox to avoid unnecessary compute costs. Do not stop it merely because a conversational turn has ended while work remains active.\n\nSandbox filesystem state is resumable, but retention is provider-dependent. Neither sandboxes nor snapshots are definitive storage. Export any material outcomes the user expects outside the sandbox when the task is complete.")
+      expect(listedTools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "stop_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
+      expect(listedTools.find(tool => tool.name === "create_sandbox")?.description).toBe("Creates a sandbox for coding work, optionally seeded from a reusable snapshot. First use `list_snapshots` to find relevant snapshots. Unless the user has already specified a choice, present the best-fitting options and ask whether to use one or start fresh. Reuse `idempotencyKey` to retry the same creation safely; use a new key to create another sandbox.")
+      expect(listedTools.find(tool => tool.name === "create_snapshot")?.description).toBe("Creates a reusable setup snapshot from a running sandbox. Give it a clear name and description so future agents can discover its purpose. This is a setup tool: use snapshots to preserve reusable environments, not for routine pauses or as definitive storage for completed work.")
       expect(listedTools.find(tool => tool.name === "stop_sandbox")?.description).toBe("Stops compute while preserving resumable filesystem state, subject to provider behavior. No separate resume step is needed. If more coding work is required, the next coding tool call resumes the sandbox before performing the requested operation. Recommended usage: use it as a cleanup step to avoid spending more compute after the task's material outcomes are complete and available outside the sandbox, for example in a pull request or another exported deliverable. Because resuming adds latency, do not stop merely because a conversational turn has ended.")
-      expect(listedTools.find(tool => tool.name === "delete_sandbox")?.description).toContain("Permanently")
+      expect(listedTools.map(tool => tool.name)).not.toContain("delete_sandbox")
       expect(listedTools.map(tool => tool.name)).not.toContain("resume_sandbox")
       expect(listedTools.map(tool => tool.name)).not.toContain("list_sandboxes")
       for (const name of ["read", "write", "edit", "patch", "glob", "grep", "bash"]) {
@@ -119,7 +120,7 @@ describe("Waterbox MCP client renderer", () => {
   test("renders safe recovery guidance from validated client errors", async () => {
     const commands = stubClient({ async createSandbox() { throw new WaterboxClientError("Sandbox preparation failed", { status: 503, code: "provider_failure", recoverySandboxId: sandbox.sandboxId }) } })
     const connection = await connected(commands)
-    try { const response = await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "recover-create" } }); const rendered = JSON.stringify(response); expect(rendered).toContain(sandbox.sandboxId); expect(rendered).toContain("same idempotency key"); expect(rendered).toContain("probe_sandbox"); expect(rendered).not.toContain("requestId"); expect(response).toMatchObject({ isError: true }) }
+    try { const response = await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "recover-create" } }); const rendered = JSON.stringify(response); expect(rendered).toContain(`Sandbox creation was not confirmed, but that sandbox may still exist with ID ${sandbox.sandboxId}. Before creating another sandbox, inspect it with \`probe_sandbox\`.`); expect(rendered).not.toContain("requestId"); expect(rendered).not.toContain("delete_sandbox"); expect(response).toMatchObject({ isError: true }) }
     finally { await connection.close() }
   })
 
@@ -142,6 +143,12 @@ describe("Waterbox MCP client renderer", () => {
       expect(created).toMatchObject({ content: [{ text: expect.stringContaining(sandbox.sandboxId) }] })
       expect(provider.createCalls).toBe(1)
     } finally { await connection.close() }
+  })
+
+  test("rejects removed delete_sandbox calls as unknown tools", async () => {
+    const connection = await connected(stubClient({}))
+    try { await expect(connection.client.callTool({ name: "delete_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).resolves.toMatchObject({ isError: true, content: [{ text: "Unknown Waterbox tool" }] }) }
+    finally { await connection.close() }
   })
 })
 

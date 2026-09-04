@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test"
+import type { Sandbox } from "../packages/sandbox-contracts/src/index.ts"
 import { assertEmbeddedSmokeAuthorized, baselineReconciliationError, compareBoxBaseline, readBoxBaseline, reconcileBoxBaseline, runEmbeddedMcpProductFlow, runEmbeddedMcpSmoke, type BoxBaseline } from "./embedded-mcp-smoke.ts"
 
 const now = "2026-08-31T12:00:00.000Z"
 const sandboxId = "sbx_silver-forest-a1"
 const restoredSandboxId = "sbx_silver-forest-b2"
 const snapshotId = "snap_silver-forest-c3"
-const tools = "create_sandbox,probe_sandbox,stop_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash".split(",").map((name) => ({ name }))
+const tools = "create_sandbox,probe_sandbox,stop_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash".split(",").map((name) => ({ name }))
 
 describe("Embedded MCP smoke", () => {
   test("requires both destructive-operation gates", () => {
@@ -58,6 +59,8 @@ describe("Embedded MCP smoke", () => {
     expect(fake.calls[automaticArmAt]!.arguments.sandboxId).toBe(restoredSandboxId)
     expect(fake.calls[automaticResumeAt]!.arguments.sandboxId).toBe(restoredSandboxId)
     expect(fake.deletions).toEqual([restoredSandboxId, snapshotId, sandboxId])
+    expect(fake.calls.map(call => call.name)).not.toContain("delete_sandbox")
+    expect(fake.calls.filter(call => call.name === "delete_snapshot" && call.arguments.snapshotId === snapshotId)).toHaveLength(1)
     expect(lines.join("\n")).toContain('"ready":true')
     expect(lines.join("\n")).toContain('"preserved":true')
     expect(lines.join("\n")).toContain('"reinstalled":true')
@@ -119,7 +122,7 @@ describe("Embedded MCP smoke", () => {
     const secret = "box-secret-value"
     const calls: Call[] = [], lines: string[] = []
     const client = { async listTools() { return { tools } }, async callTool(request: Call) { calls.push(request); throw new Error(secret) } }
-    await expect(runEmbeddedMcpProductFlow(client, { localSecretPath: "/local/secret", automaticStopMs: 1, sleep: async () => {}, secrets: [secret], log: (line) => lines.push(line) })).rejects.toThrow("manual review")
+    await expect(runEmbeddedMcpProductFlow(client, { localSecretPath: "/local/secret", automaticStopMs: 1, cleanup: { async deleteSandbox() { return resource(sandboxId, "terminated") } }, sleep: async () => {}, secrets: [secret], log: (line) => lines.push(line) })).rejects.toThrow("manual review")
     expect(calls.map((call) => call.name)).toEqual(["create_sandbox"])
     expect(lines.join("\n")).not.toContain(secret)
   })
@@ -146,6 +149,22 @@ describe("Embedded MCP smoke", () => {
     expect(fake.deletions).toEqual([...expectedDeletions])
   })
 
+  test.each([
+    "Sandbox creation was not confirmed, but that sandbox may still exist with ID sbx_silver-forest-a1. Before creating another sandbox, inspect it with probe_sandbox.",
+    "Unrelated failure. Sandbox creation was not confirmed, but that sandbox may still exist with ID sbx_silver-forest-a1. Before creating another sandbox, inspect it with `probe_sandbox`. Additional text.",
+  ])("does not track malformed recovery text", async (message) => {
+    const fake = fakeClient({ sourceRecoveryMessage: message })
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("manual review")
+    expect(fake.deletions).toEqual([])
+    expect(fake.calls.map(call => call.name)).toEqual(["create_sandbox"])
+  })
+
+  test.each(["id", "state"] as const)("rejects an uncorrelated internal sandbox cleanup result by %s", async (invalidSandboxCleanup) => {
+    const fake = fakeClient({ failRuntime: true, invalidSandboxCleanup })
+    await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("tracked cleanup requires manual review")
+    expect(fake.deletions).toEqual([sandboxId])
+  })
+
   test("compares the exact visible Box ID set and active count with read-only requests", async () => {
     const baseline: BoxBaseline = { ids: new Set(["bx_baseline1", "bx_baseline2"]), activeBoxes: 2 }
     const methods: Array<string | undefined> = []
@@ -167,9 +186,8 @@ describe("Embedded MCP smoke", () => {
     await expect(runEmbeddedMcpProductFlow(fake.client, productOptions(fake))).rejects.toThrow("automatic stop observation timed out")
     expect(fake.calls.filter((call) => call.name === "stop_sandbox")).toHaveLength(1)
     expect(fake.calls.filter((call) => call.name === "create_snapshot")).toHaveLength(1)
-    expect(fake.calls.filter((call) => call.name === "delete_sandbox" && call.arguments.sandboxId === sandboxId)).toHaveLength(1)
-    expect(fake.calls.filter((call) => call.name === "delete_sandbox" && call.arguments.sandboxId === restoredSandboxId)).toHaveLength(1)
-    expect(fake.calls.filter((call) => call.name === "delete_snapshot")).toHaveLength(1)
+    expect(fake.calls.filter((call) => call.name === "delete_sandbox")).toHaveLength(0)
+    expect(fake.calls.filter((call) => call.name === "delete_snapshot" && call.arguments.snapshotId === snapshotId)).toHaveLength(1)
     expect(fake.deletions).toEqual([restoredSandboxId, snapshotId, sandboxId])
   })
 
@@ -207,14 +225,14 @@ describe("Embedded MCP smoke", () => {
 
 interface Call { name: string; arguments: Record<string, any> }
 const text = (value: unknown) => ({ content: [{ type: "text", text: JSON.stringify(value) }] })
-const resource = (id = sandboxId, state = "running", sourceSnapshotId?: string) => ({ sandboxId: id, provider: "box", state, ...(sourceSnapshotId ? { sourceSnapshotId } : {}), version: 1, createdAt: now, updatedAt: now })
+const resource = (id = sandboxId, state: Sandbox["state"] = "running", sourceSnapshotId?: string): Sandbox => ({ sandboxId: id, provider: "box", state, ...(sourceSnapshotId ? { sourceSnapshotId } : {}), version: 1, createdAt: now, updatedAt: now })
 const snapshot = (state = "creating") => ({ snapshotId, provider: "box", sourceSandboxId: sandboxId, state, version: 1, createdAt: now, updatedAt: now })
 
-function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; failSnapshotCreate?: boolean; failSnapshotReadiness?: boolean; failRestoredCreate?: boolean; failRestoredVerification?: boolean; failRestoredCleanup?: boolean; neverAutoStop?: boolean; malformedSourceResponse?: boolean; malformedSnapshotResponse?: boolean; malformedRestoredResponse?: boolean; sourceRecoveryError?: boolean; restoredRecoveryError?: boolean; sourceStaleAfterSnapshot?: boolean; workdir?: string; markerPath?: string } = {}) {
+function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; failSnapshotCreate?: boolean; failSnapshotReadiness?: boolean; failRestoredCreate?: boolean; failRestoredVerification?: boolean; failRestoredCleanup?: boolean; invalidSandboxCleanup?: "id" | "state"; neverAutoStop?: boolean; malformedSourceResponse?: boolean; malformedSnapshotResponse?: boolean; malformedRestoredResponse?: boolean; sourceRecoveryError?: boolean; sourceRecoveryMessage?: string; restoredRecoveryError?: boolean; sourceStaleAfterSnapshot?: boolean; workdir?: string; markerPath?: string } = {}) {
   const calls: Call[] = [], deletions: string[] = []
   let marker = "", snapshotLists = 0, clock = 0
   const workdir = options.workdir ?? "/home/user/workspace", markerPath = options.markerPath ?? "waterbox-embedded-marker"
-  const states = new Map([[sandboxId, "running"], [restoredSandboxId, "running"]])
+  const states = new Map<string, Sandbox["state"]>([[sandboxId, "running"], [restoredSandboxId, "running"]])
   const probes = new Map<string, number>()
   const output = (value = "") => text({ output: value, metadata: {} })
   const bash = (value = "", timedOut = false) => ({ content: [{ type: "text", text: value }], structuredContent: { output: value, metadata: { exitCode: timedOut ? null : 0, timedOut } } })
@@ -224,7 +242,7 @@ function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; fai
       calls.push(request)
       if (request.name === "create_sandbox") {
         if (request.arguments.sourceSnapshotId && options.restoredRecoveryError) return errorWithRecovery(restoredSandboxId)
-        if (!request.arguments.sourceSnapshotId && options.sourceRecoveryError) return errorWithRecovery(sandboxId)
+        if (!request.arguments.sourceSnapshotId && (options.sourceRecoveryError || options.sourceRecoveryMessage)) return errorWithRecovery(sandboxId, options.sourceRecoveryMessage)
         if (request.arguments.sourceSnapshotId) { if (options.failRestoredCreate) throw new Error("restored create unavailable"); return text(options.malformedRestoredResponse ? { ...resource(restoredSandboxId, "running", snapshotId), provider: 42 } : resource(restoredSandboxId, "running", snapshotId)) }
         return text(options.malformedSourceResponse ? { ...resource(), provider: 42 } : resource())
       }
@@ -235,7 +253,6 @@ function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; fai
         return text(resource(request.arguments.sandboxId, states.get(request.arguments.sandboxId) ?? "running"))
       }
       if (request.name === "stop_sandbox") { states.set(request.arguments.sandboxId, "stopped"); return text(resource(request.arguments.sandboxId, "stopped")) }
-      if (request.name === "delete_sandbox") { deletions.push(request.arguments.sandboxId); if (options.failRestoredCleanup && request.arguments.sandboxId === restoredSandboxId) throw new Error("cleanup unavailable"); return text(resource(request.arguments.sandboxId, "terminated")) }
       if (request.name === "create_snapshot") { if (options.failSnapshotCreate) throw new Error("snapshot unavailable"); if (options.sourceStaleAfterSnapshot) states.set(sandboxId, "failed"); return text(options.malformedSnapshotResponse ? { ...snapshot(), provider: 42 } : snapshot()) }
       if (request.name === "list_snapshots") { snapshotLists++; return text({ items: [snapshot(options.failSnapshotReadiness ? "failed" : snapshotLists === 1 ? "creating" : "ready")] }) }
       if (request.name === "delete_snapshot") { deletions.push(request.arguments.snapshotId); return text(snapshot("deleted")) }
@@ -258,15 +275,18 @@ function fakeClient(options: { failRuntime?: boolean; hardTimeout?: boolean; fai
       return bash()
     },
   }
-  return { client, calls, deletions, now: () => clock, sleep: async (milliseconds: number) => { if (milliseconds === 7_000) await new Promise(() => {}); clock += milliseconds } }
+  const cleanup = {
+    async deleteSandbox(id: string) { deletions.push(id); if (options.failRestoredCleanup && id === restoredSandboxId) throw new Error("cleanup unavailable"); return resource(options.invalidSandboxCleanup === "id" ? restoredSandboxId : id, options.invalidSandboxCleanup === "state" ? "stopped" : "terminated") },
+  }
+  return { client, cleanup, calls, deletions, now: () => clock, sleep: async (milliseconds: number) => { if (milliseconds === 7_000) await new Promise(() => {}); clock += milliseconds } }
 }
 
-function errorWithRecovery(id: string) {
-  return { isError: true, content: [{ type: "text", text: `Sandbox creation failed. Recovery sandbox: ${id}. Retry creation only with the same idempotency key.` }] }
+function errorWithRecovery(id: string, message?: string) {
+  return { isError: true, content: [{ type: "text", text: message ?? `Sandbox creation was not confirmed, but that sandbox may still exist with ID ${id}. Before creating another sandbox, inspect it with \`probe_sandbox\`.` }] }
 }
 
 function productOptions(fake: ReturnType<typeof fakeClient>) {
-  return { localSecretPath: "/local/secret", automaticStopMs: 2, automaticStopGraceMs: 1, automaticStopPollIntervalMs: 1, now: fake.now, sleep: fake.sleep }
+  return { localSecretPath: "/local/secret", automaticStopMs: 2, automaticStopGraceMs: 1, automaticStopPollIntervalMs: 1, cleanup: fake.cleanup, now: fake.now, sleep: fake.sleep }
 }
 
 function reconciliationOptions() { return { pollIntervalMs: 1, pollTimeoutMs: 3, sleep: async () => {} } }

@@ -5,11 +5,13 @@ import { SystemVercelProviderClock, VercelSandboxInfrastructure, type VercelProv
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import { runEmbeddedMcpProductFlow, type EmbeddedSmokeClient, type McpRuntimeLayout } from "./embedded-mcp-smoke.ts"
+import { runEmbeddedMcpProductFlow, type EmbeddedSmokeClient, type McpRuntimeLayout, type SmokeCleanup } from "./embedded-mcp-smoke.ts"
+import { createStartupClient } from "../packages/mcp/src/main.ts"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_VERCEL_SANDBOX_RESOURCES"
 const MAX_PAGES = 100
 const MAX_RESPONSE_BYTES = 1_048_576
+const CLEANUP_TIMEOUT_MS = 30_000
 
 type Baseline = { sandboxes: Set<string>; snapshots: Set<string> }
 type Environment = Record<string, string | undefined>
@@ -61,8 +63,8 @@ export async function reconcileVercelBaseline(environment: Environment, baseline
 export async function runVercelMcpSmoke(environment: Environment = process.env): Promise<{ ok: true; flow: "vercel-mcp-smoke" }> {
   assertVercelMcpSmokeAuthorized(environment)
   required(environment.VERCEL_TOKEN, "VERCEL_TOKEN"); required(environment.VERCEL_TEAM_ID, "VERCEL_TEAM_ID"); required(environment.VERCEL_PROJECT_ID, "VERCEL_PROJECT_ID")
+  if (environment.WATERBOX_AUTO_STOP === undefined) throw new Error("The Vercel MCP smoke requires WATERBOX_AUTO_STOP")
   const automaticStopMs = parseAutomaticStopDuration(environment.WATERBOX_AUTO_STOP)
-  if (automaticStopMs === undefined) throw new Error("The Vercel MCP smoke requires WATERBOX_AUTO_STOP")
   const baseline = await readVercelBaseline(environment)
   const directory = await mkdtemp(join(tmpdir(), "waterbox-vercel-mcp-"))
   const localSecretPath = join(directory, "local-secret.bin")
@@ -77,13 +79,16 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
     stderr: "inherit",
   })
   const client = new Client({ name: "waterbox-vercel-smoke", version: "1" })
+  let cleanup: Awaited<ReturnType<typeof createStartupClient>> | undefined
   try {
     await client.connect(transport)
-    await runEmbeddedMcpProductFlow(client as EmbeddedSmokeClient, { localSecretPath, automaticStopMs, runtime, secrets: [environment.VERCEL_TOKEN!], log: console.log })
+    cleanup = await createStartupClient({ ...environment, WATERBOX_PROVIDER: "vercel", WATERBOX_SQLITE_PATH: join(directory, "embedded.sqlite") })
+    await runEmbeddedMcpProductFlow(client as EmbeddedSmokeClient, { localSecretPath, automaticStopMs, cleanup: internalCleanup(cleanup), runtime, secrets: [environment.VERCEL_TOKEN!], log: console.log })
   } catch (error) {
     failure = error
   } finally {
     await client.close().catch(() => {})
+    await cleanup?.close().catch(() => {})
   }
   try {
     if (failure === undefined) {
@@ -104,6 +109,12 @@ export async function runVercelMcpSmoke(environment: Environment = process.env):
   }
   if (failure !== undefined) throw new Error("Vercel MCP smoke failed; tracked cleanup or baseline reconciliation requires review")
   return { ok: true, flow: "vercel-mcp-smoke" }
+}
+
+function internalCleanup(client: Awaited<ReturnType<typeof createStartupClient>>): SmokeCleanup {
+  return {
+    deleteSandbox(sandboxId) { return client.deleteSandbox({ sandboxId }, { signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS) }) },
+  }
 }
 
 /**
