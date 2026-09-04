@@ -34,7 +34,7 @@ function diagnosticMessage(error: unknown): string {
   for (let depth = 0; depth < 4 && current instanceof Error; depth++) {
     const code = "code" in current && typeof current.code === "string" ? `:${current.code}` : ""
     const kind = "kind" in current && typeof current.kind === "string" ? `:${current.kind}` : ""
-    const safe = ["DomainError", "McpConfigurationError", "MissingMcpCredentialError", "ProviderError"].includes(current.name)
+    const safe = ["McpConfigurationError", "MissingMcpCredentialError"].includes(current.name)
     messages.push(`${current.name}${code}${kind}${safe ? `: ${current.message}` : ""}`)
     current = current.cause
   }
@@ -53,8 +53,9 @@ export async function createStartupClient(environment: Record<string, string | u
 function boxDiagnosticMessage(event: LocalProviderDiagnostic): string { return `Waterbox MCP diagnostic: ${JSON.stringify(event)}` }
 
 function unavailableClient(error: Error): WaterboxClient {
-  const client = new WaterboxClient(createRemoteApiBackend("http://waterbox.unconfigured/", async () => { throw error }))
-  return Object.assign(client, { preflight() { throw error } })
+  const publicError = error instanceof McpConfigurationError ? error : new McpConfigurationError(error.message)
+  const client = new WaterboxClient(createRemoteApiBackend("http://waterbox.unconfigured/", async () => { throw publicError }))
+  return Object.assign(client, { preflight() { throw publicError } })
 }
 
 export function startupMessage(error: unknown): string {

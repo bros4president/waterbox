@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool } from "@modelcontextprotocol/sdk/types.js"
 import { BashToolArgumentsSchema, BashToolResultSchema, CreateSandboxRequestSchema, CreateSnapshotRequestSchema, CursorPaginationRequestSchema, EditToolArgumentsSchema, FilePathSchema, GlobToolArgumentsSchema, GrepToolArgumentsSchema, IdempotencyKeySchema, PatchToolArgumentsSchema, ReadToolArgumentsSchema, SandboxIdSchema, SandboxSchema, SnapshotIdSchema, SnapshotPageSchema, SnapshotSchema, ToolNameSchema, WriteToolArgumentsSchema } from "@waterbox/contracts"
-import { WaterboxClient, WaterboxClientError } from "@waterbox/client"
+import { WaterboxClient, isPublicWaterboxClientError, publicWaterboxClientErrorMessage } from "@waterbox/client"
 import { z } from "zod"
 import { McpConfigurationError } from "./config.ts"
 import { instructions } from "./instructions.ts"
@@ -44,17 +44,17 @@ export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: (
       const context = { signal: extra.signal, ...(extra._meta?.progressToken === undefined ? {} : { onProgress: async ({ sequence }: { sequence: number }) => {
         try { await extra.sendNotification({ method: "notifications/progress", params: { progressToken: extra._meta!.progressToken!, progress: sequence } }) } catch {}
       } }) }
-      if (request.params.name === "create_sandbox") { const { idempotencyKey, ...input } = CreateSandboxInputSchema.parse(request.params.arguments ?? {}); return text(SandboxSchema.parse(await client.createSandbox(input, { ...context, idempotencyKey }))) }
-      if (request.params.name === "probe_sandbox") return text(SandboxSchema.parse(await client.probeSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
-      if (request.params.name === "stop_sandbox") return text(SandboxSchema.parse(await client.stopSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
-      if (request.params.name === "list_snapshots") return text(SnapshotPageSchema.parse(await client.listSnapshots(CursorPaginationRequestSchema.parse(request.params.arguments ?? {}), context)))
-      if (request.params.name === "create_snapshot") return text(SnapshotSchema.parse(await client.createSnapshot(CreateSnapshotInputSchema.parse(request.params.arguments ?? {}), context)))
-      if (request.params.name === "delete_snapshot") return text(SnapshotSchema.parse(await client.deleteSnapshot(SnapshotInputSchema.parse(request.params.arguments ?? {}), context)))
-      if (request.params.name === "send_file_securely") return text(await sendFileSecurely(client, SendFileInputSchema.parse(request.params.arguments ?? {}), context))
+      if (request.params.name === "create_sandbox") { const { idempotencyKey, ...input } = parse(CreateSandboxInputSchema, request.params.arguments, "Invalid arguments for create_sandbox"); return text(SandboxSchema.parse(await client.createSandbox(input, { ...context, idempotencyKey }))) }
+      if (request.params.name === "probe_sandbox") return text(SandboxSchema.parse(await client.probeSandbox(parse(SandboxInputSchema, request.params.arguments, "Invalid arguments for probe_sandbox"), context)))
+      if (request.params.name === "stop_sandbox") return text(SandboxSchema.parse(await client.stopSandbox(parse(SandboxInputSchema, request.params.arguments, "Invalid arguments for stop_sandbox"), context)))
+      if (request.params.name === "list_snapshots") return text(SnapshotPageSchema.parse(await client.listSnapshots(parse(CursorPaginationRequestSchema, request.params.arguments, "Invalid arguments for list_snapshots"), context)))
+      if (request.params.name === "create_snapshot") return text(SnapshotSchema.parse(await client.createSnapshot(parse(CreateSnapshotInputSchema, request.params.arguments, "Invalid arguments for create_snapshot"), context)))
+      if (request.params.name === "delete_snapshot") return text(SnapshotSchema.parse(await client.deleteSnapshot(parse(SnapshotInputSchema, request.params.arguments, "Invalid arguments for delete_snapshot"), context)))
+      if (request.params.name === "send_file_securely") return text(await sendFileSecurely(client, parse(SendFileInputSchema, request.params.arguments, "Invalid arguments for send_file_securely"), context))
       const name = ToolNameSchema.safeParse(request.params.name)
       if (!name.success) throw new PublicMcpError("Unknown Waterbox tool")
       const parsed = ARGUMENT_SCHEMAS[name.data].safeParse(request.params.arguments ?? {})
-      if (!parsed.success) throw new PublicMcpError(`Invalid arguments for Waterbox ${name.data}`)
+      if (!parsed.success) throw new PublicMcpError(`Invalid arguments for ${name.data}`)
       const result = await client[name.data](parsed.data as never, context)
       if (name.data === "bash") return bashResult(BashToolResultSchema.parse(result))
       return { content: [{ type: "text" as const, text: JSON.stringify({ output: result.output, metadata: result.metadata }) }] }
@@ -66,11 +66,8 @@ function bashResult(result: z.infer<typeof BashToolResultSchema>) { const failed
 function tool(name: string, description: string, schema: z.ZodType, output?: z.ZodType): Tool { const { $schema: _, ...inputSchema } = z.toJSONSchema(schema); if (!output) return { name, description, inputSchema: inputSchema as Tool["inputSchema"] }; const { $schema: _output, ...outputSchema } = z.toJSONSchema(output); return { name, description, inputSchema: inputSchema as Tool["inputSchema"], outputSchema: { type: "object", ...outputSchema } as Tool["outputSchema"] } }
 class PublicMcpError extends Error {}
 function text(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value) }] } }
+function parse<T>(schema: z.ZodType<T>, value: unknown, message: string): T { const parsed = schema.safeParse(value ?? {}); if (!parsed.success) throw new PublicMcpError(message); return parsed.data }
 function safeMessage(error: unknown): string {
-  if (error instanceof WaterboxClientError || (error instanceof Error && error.name === "WaterboxClientError")) {
-    const clientError = error as WaterboxClientError
-    const recovery = clientError.recoverySandboxId === undefined ? "" : ` Sandbox creation was not confirmed, but that sandbox may still exist with ID ${clientError.recoverySandboxId}. Before creating another sandbox, inspect it with \`probe_sandbox\`.`
-    return `${clientError.message}${recovery}`
-  }
-  return error instanceof PublicMcpError || error instanceof McpConfigurationError || (error instanceof Error && error.name === "UnsupportedMcpProviderError") ? error.message : "Waterbox MCP request failed"
+  if (isPublicWaterboxClientError(error)) return publicWaterboxClientErrorMessage(error)!
+  return error instanceof PublicMcpError || error instanceof McpConfigurationError ? error.message : "Waterbox MCP request failed"
 }
