@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema, PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema } from "@waterbox/contracts"
+import { BashToolEventSchema, EditToolResultSchema, GlobToolResultSchema, GrepToolResultSchema, PatchToolResultSchema, ReadToolResultSchema, WriteToolResultSchema } from "@waterbox/contracts"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, open, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { type ChildProcess } from "node:child_process"
@@ -23,12 +23,12 @@ function controlledChild(onKill: (signal: NodeJS.Signals) => void): ChildProcess
 describe("provider-neutral canonical runtime", () => {
   test("executes all seven tools with canonical events", async () => {
     const runtime = await fixture()
-    WriteToolEventSchema.parse(await runtime.execute("write", { filePath: "src/a.txt", content: "alpha\n" }))
-    ReadToolEventSchema.parse(await runtime.execute("read", { filePath: "src/a.txt" }))
-    EditToolEventSchema.parse(await runtime.execute("edit", { filePath: "src/a.txt", oldString: "alpha", newString: "beta" }))
-    PatchToolEventSchema.parse(await runtime.execute("patch", { patchText: "*** Begin Patch\n*** Add File: extra.txt\n+extra\n*** End Patch" }))
-    GlobToolEventSchema.parse(await runtime.execute("glob", { pattern: "*.txt" }))
-    GrepToolEventSchema.parse(await runtime.execute("grep", { pattern: "beta" }))
+    WriteToolResultSchema.parse(await runtime.execute("write", { filePath: "src/a.txt", content: "alpha\n" }))
+    ReadToolResultSchema.parse(await runtime.execute("read", { filePath: "src/a.txt" }))
+    EditToolResultSchema.parse(await runtime.execute("edit", { filePath: "src/a.txt", oldString: "alpha", newString: "beta" }))
+    PatchToolResultSchema.parse(await runtime.execute("patch", { patchText: "*** Begin Patch\n*** Add File: extra.txt\n+extra\n*** End Patch" }))
+    GlobToolResultSchema.parse(await runtime.execute("glob", { pattern: "*.txt" }))
+    GrepToolResultSchema.parse(await runtime.execute("grep", { pattern: "beta" }))
     const stream = await runtime.execute("bash", { command: "printf out; printf err >&2" })
     expect(stream).toBeInstanceOf(ReadableStream)
     const events = []
@@ -272,7 +272,6 @@ describe("provider-neutral canonical runtime", () => {
     expect(await readFile(join(system, "traversal.txt"), "utf8")).toBe("traversal")
     expect(await readFile(join(system, "symlink.txt"), "utf8")).toBe("symlink")
     expect(await runtime.execute("read", { filePath: "system-link/symlink.txt" })).toMatchObject({
-      type: "result",
       output: "symlink",
       metadata: { filePath: join(canonicalSystem, "symlink.txt") },
     })

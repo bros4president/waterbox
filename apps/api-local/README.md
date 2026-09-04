@@ -35,8 +35,8 @@ curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json'
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"patchText":"*** Begin Patch\\n*** Add File: /workspace/b.txt\\n+hello\\n*** End Patch"}' "$URL/v1/sandboxes/$SANDBOX/tools/patch"
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"pattern":"*.txt","path":"/workspace"}' "$URL/v1/sandboxes/$SANDBOX/tools/glob"
 curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"pattern":"world","path":"/workspace"}' "$URL/v1/sandboxes/$SANDBOX/tools/grep"
-curl -N -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 1; printf world"}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
-curl -N -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 20; printf world","timeout":30000}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
+curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 1; printf world"}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
+curl -X POST -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"command":"printf hello; sleep 20; printf world","timeout":30000}' "$URL/v1/sandboxes/$SANDBOX/tools/bash"
 ```
 
 Every one-shot Bash call starts a detached worker. Quick commands return a completed result;

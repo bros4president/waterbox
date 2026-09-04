@@ -10,7 +10,7 @@ import type {
   SnapshotState,
   ToolName,
   ToolArgumentsByName,
-  ToolEventByName,
+  ToolResultByName,
 } from "@waterbox/contracts"
 import type { JsonValue } from "./records.ts"
 
@@ -106,7 +106,7 @@ export interface SandboxProvider {
   prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
-  executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]>
+  executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): Promise<ToolResultByName[N]>
   readonly stopResume?: {
     stop(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
     resume(input: ProviderOperationInput): Promise<ProviderSandboxObservation>

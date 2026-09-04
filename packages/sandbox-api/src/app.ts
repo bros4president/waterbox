@@ -11,14 +11,14 @@ import {
   EditToolArgumentsSchema,
   ErrorEnvelopeSchema,
   GlobToolArgumentsSchema,
-  GlobToolEventSchema,
+  GlobToolResultSchema,
   GrepToolArgumentsSchema,
-  GrepToolEventSchema,
+  GrepToolResultSchema,
   IdentitySchema,
   PatchToolArgumentsSchema,
-  PatchToolEventSchema,
+  PatchToolResultSchema,
   ReadToolArgumentsSchema,
-  ReadToolEventSchema,
+  ReadToolResultSchema,
   SandboxIdSchema,
   SandboxPageSchema,
   SandboxSchema,
@@ -30,11 +30,12 @@ import {
   SecureTransferIdSchema,
   SecureTransferInitiatedSchema,
   MAX_SECURE_CIPHERTEXT_BASE64_LENGTH,
+  MAX_TOOL_RESULT_BYTES,
   ToolNameSchema,
   WriteToolArgumentsSchema,
-  WriteToolEventSchema,
-  EditToolEventSchema,
-  BashToolEventSchema,
+  WriteToolResultSchema,
+  EditToolResultSchema,
+  BashToolResultSchema,
   type ErrorCode,
   type Identity,
   type ToolName,
@@ -98,7 +99,7 @@ const routes = {
   deleteSnapshot: createRoute({ method: "delete", path: "/v1/snapshots/{snapshotId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SnapshotPathSchema }, responses: { 200: { description: "Snapshot deletion initiated", ...json(SnapshotSchema) }, ...errorResponses } }),
   initiateSecureFileTransfer: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/secure-file-transfers", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SandboxPathSchema }, responses: { 201: { description: "Secure file transfer initiated", ...json(SecureTransferInitiatedSchema) }, ...errorResponses } }),
   consumeSecureFileTransfer: createRoute({ method: "put", path: "/v1/sandboxes/{sandboxId}/secure-file-transfers/{transferId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: SecureTransferPathSchema, body: json(SecureTransferConsumeRequestSchema) }, responses: { 200: { description: "Secure file delivered", ...json(SecureTransferDeliveredSchema) }, ...errorResponses } }),
-  executeTool: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/tools/{toolName}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: ToolPathSchema, body: json(ToolArgumentsSchema) }, responses: { 200: { description: "Ordered canonical tool events, one event per line", content: { "application/x-ndjson": { schema: z.string().openapi({ example: `${JSON.stringify({ type: "stdout", data: "hello\\n" })}\n${JSON.stringify({ type: "result" })}\n` }) } } }, ...errorResponses } }),
+  executeTool: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/tools/{toolName}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: ToolPathSchema, body: json(ToolArgumentsSchema) }, responses: { 200: { description: "One bounded canonical tool result", ...json(z.union([ReadToolResultSchema, WriteToolResultSchema, EditToolResultSchema, PatchToolResultSchema, GlobToolResultSchema, GrepToolResultSchema, BashToolResultSchema])) }, ...errorResponses } }),
   observeBashJob: createRoute({ method: "post", path: "/v1/sandboxes/{sandboxId}/bash-jobs/{jobId}/observations", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: BashJobPathSchema, body: json(BashJobObservationRequestSchema) }, responses: { 200: { description: "One bounded Bash job observation", ...json(BashJobObservationSchema) }, ...errorResponses } }),
   cleanupBashJob: createRoute({ method: "delete", path: "/v1/sandboxes/{sandboxId}/bash-jobs/{jobId}", security: bearerSecurity, request: { headers: AuthHeadersSchema, params: BashJobPathSchema }, responses: { 204: { description: "Bash job cleaned up" }, ...errorResponses } }),
 }
@@ -112,14 +113,14 @@ const toolSchemas = {
   grep: GrepToolArgumentsSchema,
   bash: BashToolArgumentsSchema,
 } as const
-const toolEventSchemas = {
-  read: ReadToolEventSchema,
-  write: WriteToolEventSchema,
-  edit: EditToolEventSchema,
-  patch: PatchToolEventSchema,
-  glob: GlobToolEventSchema,
-  grep: GrepToolEventSchema,
-  bash: BashToolEventSchema,
+const toolResultSchemas = {
+  read: ReadToolResultSchema,
+  write: WriteToolResultSchema,
+  edit: EditToolResultSchema,
+  patch: PatchToolResultSchema,
+  glob: GlobToolResultSchema,
+  grep: GrepToolResultSchema,
+  bash: BashToolResultSchema,
 } as const
 
 export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
@@ -220,48 +221,11 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
     const { sandboxId, toolName } = ToolPathSchema.parse(c.req.param())
     const parsed = toolSchemas[toolName].safeParse(await c.req.json())
     if (!parsed.success) throw new DomainError("invalid_request", "The request is invalid")
-    const controller = linkedAbortController(c.req.raw.signal)
-    const events = await dependencies.core.executeTool(c.get("identity"), sandboxId, toolName, parsed.data as never, controller.signal)
-    const iterator = events[Symbol.asyncIterator]()
-    let terminated = false
-    const terminate = (reason: unknown) => {
-      if (terminated) return
-      terminated = true
-      if (!controller.signal.aborted) controller.abort(reason)
-      try { void Promise.resolve(iterator.return?.()).catch(() => {}) } catch {}
-    }
-    let first
-    try { first = await iterator.next() }
-    catch (error) { terminate(error); throw error }
-    if (first.done) {
-      const error = new DomainError("provider_failure", "The provider operation failed")
-      terminate(error)
-      throw error
-    }
-    const encoder = new TextEncoder()
-    let prefetched: Awaited<ReturnType<typeof iterator.next>> | undefined = first
-    const stream = new ReadableStream<Uint8Array>({
-      async pull(streamController) {
-        try {
-          const next = prefetched
-          prefetched = undefined
-          const event = next ?? await iterator.next()
-          if (event.done) return streamController.close()
-          const parsedEvent = toolEventSchemas[toolName].parse(event.value)
-          streamController.enqueue(encoder.encode(`${JSON.stringify(parsedEvent)}\n`))
-        } catch (error) {
-          terminate(error)
-          streamController.error(error)
-        }
-      },
-      cancel(reason) {
-        terminate(reason)
-      },
-    })
-    return c.body(stream, 200, { "Content-Type": "application/x-ndjson" })
+    const result = await dependencies.core.executeTool(c.get("identity"), sandboxId, toolName, parsed.data as never, c.req.raw.signal)
+    const body = JSON.stringify(toolResultSchemas[toolName].parse(result))
+    if (new TextEncoder().encode(body).byteLength > MAX_TOOL_RESULT_BYTES) throw new DomainError("provider_failure", "The provider operation failed")
+    return c.body(body, 200, { "Content-Type": "application/json" })
   }
-  // OpenAPIHono's response inference resolves non-JSON streaming handlers to `never`;
-  // the declared route still owns the NDJSON media contract and this remains a Web Response.
   app.openapi(routes.executeTool, executeToolHandler as never)
 
   app.openapi(routes.observeBashJob, async (c) => {
@@ -281,13 +245,6 @@ export function createWaterboxApi(dependencies: WaterboxApiDependencies) {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError"
-}
-
-function linkedAbortController(signal: AbortSignal): AbortController {
-  const controller = new AbortController()
-  if (signal.aborted) controller.abort(signal.reason)
-  else signal.addEventListener("abort", () => controller.abort(signal.reason), { once: true })
-  return controller
 }
 
 function requestId(request: Request, dependencies: WaterboxApiDependencies): string {

@@ -16,4 +16,4 @@ All exported object schemas reject unknown keys. V1 public error envelopes are c
 
 `CreateSandboxHeadersSchema` validates the HTTP wire shape directly, including the exact optional `Idempotency-Key` header name. Adapters must not rename it to a camelCase contract before validation.
 
-Canonical final tool events are flattened as `{ type: "result", title, output, metadata }`. Bash metadata always includes `outputTruncated`. This intentionally matches the proven v0 receiver behavior, and Phase D must preserve the shape when extracting the shared runtime.
+Public tool results are flattened as `{ title, output, metadata }`; Bash additionally has its `outcome`. Bash metadata always includes `outputTruncated`. Private synchronous Bash streams retain `{ type: "result", ...result }` events for the runtime, daemon, and receiver.

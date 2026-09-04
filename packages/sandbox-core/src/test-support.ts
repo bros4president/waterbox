@@ -6,7 +6,7 @@ import type {
   SecureTransferDelivered,
   SecureTransferInitiated,
   ToolName,
-  ToolEventByName,
+  ToolResultByName,
 } from "@waterbox/contracts"
 import type {
   IdempotencyKey,
@@ -365,15 +365,13 @@ export class FakeSandboxProvider implements SandboxProvider {
     return { state: "deleted", providerRef: input.providerRef }
   }
 
-  executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]> {
+  async executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): Promise<ToolResultByName[N]> {
     this.executeCalls++
     this.toolInputs.push(input)
     const error = this.executeError
-    return (async function* () {
-      input.signal.throwIfAborted()
-      if (error !== undefined) throw error
-      yield { type: "result", title: input.toolName, output: "ok", metadata: {} } as ToolEventByName[N]
-    })()
+    input.signal.throwIfAborted()
+    if (error !== undefined) throw error
+    return { title: input.toolName, output: "ok", metadata: {} } as ToolResultByName[N]
   }
 
   protected async initiateSecureTransfer(input: ProviderOperationInput): Promise<SecureTransferInitiated> {

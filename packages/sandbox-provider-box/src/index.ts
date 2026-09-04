@@ -4,6 +4,7 @@ import { ProviderError, type ProviderSandboxObservation, type SandboxProvider } 
 import type { JsonValue } from "@waterbox/core/records"
 import {
   WaterboxSandboxBackend,
+  MAX_COMMAND_RESPONSE_BYTES,
   assertCommandInput,
   assertCreateInput,
   assertWriteFileInput,
@@ -54,7 +55,7 @@ const DELETION_ID = /^bdop_[a-f0-9]{32}$/
 const BOX_STATES = new Set<BoxState>(["init", "provisioning", "provisioned", "cloning", "ready", "idle", "running", "archiving", "archived", "error"])
 const READY = new Set<BoxState>(["ready", "idle"])
 const MAX_JSON_BYTES = 1_048_576
-const MAX_COMMAND_JSON_BYTES = 8_388_608
+const MAX_COMMAND_JSON_BYTES = MAX_COMMAND_RESPONSE_BYTES
 
 /** Box snapshots retain /home/user; runtime files stay outside the user workspace. */
 export const BOX_RUNTIME_PROFILE: FullLinuxRuntimeProfile = {
@@ -153,16 +154,16 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
 
   async runCommand(input: InfrastructureCommandInput): Promise<InfrastructureCommandResult> {
     assertCommandInput(input)
+    input.signal.throwIfAborted()
     const ref = sandboxRef(input.providerRef)
     const requestSignal = AbortSignal.any([input.signal, AbortSignal.timeout(input.timeoutMs + this.#config.polling.timeoutMs)])
     let response: Response
     try {
       response = await this.#fetch(`${this.#config.apiBaseUrl}/boxes/${segment(ref.boxId)}/commands`, { method: "POST", headers: this.#headers(true), body: JSON.stringify({ command: input.script, timeoutSeconds: Math.ceil(input.timeoutMs / 1000) }), signal: requestSignal })
-    } catch (error) { if (input.signal.aborted) throw input.signal.reason ?? error; throw ambiguous() }
+    } catch { throw ambiguous() }
     if (!response.ok) {
       this.#emit({ type: "tool-http-error", status: response.status })
       await safeError(response, requestSignal)
-      if (input.signal.aborted) throw input.signal.reason
       if (response.status >= 500) throw ambiguous()
       throw new BoxHttpError(response.status)
     }
@@ -173,7 +174,7 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
       const stderr = new TextEncoder().encode(meaningfulStderr(result.stderr))
       if (stdout.byteLength > (input.maxStdoutBytes ?? MAX_JSON_BYTES) || stderr.byteLength > (input.maxStderrBytes ?? MAX_JSON_BYTES)) throw ambiguous()
       return { exitCode: result.exitCode, stdout, stderr, timedOut: result.timedOut, stdoutTruncated: result.stdoutTruncated, stderrTruncated: result.stderrTruncated }
-    } catch (error) { if (input.signal.aborted) throw input.signal.reason ?? error; if (error instanceof ProviderError) throw error; throw ambiguous() }
+    } catch (error) { if (error instanceof ProviderError) throw error; throw ambiguous() }
   }
 
   async writeFile(input: InfrastructureWriteFileInput): Promise<void> {

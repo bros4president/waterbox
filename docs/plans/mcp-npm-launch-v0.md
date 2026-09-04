@@ -347,7 +347,7 @@ interface SandboxProvider {
   prepareSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   inspectSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
   deleteSandbox(input: ProviderOperationInput): Promise<ProviderSandboxObservation>
-  executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]>
+  executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): Promise<ToolResultByName[N]>
   // stopResume?, snapshots?, secureFileTransfer?, and bashJobs? remain optional capability groups
 }
 ```

@@ -1,4 +1,4 @@
-import { BashToolArgumentsSchema, BashToolEventSchema, EditToolArgumentsSchema, EditToolEventSchema, GlobToolArgumentsSchema, GlobToolEventSchema, GrepToolArgumentsSchema, GrepToolEventSchema, PatchToolArgumentsSchema, PatchToolEventSchema, ReadToolArgumentsSchema, ReadToolEventSchema, ToolNameSchema, WriteToolArgumentsSchema, WriteToolEventSchema } from "@waterbox/contracts"
+import { BashToolArgumentsSchema, BashToolEventSchema, EditToolArgumentsSchema, EditToolResultSchema, GlobToolArgumentsSchema, GlobToolResultSchema, GrepToolArgumentsSchema, GrepToolResultSchema, PatchToolArgumentsSchema, PatchToolResultSchema, ReadToolArgumentsSchema, ReadToolResultSchema, ToolNameSchema, WriteToolArgumentsSchema, WriteToolResultSchema } from "@waterbox/contracts"
 import { createRuntime, runtimeErrorStatus, RuntimeError, type RuntimeOptions } from "@waterbox/runtime"
 import { createDaemonServer as createServer } from "./host.ts"
 
@@ -14,7 +14,7 @@ export interface Daemon {
 }
 
 const inputs = { read: ReadToolArgumentsSchema, write: WriteToolArgumentsSchema, edit: EditToolArgumentsSchema, patch: PatchToolArgumentsSchema, glob: GlobToolArgumentsSchema, grep: GrepToolArgumentsSchema, bash: BashToolArgumentsSchema }
-const events = { read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema, bash: BashToolEventSchema }
+const results = { read: ReadToolResultSchema, write: WriteToolResultSchema, edit: EditToolResultSchema, patch: PatchToolResultSchema, glob: GlobToolResultSchema, grep: GrepToolResultSchema, bash: BashToolEventSchema }
 const MAX_BODY_BYTES = 1_048_576
 const json = (body: unknown, status = 200) => Response.json(body, { status, headers: { "cache-control": "no-store" } })
 function errorResponse(error: unknown): Response { const status = error instanceof SyntaxError || (error && typeof error === "object" && "issues" in error) ? 400 : runtimeErrorStatus(error); const output = error instanceof RuntimeError || status < 500 ? (error instanceof Error ? error.message : "Invalid request") : "Internal server error"; return json({ title: "Error", output, metadata: { status } }, status) }
@@ -80,7 +80,7 @@ export function createDaemon(options: RuntimeOptions): Daemon {
         request.signal.throwIfAborted()
         const result = await runtime.execute(parsedName.data, args, request.signal)
         if (result instanceof ReadableStream) return ndjson(result)
-        return json(events[parsedName.data].parse(result))
+        return json(results[parsedName.data].parse(result))
       } catch (error) { return errorResponse(error) }
     },
     shutdown: () => { shutdownController.abort(); runtime.shutdown() },

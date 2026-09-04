@@ -1,6 +1,6 @@
 import {
-  BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema,
-  PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema,
+  BashToolEventSchema, BashToolResultSchema, EditToolResultSchema, GlobToolResultSchema, GrepToolResultSchema,
+  PatchToolResultSchema, ReadToolResultSchema, WriteToolResultSchema,
   SecureTransferDeliveredSchema, SecureTransferInitiatedSchema,
 } from "@waterbox/contracts"
 import { cleanupAsyncBashJob, consumeSecureFileTransfer, createRuntime, initiateSecureFileTransfer, observeAsyncBashJob, runAsyncBashWorker, runOneShotBash, runtimeErrorStatus, RuntimeError, type OneShotBashOptions, type SecureTransferRuntimeOptions } from "@waterbox/runtime"
@@ -8,14 +8,14 @@ import { CLI_PROTOCOL_VERSION, CliProtocolError, decodeInvocation, decodeSecureT
 
 export * from "./protocol.ts"
 
-const eventSchemas = {
-  read: ReadToolEventSchema,
-  write: WriteToolEventSchema,
-  edit: EditToolEventSchema,
-  patch: PatchToolEventSchema,
-  glob: GlobToolEventSchema,
-  grep: GrepToolEventSchema,
-  bash: BashToolEventSchema,
+const resultSchemas = {
+  read: ReadToolResultSchema,
+  write: WriteToolResultSchema,
+  edit: EditToolResultSchema,
+  patch: PatchToolResultSchema,
+  glob: GlobToolResultSchema,
+  grep: GrepToolResultSchema,
+  bash: BashToolResultSchema,
 } as const
 
 export interface CliIo { stdout(value: string): void; stderr(value: string): void }
@@ -23,7 +23,7 @@ export interface CliIo { stdout(value: string): void; stderr(value: string): voi
 export async function runCli(argv: readonly string[], options: { workspaceRoot: string; signal?: AbortSignal; io?: CliIo; secureTransfer?: Omit<SecureTransferRuntimeOptions, "workspaceRoot">; asyncBash?: OneShotBashOptions }): Promise<number> {
   const io = options.io ?? { stdout: value => process.stdout.write(value), stderr: value => process.stderr.write(value) }
   if (argv.length === 1 && argv[0] === "health") {
-    io.stdout(`${JSON.stringify({ ok: true, protocolVersion: CLI_PROTOCOL_VERSION, tools: Object.keys(eventSchemas) })}\n`)
+    io.stdout(`${JSON.stringify({ ok: true, protocolVersion: CLI_PROTOCOL_VERSION, tools: Object.keys(resultSchemas) })}\n`)
     return 0
   }
   if (argv.length === 1 && argv[0] === "version") {
@@ -78,7 +78,7 @@ export async function runCli(argv: readonly string[], options: { workspaceRoot: 
   if (invocation.tool === "bash") {
     try {
       const result = await runOneShotBash(options.workspaceRoot, invocation.arguments, options.signal, options.asyncBash)
-      io.stdout(`${JSON.stringify(BashToolEventSchema.parse(result))}\n`)
+      io.stdout(`${JSON.stringify(BashToolResultSchema.parse(result))}\n`)
       return 0
     } catch (error) {
       const status = runtimeErrorStatus(error)
@@ -101,7 +101,7 @@ export async function runCli(argv: readonly string[], options: { workspaceRoot: 
       io.stdout(`${JSON.stringify(final)}\n`)
       return 0
     }
-    io.stdout(`${JSON.stringify(eventSchemas[invocation.tool].parse(result))}\n`)
+    io.stdout(`${JSON.stringify(resultSchemas[invocation.tool].parse(result))}\n`)
     return 0
   } catch (error) {
     if (error instanceof CliProtocolError) return writeError(io, 400, "invalid_invocation")

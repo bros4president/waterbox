@@ -5,6 +5,10 @@ const PositiveIntegerSchema = z.number().int().positive()
 export const FilePathSchema = NonEmptyStringSchema.max(4_096)
 
 export const ToolNameSchema = z.enum(["read", "write", "edit", "patch", "glob", "grep", "bash"])
+export const MAX_BASH_OUTPUT_BYTES = 1_048_576
+// A 1 MiB Bash byte stream can require nearly 6 MiB as JSON (for example, \u0000).
+// This leaves room for result metadata without reducing the raw output contract.
+export const MAX_TOOL_RESULT_BYTES = 8 * 1_024 * 1_024
 export const BashJobIdSchema = z.string().regex(/^job_[0-9a-f]{32}$/)
 
 export const ReadToolArgumentsSchema = z.object({
@@ -154,13 +158,8 @@ export const BashToolResultSchema = z.discriminatedUnion("outcome", [
   CompletedBashToolResultSchema,
   DispatchedBashToolResultSchema,
 ])
+export const ToolResultSchema = z.union([ReadToolResultSchema, WriteToolResultSchema, EditToolResultSchema, PatchToolResultSchema, GlobToolResultSchema, GrepToolResultSchema, BashToolResultSchema])
 
-export const ReadToolEventSchema = ReadToolResultSchema.extend({ type: z.literal("result") })
-export const WriteToolEventSchema = WriteToolResultSchema.extend({ type: z.literal("result") })
-export const EditToolEventSchema = EditToolResultSchema.extend({ type: z.literal("result") })
-export const PatchToolEventSchema = PatchToolResultSchema.extend({ type: z.literal("result") })
-export const GlobToolEventSchema = GlobToolResultSchema.extend({ type: z.literal("result") })
-export const GrepToolEventSchema = GrepToolResultSchema.extend({ type: z.literal("result") })
 export const BashToolEventSchema = z.union([
   z.object({ type: z.literal("stdout"), data: z.string() }).strict(),
   z.object({ type: z.literal("stderr"), data: z.string() }).strict(),
@@ -206,12 +205,6 @@ export type GrepToolResult = z.infer<typeof GrepToolResultSchema>
 export type BashToolResult = z.infer<typeof BashToolResultSchema>
 export type CompletedBashToolResult = z.infer<typeof CompletedBashToolResultSchema>
 export type DispatchedBashToolResult = z.infer<typeof DispatchedBashToolResultSchema>
-export type ReadToolEvent = z.infer<typeof ReadToolEventSchema>
-export type WriteToolEvent = z.infer<typeof WriteToolEventSchema>
-export type EditToolEvent = z.infer<typeof EditToolEventSchema>
-export type PatchToolEvent = z.infer<typeof PatchToolEventSchema>
-export type GlobToolEvent = z.infer<typeof GlobToolEventSchema>
-export type GrepToolEvent = z.infer<typeof GrepToolEventSchema>
 export type BashToolEvent = z.infer<typeof BashToolEventSchema>
 export type BashJobObservationRequest = z.infer<typeof BashJobObservationRequestSchema>
 export type BashJobObservation = z.infer<typeof BashJobObservationSchema>
@@ -226,12 +219,12 @@ export interface ToolArgumentsByName {
   bash: BashToolArguments
 }
 
-export interface ToolEventByName {
-  read: ReadToolEvent
-  write: WriteToolEvent
-  edit: EditToolEvent
-  patch: PatchToolEvent
-  glob: GlobToolEvent
-  grep: GrepToolEvent
-  bash: BashToolEvent
+export interface ToolResultByName {
+  read: ReadToolResult
+  write: WriteToolResult
+  edit: EditToolResult
+  patch: PatchToolResult
+  glob: GlobToolResult
+  grep: GrepToolResult
+  bash: BashToolResult
 }

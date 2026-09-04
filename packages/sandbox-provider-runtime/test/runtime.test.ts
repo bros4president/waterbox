@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { runCli } from "@waterbox/cli"
 import { decodeInvocation, decodeSecureTransferInput } from "@waterbox/cli/protocol"
 import { ProviderError } from "@waterbox/core/provider"
 import { FakeSandboxInfrastructure } from "../src/test-support.ts"
@@ -94,17 +98,17 @@ describe("shared Waterbox runtime backend", () => {
     expect(infrastructure.commands.filter(command => command.script.includes("waterbox-bootstrap-installed"))).toHaveLength(1)
   })
 
-  test("encodes and validates every canonical tool event once", async () => {
+  test("encodes and validates every canonical tool result once", async () => {
     const { infrastructure, backend } = await backendWith(input => {
       const invocation = decodeInvocation(input.script.match(/'([^']+)'$/)?.[1] ?? "")
       const events: Record<string, unknown> = {
-        read: { type: "result", title: "read", output: "", metadata: { filePath: "a", offset: 1 } },
-        write: { type: "result", title: "write", output: "", metadata: { filePath: "a", bytes: 0 } },
-        edit: { type: "result", title: "edit", output: "", metadata: { filePath: "a", replacements: 0, bytes: 0 } },
-        patch: { type: "result", title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
-        glob: { type: "result", title: "glob", output: "", metadata: { pattern: "*", path: ".", count: 0, truncated: false } },
-        grep: { type: "result", title: "grep", output: "", metadata: { pattern: "x", path: ".", matches: 0, truncated: false } },
-        bash: { type: "result", title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
+        read: { title: "read", output: "", metadata: { filePath: "a", offset: 1 } },
+        write: { title: "write", output: "", metadata: { filePath: "a", bytes: 0 } },
+        edit: { title: "edit", output: "", metadata: { filePath: "a", replacements: 0, bytes: 0 } },
+        patch: { title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
+        glob: { title: "glob", output: "", metadata: { pattern: "*", path: ".", count: 0, truncated: false } },
+        grep: { title: "grep", output: "", metadata: { pattern: "x", path: ".", matches: 0, truncated: false } },
+        bash: { title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
       }
       return completed(events[invocation.tool]!)
     })
@@ -112,11 +116,53 @@ describe("shared Waterbox runtime backend", () => {
       ["read", { filePath: "a" }], ["write", { filePath: "a", content: "" }], ["edit", { filePath: "a", oldString: "a", newString: "b" }], ["patch", { patchText: "x" }], ["glob", { pattern: "*" }], ["grep", { pattern: "x" }], ["bash", { command: "true" }],
     ] as const
     for (const [toolName, arguments_] of inputs) {
-      const events = []
-      for await (const event of backend.executeTool({ ...sandboxInput, toolName, arguments: arguments_ } as never)) events.push(event)
-      expect(events).toHaveLength(1)
+      await expect(backend.executeTool({ ...sandboxInput, toolName, arguments: arguments_ } as never)).resolves.toMatchObject({ title: toolName, output: "" })
     }
     expect(infrastructure.commands).toHaveLength(7)
+  })
+
+  test.skipIf(process.platform === "win32")("parses plain results serialized by the real CLI, including escaped maximum Bash output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "waterbox-provider-runtime-"))
+    const worker = new URL("../../sandbox-cli/test/async-worker.ts", import.meta.url).pathname
+    let yieldAfterMs = 2_000
+    try {
+      const { backend } = await backendWith(async input => {
+        const payload = input.script.match(/'([^']+)'$/)?.[1] ?? ""
+        const invocation = decodeInvocation(payload)
+        let stdout = ""
+        const code = await runCli(["run", payload], {
+          workspaceRoot: root,
+          asyncBash: { jobRoot: join(root, "jobs"), workerExecutable: process.execPath, workerArguments: [worker, root, join(root, "jobs")], yieldAfterMs },
+          io: { stdout: value => { stdout += value }, stderr: () => {} },
+        })
+        expect(code).toBe(0)
+        expect(invocation.tool).toBe("bash")
+        return line(stdout)
+      })
+
+      await expect(backend.executeTool({ ...sandboxInput, toolName: "bash", arguments: { command: "printf quick" } })).resolves.toMatchObject({ outcome: "completed", output: "quick", metadata: { exitCode: 0 } })
+      await expect(backend.executeTool({ ...sandboxInput, toolName: "bash", arguments: { command: "printf failed; exit 7" } })).resolves.toMatchObject({ outcome: "completed", output: "failed", metadata: { exitCode: 7 } })
+      yieldAfterMs = 0
+      await expect(backend.executeTool({ ...sandboxInput, toolName: "bash", arguments: { command: "sleep 0.1" } })).resolves.toMatchObject({ outcome: "dispatched", metadata: { jobId: expect.stringMatching(/^job_/) } })
+      yieldAfterMs = 2_000
+      const escaped = await backend.executeTool({ ...sandboxInput, toolName: "bash", arguments: { command: `${JSON.stringify(process.execPath)} -e 'process.stdout.write(Buffer.alloc(1048576, 0))'` } })
+      expect(escaped).toMatchObject({ outcome: "completed", metadata: { outputTruncated: false } })
+      expect(Buffer.byteLength(escaped.output)).toBe(1_048_576)
+      expect(escaped.output).toBe("\0".repeat(1_048_576))
+      expect(Buffer.byteLength(JSON.stringify(escaped))).toBeLessThanOrEqual(8 * 1_024 * 1_024)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("preserves an ambiguous command dispatch when caller cancellation races it", async () => {
+    const controller = new AbortController()
+    const { backend } = await backendWith(() => {
+      controller.abort(new DOMException("caller left", "AbortError"))
+      throw new ProviderError("ambiguous_execution", "response lost")
+    })
+    await expect(backend.executeTool({ ...sandboxInput, signal: controller.signal, toolName: "read", arguments: { filePath: "a" } })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    await expect(backend.executeTool({ ...sandboxInput, signal: AbortSignal.abort(new DOMException("before dispatch", "AbortError")), toolName: "read", arguments: { filePath: "a" } })).rejects.toMatchObject({ name: "AbortError" })
   })
 
   test("writes only ciphertext, consumes it once, and composes bounded Bash observation and cleanup", async () => {
@@ -157,12 +203,11 @@ describe("shared Waterbox runtime backend", () => {
     expect(await backend.stopResume?.resume(sandboxInput)).toMatchObject({ state: "running", providerRef: sandboxInput.providerRef })
     const snapshot = await backend.snapshots?.create({ accountId: "account", snapshotId: "snap_silver-forest-a1" as never, sandboxRef: sandboxInput.providerRef, signal })
     expect(snapshot).toMatchObject({ state: "ready", providerRef: { fakeSnapshot: "snap_silver-forest-a1" } })
-    const first = async (events: AsyncIterable<unknown>) => { for await (const event of events) return event }
     const rejected = backend.executeTool({ ...sandboxInput, toolName: "read", arguments: { filePath: "a" } })
-    await expect(first(rejected)).rejects.toMatchObject({ kind: "failure" })
+    await expect(rejected).rejects.toMatchObject({ kind: "failure" })
     infrastructure.commandHandler = input => input.script.includes("run") ? { exitCode: null, stdout: new Uint8Array(), stderr: new Uint8Array(), timedOut: true, stdoutTruncated: false, stderrTruncated: false } : completed({})
     const ambiguous = backend.executeTool({ ...sandboxInput, toolName: "read", arguments: { filePath: "a" } })
-    await expect(first(ambiguous)).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    await expect(ambiguous).rejects.toMatchObject({ kind: "ambiguous_execution" })
   })
 
   test("propagates an optional exact snapshot source observation without provider interpretation", async () => {

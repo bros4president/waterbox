@@ -1,4 +1,4 @@
-import { SandboxPageSchema, SandboxSchema, SnapshotPageSchema, SnapshotSchema, type Sandbox, type Snapshot } from "../packages/sandbox-contracts/src/index.ts"
+import { BashToolResultSchema, EditToolResultSchema, GlobToolResultSchema, GrepToolResultSchema, MAX_TOOL_RESULT_BYTES, PatchToolResultSchema, ReadToolResultSchema, SandboxPageSchema, SandboxSchema, SnapshotPageSchema, SnapshotSchema, WriteToolResultSchema, type Sandbox, type Snapshot, type ToolName } from "../packages/sandbox-contracts/src/index.ts"
 
 const SANDBOX_TERMINAL = new Set(["terminated", "failed"])
 const SNAPSHOT_TERMINAL = new Set(["deleted", "failed"])
@@ -29,7 +29,7 @@ export async function runBoxSmoke(config: SmokeConfig, deps: SmokeDependencies =
     await api.tool(first.sandboxId, "edit", { filePath: "/home/user/workspace/smoke.txt", oldString: "alpha", newString: "beta" })
     await api.tool(first.sandboxId, "patch", { patchText: "*** Begin Patch\n*** Add File: /home/user/workspace/patched.txt\n+patched\n*** End Patch" })
     await api.tool(first.sandboxId, "glob", { pattern: "*.txt", path: "/home/user/workspace" }); await api.tool(first.sandboxId, "grep", { pattern: "beta", path: "/home/user/workspace" })
-    await api.tool(first.sandboxId, "bash", { command: "printf first; sleep 1; printf second" }, true)
+    await api.tool(first.sandboxId, "bash", { command: "printf first; sleep 1; printf second" })
     await api.post(`/v1/sandboxes/${first.sandboxId}/stop`); await api.waitSandbox(first.sandboxId, "stopped")
     await api.tool(first.sandboxId, "read", { filePath: "/home/user/workspace/smoke.txt" }); await api.waitSandbox(first.sandboxId, "running")
     const snapshot = await api.createSnapshot(first.sandboxId, marker); snapshots.add(snapshot.snapshotId); await api.waitSnapshot(snapshot.snapshotId, "ready")
@@ -97,13 +97,14 @@ export class SmokeApi {
   async wait<T extends { state: string }>(read: () => Promise<T>, expected: string, terminal: ReadonlySet<string>) { const deadline = this.deps.now() + this.config.pollTimeoutMs; while (this.deps.now() <= deadline) { const item = await read(); if (item.state === expected) return item; if (terminal.has(item.state)) throw new Error("Control-plane smoke resource entered an unexpected terminal state"); await this.deps.sleep(this.config.pollIntervalMs) } throw new Error("Control-plane smoke reconciliation timed out") }
   async deleteSandboxAndWait(id: string) { if ((await this.getSandbox(id)).state !== "terminated") await this.request(`/v1/sandboxes/${id}`, { method: "DELETE" }); return this.waitSandbox(id, "terminated") }
   async deleteSnapshotAndWait(id: string) { if ((await this.getSnapshot(id)).state !== "deleted") await this.request(`/v1/snapshots/${id}`, { method: "DELETE" }); return this.waitSnapshot(id, "deleted") }
-  async tool(id: string, name: string, body: unknown, requireIncremental = false) {
+  async tool(id: string, name: ToolName, body: unknown) {
     const response = await this.request(`/v1/sandboxes/${id}/tools/${name}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
-    if (!response.body) throw safeFailure(); const reader = response.body.pipeThrough(new TextDecoderStream()).getReader(); let pending = "", firstAt: number | undefined, finalAt: number | undefined; const events: unknown[] = []
-    while (true) { const item = await reader.read(); if (item.done) break; pending += item.value; let newline: number; while ((newline = pending.indexOf("\n")) >= 0) { const line = pending.slice(0, newline); pending = pending.slice(newline + 1); if (!line) continue; let event: { type?: string }; try { event = JSON.parse(line) as { type?: string } } catch { throw new Error("Control-plane smoke tool stream was invalid") }; events.push(event); if ((event.type === "stdout" || event.type === "stderr") && firstAt === undefined) firstAt = this.deps.now(); if (event.type === "result") finalAt = this.deps.now() } }
-    if (pending || finalAt === undefined) throw new Error("Control-plane smoke tool stream ended without a result"); const incremental = firstAt !== undefined && finalAt > firstAt; if (requireIncremental && !incremental) throw new Error("Control-plane smoke tool stream was not incremental"); return { events, incremental }
+    if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/json") { await response.body?.cancel().catch(() => undefined); throw safeFailure() }
+    return toolResultSchemas[name].parse(await boundedJson(response, MAX_TOOL_RESULT_BYTES))
   }
 }
+const toolResultSchemas = { read: ReadToolResultSchema, write: WriteToolResultSchema, edit: EditToolResultSchema, patch: PatchToolResultSchema, glob: GlobToolResultSchema, grep: GrepToolResultSchema, bash: BashToolResultSchema } as const
+async function boundedJson(response: Response, maximum: number): Promise<unknown> { if (!response.body) throw safeFailure(); const reader = response.body.getReader(), chunks: Uint8Array[] = []; let length = 0, done = false; try { while (true) { const item = await reader.read(); if (item.done) { done = true; break }; length += item.value.byteLength; if (length > maximum) throw safeFailure(); chunks.push(item.value) } const bytes = new Uint8Array(length); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength } return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) } finally { if (!done) await reader.cancel().catch(() => undefined); reader.releaseLock() } }
 function positive(value: string | undefined, fallback: number) { if (value === undefined) return fallback; const number = Number(value); if (!Number.isInteger(number) || number <= 0) throw new Error("Box smoke configuration is invalid"); return number }
 function safeFailure(status?: number) { return new Error(status === undefined ? "Control-plane smoke transport failed" : `Control-plane smoke request failed (${status})`) }
 if (import.meta.main) console.log(JSON.stringify(await runBoxSmoke(parseSmokeConfig(process.env))))
