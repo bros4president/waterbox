@@ -36,6 +36,11 @@ if (mode === "cli") {
     ...common,
     entryPoints: [resolve(packageRoot, "src/public.ts")],
     outfile: resolve(dist, "index.js"),
+    alias: {
+      // provider-runtime uses a contracts export newer than the published alpha dependency.
+      "@waterbox/contracts": resolve(root, "packages/sandbox-contracts/src/index.ts"),
+      "@waterbox/provider-runtime": resolve(root, "packages/sandbox-provider-runtime/src/index.ts"),
+    },
     external: ["@waterbox/contracts", "@waterbox/contracts/*", "@waterbox/core", "@waterbox/core/*"],
   })
   await build({

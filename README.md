@@ -2,11 +2,11 @@
 
 Waterbox gives MCP clients coding tools backed by isolated, stateful sandboxes.
 The supported product is a local Node.js stdio server. It opens no listener and
-has no hosted mode.
+can connect to hosted Waterbox or directly to Box or Vercel Sandbox.
 
 ```text
-MCP client -> waterbox stdio -> bundled client -> authenticated in-process API
-           -> core -> local SQLite -> explicitly selected Box or Vercel Sandbox
+MCP client -> waterbox stdio -> bundled client -> hosted Waterbox API
+                                         or -> local SQLite -> direct Box or Vercel Sandbox
 ```
 
 ## Install
@@ -28,15 +28,18 @@ npx waterbox@next status
 npx waterbox@next logout
 ```
 
-Setup requires an interactive terminal. It stores Box API keys and Vercel
-tokens only in the native keyring; only non-secret settings are written to
-`~/.waterbox/config.json`. Persisted setup always uses the official Box
-endpoint or Vercel API origin. Restart the MCP client after a change.
+Setup requires an interactive terminal. It stores the selected Waterbox API key,
+Box API key, or Vercel token only in the native keyring; only non-secret settings
+are written to `~/.waterbox/config.json`. Hosted Waterbox always uses the pinned
+`https://api.waterbox.ai/` endpoint. Restart the MCP client after a change.
 
 If the native keyring is unavailable, configure the MCP process through your
 client's environment or secret facility. Select exactly one provider:
 
 ```text
+WATERBOX_PROVIDER=waterbox
+WATERBOX_API_KEY=<client-managed secret>
+
 WATERBOX_PROVIDER=box
 BOX_API_KEY=<client-managed secret>
 WATERBOX_AUTO_STOP=40m
@@ -51,8 +54,9 @@ WATERBOX_AUTO_STOP=40m
 `WATERBOX_AUTO_STOP` is required for both direct providers and accepts whole
 minutes or hours, such as `40m` or `6h`. Environment-only configuration may
 additionally set a custom `BOX_API_BASE_URL` or `VERCEL_API_ORIGIN`. Persisted
-keyring credentials can never be redirected to custom endpoints. Waterbox does
-not load `.env` files implicitly. Never put credentials in chat, MCP tool
+keyring credentials can never be redirected to custom endpoints. Hosted
+Waterbox calls always use `https://api.waterbox.ai/`. Waterbox does not load
+`.env` files implicitly. Never put credentials in chat, MCP tool
 arguments, shell history, or committed configuration.
 
 Installation works before provider configuration. The MCP still initializes,
@@ -61,11 +65,12 @@ without opening SQLite, loading an artifact, or contacting a provider.
 
 ## State And Ownership
 
-Local records live in `~/.waterbox/direct.sqlite` by default. Sandboxes persist
-when the MCP process exits. Waterbox operates only on resources recorded in
-that database and never treats provider inventory as proof of ownership. Keep
-the IDs returned by create operations; there is intentionally no
-`list_sandboxes` tool.
+Direct Box/Vercel records live in `~/.waterbox/direct.sqlite` by default.
+Hosted Waterbox records are owned by the hosted service. Sandboxes persist when
+the MCP process exits. Direct mode operates only on resources recorded in that
+database and never treats provider inventory as proof of ownership. Keep the
+IDs returned by create operations; there is intentionally no `list_sandboxes`
+tool.
 
 Changing provider, Box account, Vercel team/project, or another resource-scope
 setting does not stop, migrate, or delete prior resources. They may continue to
@@ -103,4 +108,5 @@ Official MCP registry/catalog publication is deferred. Direct npm installation
 through `npx add-mcp waterbox@next` does not depend on registry metadata.
 
 See [`packages/mcp/README.md`](packages/mcp/README.md) for all environment
-settings and [`CONTRIBUTING.md`](CONTRIBUTING.md) for release gates.
+settings and [`CONTRIBUTING.md`](CONTRIBUTING.md) for release gates. This
+repository contains the stdio client, not the hosted Waterbox service.

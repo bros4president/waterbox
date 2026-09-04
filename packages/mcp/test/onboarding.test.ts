@@ -5,13 +5,13 @@ import { join } from "node:path"
 import { mkdtemp } from "node:fs/promises"
 import { runCli } from "../src/cli.ts"
 import { dispatch } from "../src/dispatch.ts"
-import { automaticStopGuidance, configStorage, credentialState, loadPersisted, resolvedEnvironment, setup, type ConfigStorage, type CredentialStore, type SetupPrompts } from "../src/onboarding.ts"
+import { automaticStopGuidance, configStorage, credentialState, loadPersisted, resolvedEnvironment, setup, type ConfigStorage, type CredentialStore, type Provider, type SetupPrompts } from "../src/onboarding.ts"
 import { deriveProviderConfigurationId, parseLocalProviderConfiguration } from "@waterbox/control-plane-local"
 
 const automaticStopProse = "How often should a sandbox be automatically stopped?\n\nImportant: a stopped sandbox is automatically resumed by the next coding operation. This is not a limit on total sandbox runtime or spending.\n\nThis is a safety mechanism that limits wasted compute if the agent does not stop a sandbox when finished. Agents are instructed to stop unused sandboxes, but this is not enforced.\n\nA short duration, such as 40m, minimizes wasted compute but may interrupt long-running commands. For long workflows, consider 6h or more. Provider limits apply, so check your plan's maximum execution time."
 
 function fakeStorage(initial?: string): ConfigStorage & { value?: string; writes: number; failWrite: boolean; removes: number } { return { value: initial, writes: 0, failWrite: false, removes: 0, async read() { return this.value }, async write(value) { this.writes += 1; if (this.failWrite) throw new Error("write failed"); this.value = value }, async remove() { this.removes += 1; this.value = undefined } } }
-function fakeCredentials(values: Partial<Record<"box" | "vercel", string>> = {}): CredentialStore & { inaccessible: boolean; fail?: "set" | "delete-box" | "delete-vercel"; values: Partial<Record<"box" | "vercel", string>> } { return { values, inaccessible: false, async get(provider) { if (this.inaccessible) throw new Error("locked"); return this.values[provider] }, async set(provider, secret) { if (this.inaccessible || this.fail === "set") throw new Error("locked"); this.values[provider] = secret }, async delete(provider) { if (this.inaccessible || this.fail === `delete-${provider}`) throw new Error("locked"); const present = this.values[provider] !== undefined; delete this.values[provider]; return present } } }
+function fakeCredentials(values: Partial<Record<Provider, string>> = {}): CredentialStore & { inaccessible: boolean; fail?: "set" | "delete-box" | "delete-vercel" | "delete-waterbox"; values: Partial<Record<Provider, string>> } { return { values, inaccessible: false, async get(provider) { if (this.inaccessible) throw new Error("locked"); return this.values[provider] }, async set(provider, secret) { if (this.inaccessible || this.fail === "set") throw new Error("locked"); this.values[provider] = secret }, async delete(provider) { if (this.inaccessible || this.fail === `delete-${provider}`) throw new Error("locked"); const present = this.values[provider] !== undefined; delete this.values[provider]; return present } } }
 const boxPrompts: SetupPrompts = { async selectProvider() { return "box" }, async input(_message, initial) { return initial }, async secret() { return "box-secret" }, async confirm() { return true } }
 const boxSettings = { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, automaticStopMs: 2_400_000 }
 const vercelSettings = { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, requestTimeoutMs: 30000 as const, automaticStopMs: 2_400_000 }
@@ -29,6 +29,37 @@ describe("native-keyring onboarding", () => {
     expect((await resolvedEnvironment({}, vercel, fakeCredentials({ vercel: "secret" }))).environment).toMatchObject({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team" })
     const explicit = await resolvedEnvironment({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "environment-secret" }, vercel, fakeCredentials({ vercel: "persisted-secret" }))
     expect(explicit.environment).not.toHaveProperty("VERCEL_TOKEN")
+  })
+
+  test("stores hosted setup as strict non-secret metadata and hydrates its keyring key", async () => {
+    const storage = fakeStorage(), credentials = fakeCredentials()
+    const prompts: SetupPrompts = { async selectProvider() { return "waterbox" }, async input() { throw new Error("hosted setup has no local settings") }, async secret() { return "hosted-secret" }, async confirm() { throw new Error("first setup must not warn") } }
+    await setup(storage, credentials, prompts)
+    expect(storage.value).toBe(JSON.stringify({ version: 2, provider: "waterbox" }))
+    expect(credentials.values).toEqual({ waterbox: "hosted-secret" })
+    expect((await resolvedEnvironment({}, storage, credentials)).environment).toEqual({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "hosted-secret" })
+  })
+
+  test("hosted credential replacement and provider switches require confirmation when identity cannot be proven", async () => {
+    const raw = JSON.stringify({ version: 2, provider: "waterbox" })
+    for (const provider of ["waterbox", "box"] as const) {
+      const storage = fakeStorage(raw), credentials = fakeCredentials({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
+      const prompts: SetupPrompts = provider === "waterbox"
+        ? { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "replacement-hosted" }, async confirm() { return false } }
+        : { ...boxPrompts, async confirm() { return false } }
+      await expect(setup(storage, credentials, prompts)).rejects.toThrow("canceled")
+      expect(storage.value).toBe(raw)
+      expect(credentials.values).toEqual({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
+    }
+  })
+
+  test("re-running hosted setup with the same key does not warn", async () => {
+    let confirmations = 0
+    const storage = fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" }))
+    await setup(storage, fakeCredentials({ waterbox: "hosted-secret" }), {
+      async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "hosted-secret" }, async confirm() { confirmations += 1; return false },
+    })
+    expect(confirmations).toBe(0)
   })
 
   test("persists and hydrates automatic stop without changing resource scope", async () => {
@@ -68,6 +99,7 @@ describe("native-keyring onboarding", () => {
         ? parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "box-secret", BOX_API_BASE_URL: boxSettings.apiBaseUrl, WATERBOX_AUTO_STOP: "40m" }, "/users/test")
         : parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "vercel-secret", VERCEL_API_ORIGIN: vercelSettings.apiOrigin, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
       expect(fromKeyring.provider.providerConfigurationId).toBe(fromEnvironment.provider.providerConfigurationId)
+      if (persisted.provider === "waterbox") throw new Error("Expected direct persisted configuration")
       expect(fromKeyring.provider.providerConfigurationId).toBe(persisted.providerConfigurationId)
     }
 
@@ -316,7 +348,9 @@ describe("native-keyring onboarding", () => {
   test("logout describes its strictly local effect", async () => {
     const output: string[] = []
     const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
-    expect(await runCli(["logout"], { storage, credentials: fakeCredentials({ box: "box", vercel: "vercel" }), environment: {}, write: line => output.push(line), error() {} })).toBe(0)
+    const credentials = fakeCredentials({ waterbox: "hosted", box: "box", vercel: "vercel" })
+    expect(await runCli(["logout"], { storage, credentials, environment: {}, write: line => output.push(line), error() {} })).toBe(0)
+    expect(credentials.values).toEqual({})
     expect(output).toEqual(["Waterbox local configuration and stored credentials removed. Remote resources and local SQLite records were not deleted."])
   })
 
@@ -429,6 +463,27 @@ describe("native-keyring onboarding", () => {
     expect(credentials.values).toEqual({ box: "old-box", vercel: "old-vercel" })
   })
 
+  test("hosted setup rollback restores all three credentials", async () => {
+    const storage = fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" })); storage.failWrite = true
+    const credentials = fakeCredentials({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
+    await expect(setup(storage, credentials, { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "replacement-hosted" }, async confirm() { return true } })).rejects.toThrow("rollback could not be confirmed")
+    expect(credentials.values).toEqual({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
+  })
+
+  test("setup reports unconfirmed rollback when deleting a newly written credential returns false", async () => {
+    const storage = fakeStorage(); storage.failWrite = true
+    let hosted: string | undefined
+    const credentials: CredentialStore = {
+      async get(provider) { return provider === "waterbox" ? hosted : undefined },
+      async set(provider, secret) { if (provider === "waterbox") hosted = secret },
+      async delete(provider) { return provider !== "waterbox" },
+    }
+    let message = ""
+    try { await setup(storage, credentials, { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "hosted-secret" }, async confirm() { return true } }) } catch (error) { message = String(error) }
+    expect(message).toContain("rollback could not be confirmed")
+    expect(message).not.toContain("hosted-secret")
+  })
+
   test("setup rejects malformed persisted configuration before mutation", async () => {
     const storage = fakeStorage('{"version":1,"provider":"box","secret":"bad"}')
     const credentials = fakeCredentials()
@@ -446,12 +501,39 @@ describe("native-keyring onboarding", () => {
     expect(events).toEqual(["set", "write"])
   })
 
-  test("logout attempts both deletes and retains config when either delete fails", async () => {
-    for (const failure of ["delete-box", "delete-vercel"] as const) {
-      const storage = fakeStorage("{}"), credentials = fakeCredentials({ box: "box", vercel: "vercel" }); credentials.fail = failure
+  test("logout restores all credentials and config after a Waterbox or partial deletion failure", async () => {
+    for (const failure of ["delete-waterbox", "delete-box", "delete-vercel"] as const) {
+      const storage = fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" })), credentials = fakeCredentials({ waterbox: "hosted", box: "box", vercel: "vercel" }); credentials.fail = failure
       await expect(runCli(["logout"], { storage, credentials, environment: {}, write() {}, error() {} })).resolves.toBe(1)
-      expect(storage.value).toBe("{}"); expect(storage.removes).toBe(0)
+      expect(storage.value).toBe(JSON.stringify({ version: 2, provider: "waterbox" }))
+      expect(credentials.values).toEqual({ waterbox: "hosted", box: "box", vercel: "vercel" })
     }
+  })
+
+  test("logout treats a false deletion result for an existing credential as transactional failure", async () => {
+    const storage = fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" }))
+    const values: Partial<Record<Provider, string>> = { waterbox: "hosted", box: "box", vercel: "vercel" }
+    const credentials: CredentialStore = {
+      async get(provider) { return values[provider] }, async set(provider, secret) { values[provider] = secret },
+      async delete(provider) { if (provider === "waterbox") return false; delete values[provider]; return true },
+    }
+    const errors: string[] = []
+    expect(await runCli(["logout"], { storage, credentials, environment: {}, write() {}, error: line => errors.push(line) })).toBe(1)
+    expect(values).toEqual({ waterbox: "hosted", box: "box", vercel: "vercel" })
+    expect(storage.value).toBe(JSON.stringify({ version: 2, provider: "waterbox" }))
+    expect(errors.join("\n")).not.toContain("hosted")
+  })
+
+  test("logout restores credentials and hosted config when config removal fails", async () => {
+    let raw: string | undefined = JSON.stringify({ version: 2, provider: "waterbox" })
+    const storage: ConfigStorage = { async read() { return raw }, async write(value) { raw = value }, async remove() { raw = undefined; throw new Error("remove failed") } }
+    const values: Partial<Record<Provider, string>> = { waterbox: "hosted", box: "box", vercel: "vercel" }
+    const credentials: CredentialStore = { async get(provider) { return values[provider] }, async set(provider, secret) { values[provider] = secret }, async delete(provider) { delete values[provider]; return true } }
+    const errors: string[] = []
+    expect(await runCli(["logout"], { storage, credentials, environment: {}, write() {}, error: line => errors.push(line) })).toBe(1)
+    expect(raw).toBe(JSON.stringify({ version: 2, provider: "waterbox" }))
+    expect(values).toEqual({ waterbox: "hosted", box: "box", vercel: "vercel" })
+    expect(errors.join("\n")).not.toContain("hosted")
   })
 
   test("bin dispatch keeps zero arguments in MCP mode and sends explicit arguments only to CLI", async () => {

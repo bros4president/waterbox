@@ -390,6 +390,7 @@ function nonnegativeDuration(value: number | undefined, fallback: number): numbe
 async function requireStatus(response: Response, expected: number, signal: AbortSignal): Promise<void> {
   await propagateResponseAbort(response, signal)
   if (response.status === expected) return
+  if (response.status >= 300 && response.status < 400) { await cancelBody(response); throw clientError("The Waterbox API returned an invalid response", { status: response.status }) }
   if (!response.ok) throw await apiError(response, signal)
   await cancelBody(response)
   throw protocolError()
