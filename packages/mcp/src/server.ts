@@ -19,10 +19,10 @@ const CreateSnapshotInputSchema = CreateSnapshotRequestSchema.extend({ sandboxId
 const SnapshotInputSchema = z.object({ snapshotId: SnapshotIdSchema }).strict()
 const SendFileInputSchema = z.object({ sandboxId: SandboxIdSchema, sourcePath: z.string().min(1).max(4_096), targetPath: FilePathSchema }).strict()
 const tools: Tool[] = [
-  tool("create_sandbox", "Creates a sandbox for coding work, optionally seeded from a reusable snapshot. First use `list_snapshots` to find relevant snapshots. Unless the user has already specified a choice, present the best-fitting options and ask whether to use one or start fresh. Reuse `idempotencyKey` to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
+  tool("create_sandbox", "Creates a sandbox for coding work, optionally seeded from a reusable snapshot. Reuse `idempotencyKey` to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
   tool("probe_sandbox", "Queries the provider for live sandbox status and reconciles the observed state into Waterbox.", SandboxInputSchema),
   tool("stop_sandbox", "Stops compute while preserving resumable filesystem state, subject to provider behavior. No separate resume step is needed. If more coding work is required, the next coding tool call resumes the sandbox before performing the requested operation. Recommended usage: use it as a cleanup step to avoid spending more compute after the task's material outcomes are complete and available outside the sandbox, for example in a pull request or another exported deliverable. Because resuming adds latency, do not stop merely because a conversational turn has ended.", SandboxInputSchema),
-  tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", CursorPaginationRequestSchema),
+  tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination. Use it to find snapshots referenced by the user by name, description, or intended environment.", CursorPaginationRequestSchema),
   tool("create_snapshot", "Creates a reusable setup snapshot from a running sandbox. Give it a clear name and description so future agents can discover its purpose. This is a setup tool: use snapshots to preserve reusable environments, not for routine pauses or as definitive storage for completed work.", CreateSnapshotInputSchema),
   tool("delete_snapshot", "Permanently deletes a user-owned Waterbox snapshot.", SnapshotInputSchema),
   tool("send_file_securely", "Encrypts and transfers an existing local file to a sandbox without placing its contents in model context or tool arguments. The destination file is decrypted and readable inside the sandbox; avoid reading sensitive destination contents back into model context. The source file is not modified or deleted.", SendFileInputSchema),
@@ -36,7 +36,7 @@ const tools: Tool[] = [
 ]
 
 export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: () => void }, options: { onError?: (error: unknown) => void } = {}): Server {
-  const server = new Server({ name: "waterbox", version: "0.1.0-alpha.1" }, { capabilities: { tools: {} }, instructions })
+  const server = new Server({ name: "waterbox", version: "0.1.0-alpha.2" }, { capabilities: { tools: {} }, instructions })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {

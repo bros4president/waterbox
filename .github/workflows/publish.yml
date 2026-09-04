@@ -2,7 +2,7 @@ name: Publish waterbox
 
 on:
   push:
-    tags: [v0.1.0-alpha.1]
+    tags: [v0.1.0-alpha.2]
 
 permissions:
   contents: read
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/v0.1.0-alpha.1'
+    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/v0.1.0-alpha.2'
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -35,7 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - name: Verify clean tag and version
         run: |
-          test "$(git tag --points-at HEAD)" = "v0.1.0-alpha.1"
+          test "$(git tag --points-at HEAD)" = "v0.1.0-alpha.2"
           test -z "$(git status --porcelain)"
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
           node -e 'const p=require("./packages/mcp/package.json"); if (p.name !== "waterbox" || p.version !== process.env.GITHUB_REF_NAME.slice(1)) process.exit(1)'
@@ -48,7 +48,7 @@ jobs:
         run: test -z "$(git status --porcelain)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: waterbox-0.1.0-alpha.1-release-evidence
+          name: waterbox-0.1.0-alpha.2-release-evidence
           path: ${{ runner.temp }}/waterbox-release/*
           if-no-files-found: error
           retention-days: 90
@@ -56,11 +56,12 @@ jobs:
         run: |
           npm install --global npm@11.19.1
           cd "${RUNNER_TEMP}/waterbox-release"
-          sha256sum --check waterbox-0.1.0-alpha.1.sha256
-          if npm view waterbox@0.1.0-alpha.1 version >/dev/null 2>&1; then
+          sha256sum --check waterbox-0.1.0-alpha.2.sha256
+          if npm view waterbox@0.1.0-alpha.2 version >/dev/null 2>&1; then
             mkdir "${RUNNER_TEMP}/waterbox-registry"
-            npm pack waterbox@0.1.0-alpha.1 --pack-destination "${RUNNER_TEMP}/waterbox-registry" --silent
-            cmp waterbox-0.1.0-alpha.1.tgz "${RUNNER_TEMP}/waterbox-registry/waterbox-0.1.0-alpha.1.tgz"
+            npm pack waterbox@0.1.0-alpha.2 --pack-destination "${RUNNER_TEMP}/waterbox-registry" --silent
+            cmp waterbox-0.1.0-alpha.2.tgz "${RUNNER_TEMP}/waterbox-registry/waterbox-0.1.0-alpha.2.tgz"
           else
-            npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.1.tgz" --provenance --access public --tag next
+            npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.2.tgz" --provenance --access public --tag latest
           fi
+          test "$(npm view waterbox@latest version)" = "0.1.0-alpha.2"
