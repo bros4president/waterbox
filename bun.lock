@@ -22,6 +22,7 @@
         "@waterbox/contracts": "workspace:*",
         "@waterbox/control-plane-local": "workspace:*",
         "@waterbox/core": "workspace:*",
+        "@waterbox/provider-runtime": "workspace:*",
         "add-mcp": "2.3.0",
         "esbuild": "0.25.9",
         "publint": "0.3.24",
@@ -148,11 +149,10 @@
     },
     "packages/sandbox-provider-box": {
       "name": "@waterbox/provider-box",
+      "version": "0.1.0-alpha.1",
       "dependencies": {
-        "@waterbox/cli": "workspace:*",
-        "@waterbox/contracts": "workspace:*",
-        "@waterbox/core": "workspace:*",
-        "@waterbox/provider-runtime": "workspace:*",
+        "@waterbox/contracts": "0.1.0-alpha.1",
+        "@waterbox/core": "0.1.0-alpha.1",
       },
     },
     "packages/sandbox-provider-runtime": {
