@@ -21,7 +21,7 @@ const SendFileInputSchema = z.object({ sandboxId: SandboxIdSchema, sourcePath: z
 const tools: Tool[] = [
   tool("create_sandbox", "Creates a Waterbox sandbox. Reuse idempotencyKey to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
   tool("probe_sandbox", "Queries the provider for live sandbox status and reconciles the observed state into Waterbox.", SandboxInputSchema),
-  tool("stop_sandbox", "Stops compute while preserving resumable state. Coding operations automatically resume it. Use after the current task is complete and expected material outcomes are exported or otherwise preserved; resuming adds latency, so do not stop merely at every conversational turn.", SandboxInputSchema),
+  tool("stop_sandbox", "Stops compute while preserving resumable filesystem state, subject to provider behavior. No separate resume step is needed. If more coding work is required, the next coding tool call resumes the sandbox before performing the requested operation. Recommended usage: use it as a cleanup step to avoid spending more compute after the task's material outcomes are complete and available outside the sandbox, for example in a pull request or another exported deliverable. Because resuming adds latency, do not stop merely because a conversational turn has ended.", SandboxInputSchema),
   tool("delete_sandbox", "Permanently deletes a user-owned Waterbox sandbox.", SandboxInputSchema),
   tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", CursorPaginationRequestSchema),
   tool("create_snapshot", "Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.", CreateSnapshotInputSchema),
