@@ -14,7 +14,7 @@ class AdvancingClock implements VercelProviderClock {
   now(): number { return this.#now }
   async sleep(milliseconds: number, value: AbortSignal): Promise<void> { value.throwIfAborted(); this.#now += milliseconds }
 }
-const config = { apiOrigin: "https://vercel.test", token: "test-token", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 10, requestTimeoutMs: 5 } }
+const config = { apiOrigin: "https://vercel.test", token: "test-token", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 10, requestTimeoutMs: 5 }, automaticStopMs: 7_200_000 }
 const createInput = { accountId: "account", sandboxId: "sbx_calm-river-a1" as never, idempotencyKey: "once", signal: signal() }
 const artifactBytes = new TextEncoder().encode("#!/usr/bin/env node\nconsole.log('waterbox')\n")
 const artifact: SandboxRuntimeArtifact = { bytes: artifactBytes, sha256: createHash("sha256").update(artifactBytes).digest("hex"), cliProtocolVersion: 2, artifactVersion: "0.1.0" }
@@ -33,6 +33,11 @@ function account() { return "9af211329b2fc82e5efe9060" }
 function name() { return "waterbox-sbx-calm-river-a1-e3ec51d770cb" }
 
 describe("Vercel primitive REST adapter", () => {
+  test("rejects configuration without automatic stop", () => {
+    const { automaticStopMs: _, ...missingAutomaticStop } = config
+    expect(() => new VercelSandboxInfrastructure(missingAutomaticStop as any, { clock: new Clock() })).toThrow("configuration")
+  })
+
   test("assembles the native primitive through the shared runtime with Vercel-only path mechanics", async () => {
     const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
     const commands: { args: string[]; cwd?: string }[] = []
@@ -78,11 +83,11 @@ describe("Vercel primitive REST adapter", () => {
     const body = await requests[0]!.json() as Record<string, unknown>
     expect(body).toMatchObject({ name: name(), projectId: "project", persistent: true })
     expect(body).not.toHaveProperty("snapshotExpiration")
-    expect(body).not.toHaveProperty("timeout")
+    expect(body).toMatchObject({ timeout: 7_200_000 })
     expect(body).not.toHaveProperty("keepLastSnapshots")
   })
 
-  test("sends exact timeout milliseconds only for a configured automatic stop", async () => {
+  test("always sends exact timeout milliseconds", async () => {
     const requests: Request[] = []
     const value = new VercelSandboxInfrastructure({ ...config, automaticStopMs: 7_200_000 }, {
       clock: new Clock(),

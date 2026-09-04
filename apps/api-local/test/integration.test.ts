@@ -109,7 +109,7 @@ async function fixture(ids = [sandboxId, secondSandboxId]) {
   const provider = new DaemonBackedProvider(`http://127.0.0.1:${daemonServer.port}`)
   const config: LocalApiConfig = {
     host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: apiKey, accountId,
-    box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", polling: { intervalMs: 1, timeoutMs: 10 } },
+    box: { apiBaseUrl: "https://ascii.dev/api/box/v1", apiKey: "unused-test-placeholder", polling: { intervalMs: 1, timeoutMs: 10 }, automaticStopMs: 2_400_000 },
   }
   const create = () => createLocalControlPlane({
     sqlitePath: config.sqlitePath,
@@ -195,7 +195,7 @@ describe("local API composition", () => {
     const directory = await mkdtemp(join(tmpdir(), "waterbox-api-local-clean-"))
     const config: LocalApiConfig = {
       host: "127.0.0.1", port: 0, sqlitePath: join(directory, "control-plane.sqlite"), developmentApiKey: "placeholder-development-key", accountId,
-      box: { apiBaseUrl: "https://api.box.invalid", apiKey: "placeholder-not-a-live-key", polling: { intervalMs: 1, timeoutMs: 10 } },
+      box: { apiBaseUrl: "https://api.box.invalid", apiKey: "placeholder-not-a-live-key", polling: { intervalMs: 1, timeoutMs: 10 }, automaticStopMs: 2_400_000 },
     }
     const plane = await createLocalControlPlane({
       sqlitePath: config.sqlitePath,
@@ -213,6 +213,7 @@ describe("local API composition", () => {
     expect(error).toBeInstanceOf(LocalConfigurationError)
     expect(String(error)).not.toContain(apiKey)
     expect(String(error)).not.toContain("box-secret")
+    expect(() => parseLocalApiConfig(raw)).toThrow(LocalConfigurationError)
     const context = await fixture()
     expect((await fetch(`${context.baseUrl}/v1/sandboxes`)).status).toBe(401)
     expect((await fetch(`${context.baseUrl}/v1/sandboxes`, { headers: { authorization: "Bearer wrong" } })).status).toBe(401)

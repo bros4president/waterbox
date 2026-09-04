@@ -36,7 +36,7 @@ export interface VercelProviderConfig {
   teamId: string
   projectId: string
   polling: { intervalMs: number; timeoutMs: number; requestTimeoutMs: number }
-  automaticStopMs?: number
+  automaticStopMs: number
 }
 export interface VercelInfrastructureDependencies { fetch?: VercelProviderFetch; clock: VercelProviderClock; diagnostic?: (event: VercelProviderDiagnostic) => void }
 export type VercelProviderDiagnostic = { type: "http"; operation: "read" | "mutation"; status: number } | { type: "command-log-invalid" }
@@ -118,7 +118,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     if (!dependencies || !dependencies.clock || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function" || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function")) throw new TypeError("Vercel provider dependencies are invalid")
     const now = dependencies.clock.now()
     if (!Number.isFinite(now)) throw new TypeError("Vercel provider dependencies are invalid")
-    this.#config = { ...config, apiOrigin: normalizedOrigin(config.apiOrigin), polling: { ...config.polling }, ...(config.automaticStopMs === undefined ? {} : { automaticStopMs: config.automaticStopMs }) }
+    this.#config = { ...config, apiOrigin: normalizedOrigin(config.apiOrigin), polling: { ...config.polling }, automaticStopMs: config.automaticStopMs }
     this.#fetch = dependencies.fetch ?? fetch
     this.#clock = dependencies.clock
     this.#diagnostic = dependencies.diagnostic
@@ -131,7 +131,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     const body = {
       name, projectId: this.#config.projectId, persistent: true,
       tags: { [OWNER_TAG]: owner, [ACCOUNT_TAG]: account },
-      ...(this.#config.automaticStopMs === undefined ? {} : { timeout: this.#config.automaticStopMs }),
+      timeout: this.#config.automaticStopMs,
       ...(input.sourceSnapshotRef === undefined ? {} : { source: { type: "snapshot", snapshotId: snapshotRef(input.sourceSnapshotRef).id } }),
     }
     try {
@@ -515,7 +515,7 @@ export class VercelSandboxProvider implements SandboxProvider {
 
 class VercelHttpError extends ProviderError { constructor(readonly status: number) { super("failure", `Vercel request failed (${status})`) } }
 class VercelAmbiguousError extends ProviderError { constructor(message: string, readonly createReconciliationAllowed = false) { super("ambiguous_execution", message) } }
-function isConfig(value: unknown): value is VercelProviderConfig { return record(value) && exactSome(value, ["apiOrigin", "token", "teamId", "projectId", "polling"], ["automaticStopMs"]) && strings(value.apiOrigin, value.token, value.teamId, value.projectId) && record(value.polling) && exact(value.polling, ["intervalMs", "timeoutMs", "requestTimeoutMs"]) && Number.isSafeInteger(value.polling.intervalMs) && value.polling.intervalMs > 0 && Number.isSafeInteger(value.polling.timeoutMs) && value.polling.timeoutMs >= value.polling.intervalMs && Number.isSafeInteger(value.polling.requestTimeoutMs) && value.polling.requestTimeoutMs > 0 && value.polling.requestTimeoutMs <= value.polling.timeoutMs && (value.automaticStopMs === undefined || automaticStopMilliseconds(value.automaticStopMs)) }
+function isConfig(value: unknown): value is VercelProviderConfig { return record(value) && exact(value, ["apiOrigin", "token", "teamId", "projectId", "polling", "automaticStopMs"]) && strings(value.apiOrigin, value.token, value.teamId, value.projectId) && record(value.polling) && exact(value.polling, ["intervalMs", "timeoutMs", "requestTimeoutMs"]) && Number.isSafeInteger(value.polling.intervalMs) && value.polling.intervalMs > 0 && Number.isSafeInteger(value.polling.timeoutMs) && value.polling.timeoutMs >= value.polling.intervalMs && Number.isSafeInteger(value.polling.requestTimeoutMs) && value.polling.requestTimeoutMs > 0 && value.polling.requestTimeoutMs <= value.polling.timeoutMs && automaticStopMilliseconds(value.automaticStopMs) }
 function exact(value: Record<string, unknown>, required: readonly string[]): boolean { const keys = Object.keys(value); return keys.length === required.length && required.every(key => Object.hasOwn(value, key)) }
 function automaticStopMilliseconds(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value % 60_000 === 0 }
 function strings(...values: unknown[]): boolean { return values.every(value => typeof value === "string" && value.length > 0 && value === value.trim()) }

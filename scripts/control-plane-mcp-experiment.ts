@@ -218,7 +218,7 @@ async function main(): Promise<void> {
   const developmentApiKey = crypto.randomUUID(), accountId = `experiment-${crypto.randomUUID()}`, idempotencyKey = `experiment-${crypto.randomUUID()}`
   const config: LocalApiConfig = {
     host: "127.0.0.1", port: 1, sqlitePath, developmentApiKey, accountId,
-    box: { apiBaseUrl: baseUrl, apiKey: boxApiKey, polling: { intervalMs: 1_000, timeoutMs: 30_000 } },
+    box: { apiBaseUrl: baseUrl, apiKey: boxApiKey, polling: { intervalMs: 1_000, timeoutMs: 30_000 }, automaticStopMs: 2_400_000 },
   }
   const runtimeArtifact = await loadDevelopmentRuntimeArtifact()
   const local = await startLocalServer(await createDevelopmentControlPlane(config, runtimeArtifact), { host: "127.0.0.1", port: 0, idleTimeoutSeconds: 60 })

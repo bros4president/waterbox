@@ -41,8 +41,7 @@ export type LocalProviderBindingInput =
  * canonical milliseconds so adapters can retain their native request units
  * without exposing this operational setting through resource-create inputs.
  */
-export function parseAutomaticStopDuration(value: string | undefined, options: { allowBlank?: boolean } = {}): number | undefined {
-  if (value === undefined || options.allowBlank && value === "") return undefined
+export function parseAutomaticStopDuration(value: string | undefined): number {
   const match = typeof value === "string" ? /^([1-9][0-9]*)(m|h)$/.exec(value) : undefined
   if (!match) throw new LocalProviderConfigurationError("WATERBOX_AUTO_STOP must be a positive whole number of minutes or hours, such as 30m or 2h.")
   const amount = Number(match[1]), multiplier = match[2] === "m" ? 60_000 : 3_600_000
@@ -50,8 +49,7 @@ export function parseAutomaticStopDuration(value: string | undefined, options: {
   return amount * multiplier
 }
 
-export function automaticStopEnvironmentValue(milliseconds: number | undefined): string | undefined {
-  if (milliseconds === undefined) return undefined
+export function automaticStopEnvironmentValue(milliseconds: number): string {
   if (!isAutomaticStopMilliseconds(milliseconds)) throw new TypeError("Automatic-stop duration is invalid")
   return `${milliseconds / 60_000}m`
 }
@@ -111,7 +109,7 @@ export function parseLocalProviderConfiguration(
     let apiBaseUrl: string
     try { apiBaseUrl = normalizeBoxApiBaseUrl(environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1") } catch { throw new LocalProviderConfigurationError() }
     const automaticStopMs = parseAutomaticStopDuration(environment.WATERBOX_AUTO_STOP)
-    const config: BoxProviderConfig = { apiBaseUrl, apiKey, polling: { intervalMs, timeoutMs }, ...(automaticStopMs === undefined ? {} : { automaticStopMs }) }
+    const config: BoxProviderConfig = { apiBaseUrl, apiKey, polling: { intervalMs, timeoutMs }, automaticStopMs }
     if (timeoutMs < intervalMs) throw new LocalProviderConfigurationError()
     return { sqlitePath, provider: { kind: "box", config, providerConfigurationId: deriveProviderConfigurationId({ kind: "box", config }) } }
   }
@@ -123,7 +121,7 @@ export function parseLocalProviderConfiguration(
     let apiOrigin: string
     try { apiOrigin = normalizeVercelApiOrigin(environment.VERCEL_API_ORIGIN ?? "https://api.vercel.com") } catch { throw new LocalProviderConfigurationError() }
     const automaticStopMs = parseAutomaticStopDuration(environment.WATERBOX_AUTO_STOP)
-    const config: VercelProviderConfig = { apiOrigin, token, teamId, projectId, polling: { intervalMs, timeoutMs, requestTimeoutMs }, ...(automaticStopMs === undefined ? {} : { automaticStopMs }) }
+    const config: VercelProviderConfig = { apiOrigin, token, teamId, projectId, polling: { intervalMs, timeoutMs, requestTimeoutMs }, automaticStopMs }
     if (timeoutMs < intervalMs || requestTimeoutMs > timeoutMs) throw new LocalProviderConfigurationError()
     return { sqlitePath, provider: { kind: "vercel", config, providerConfigurationId: deriveProviderConfigurationId({ kind: "vercel", config }) } }
   }
@@ -328,13 +326,13 @@ function validateConfiguredMcpBackend(value: LocalConfiguredMcpBackend): void {
   if (!value || !validSqlitePath(value.sqlitePath) || !value.provider || typeof value.provider !== "object") throw new LocalProviderConfigurationError()
   if (value.provider.kind === "box") {
     const config = value.provider.config
-    if (!config || !nonEmpty(config.apiKey) || !positiveNumber(config.polling?.intervalMs) || !positiveNumber(config.polling?.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.automaticStopMs !== undefined && !isAutomaticStopMilliseconds(config.automaticStopMs)) throw new LocalProviderConfigurationError()
+    if (!config || !nonEmpty(config.apiKey) || !positiveNumber(config.polling?.intervalMs) || !positiveNumber(config.polling?.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || !isAutomaticStopMilliseconds(config.automaticStopMs)) throw new LocalProviderConfigurationError()
     try { if (normalizeBoxApiBaseUrl(config.apiBaseUrl) !== config.apiBaseUrl || value.provider.providerConfigurationId !== deriveProviderConfigurationId(value.provider)) throw new Error() } catch { throw new LocalProviderConfigurationError() }
     return
   }
   if (value.provider.kind === "vercel") {
     const config = value.provider.config
-    if (!config || !nonEmpty(config.token) || !nonEmpty(config.teamId) || !nonEmpty(config.projectId) || !positiveNumber(config.polling?.intervalMs) || !positiveNumber(config.polling?.timeoutMs) || !positiveNumber(config.polling?.requestTimeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.polling.requestTimeoutMs > config.polling.timeoutMs || config.automaticStopMs !== undefined && !isAutomaticStopMilliseconds(config.automaticStopMs)) throw new LocalProviderConfigurationError()
+    if (!config || !nonEmpty(config.token) || !nonEmpty(config.teamId) || !nonEmpty(config.projectId) || !positiveNumber(config.polling?.intervalMs) || !positiveNumber(config.polling?.timeoutMs) || !positiveNumber(config.polling?.requestTimeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.polling.requestTimeoutMs > config.polling.timeoutMs || !isAutomaticStopMilliseconds(config.automaticStopMs)) throw new LocalProviderConfigurationError()
     try { if (normalizeVercelApiOrigin(config.apiOrigin) !== config.apiOrigin || value.provider.providerConfigurationId !== deriveProviderConfigurationId(value.provider)) throw new Error() } catch { throw new LocalProviderConfigurationError() }
     return
   }

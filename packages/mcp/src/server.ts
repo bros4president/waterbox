@@ -4,6 +4,7 @@ import { BashToolArgumentsSchema, BashToolResultSchema, CreateSandboxRequestSche
 import { WaterboxClient, WaterboxClientError } from "@waterbox/client"
 import { z } from "zod"
 import { McpConfigurationError } from "./config.ts"
+import { instructions } from "./instructions.ts"
 import { sendFileSecurely } from "./secure-transfer.ts"
 
 const ARGUMENT_SCHEMAS = {
@@ -20,7 +21,7 @@ const SendFileInputSchema = z.object({ sandboxId: SandboxIdSchema, sourcePath: z
 const tools: Tool[] = [
   tool("create_sandbox", "Creates a Waterbox sandbox. Reuse idempotencyKey to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
   tool("probe_sandbox", "Queries the provider for live sandbox status and reconciles the observed state into Waterbox.", SandboxInputSchema),
-  tool("stop_sandbox", "Ends current compute while preserving resumable sandbox state, subject to provider behavior.", SandboxInputSchema),
+  tool("stop_sandbox", "Stops compute while preserving resumable state. Coding operations automatically resume it. Use after the current task is complete and expected material outcomes are exported or otherwise preserved; resuming adds latency, so do not stop merely at every conversational turn.", SandboxInputSchema),
   tool("delete_sandbox", "Permanently deletes a user-owned Waterbox sandbox.", SandboxInputSchema),
   tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", CursorPaginationRequestSchema),
   tool("create_snapshot", "Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.", CreateSnapshotInputSchema),
@@ -36,7 +37,7 @@ const tools: Tool[] = [
 ]
 
 export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: () => void }, options: { onError?: (error: unknown) => void } = {}): Server {
-  const server = new Server({ name: "waterbox", version: "0.1.0-alpha.1" }, { capabilities: { tools: {} } })
+  const server = new Server({ name: "waterbox", version: "0.1.0-alpha.1" }, { capabilities: { tools: {} }, instructions })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {

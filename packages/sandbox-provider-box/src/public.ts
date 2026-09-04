@@ -19,7 +19,7 @@ export interface BoxProviderConfig {
   apiBaseUrl: string
   apiKey: string
   polling: { intervalMs: number; timeoutMs: number }
-  automaticStopMs?: number
+  automaticStopMs: number
 }
 
 export interface SandboxRuntimeArtifact {
