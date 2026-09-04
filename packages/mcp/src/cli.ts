@@ -1,9 +1,9 @@
-import { configStorage, credentialState, credentialVariable, loadPersisted, logout, nativeCredentialStore, OnboardingError, setup, type ConfigStorage, type CredentialStore, type SetupPrompts } from "./onboarding.ts"
+import { configStorage, credentialState, credentialVariable, loadPersisted, logout, nativeCredentialStore, OnboardingError, setup, type CapabilityFetch, type ConfigStorage, type CredentialStore, type SetupPrompts } from "./onboarding.ts"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
 
-export interface CliDependencies { storage?: ConfigStorage; credentials?: CredentialStore; prompts?: SetupPrompts; environment?: Record<string, string | undefined>; interactive?: boolean; write?: (line: string) => void; error?: (line: string) => void }
+export interface CliDependencies { storage?: ConfigStorage; credentials?: CredentialStore; prompts?: SetupPrompts; environment?: Record<string, string | undefined>; fetch?: CapabilityFetch; interactive?: boolean; write?: (line: string) => void; error?: (line: string) => void }
 const standardPrompts: SetupPrompts = {
-  async selectProvider() { const { select } = await import("@inquirer/prompts"); return select({ message: "Provider", choices: [{ name: "Waterbox", value: "waterbox" }, { name: "Box", value: "box" }, { name: "Vercel", value: "vercel" }] }) },
+  async selectProvider(providers) { const { select } = await import("@inquirer/prompts"); return select({ message: "Provider", choices: providers.map(provider => ({ name: provider === "waterbox" ? "Waterbox" : provider === "box" ? "Box" : "Vercel", value: provider })) }) },
   async input(message, initial) { const { input } = await import("@inquirer/prompts"); return input({ message, default: initial }) },
   async secret(message) { const { password } = await import("@inquirer/prompts"); return password({ message, mask: "*" }) },
   async confirm(message) { const { confirm } = await import("@inquirer/prompts"); return confirm({ message, default: false }) },
@@ -16,7 +16,7 @@ export async function runCli(arguments_: string[], dependencies: CliDependencies
   try {
     if (arguments_[0] === "setup") {
       if (!(dependencies.interactive ?? (process.stdin.isTTY === true && process.stdout.isTTY === true))) throw new OnboardingError("Waterbox setup requires an interactive terminal. Use environment-only configuration in non-interactive environments.")
-      const provider = await setup(storage, credentials, dependencies.prompts ?? standardPrompts); write(`Waterbox ${provider} setup completed. Restart the MCP client.`); return 0
+      const provider = await setup(storage, credentials, dependencies.prompts ?? standardPrompts, { environment: dependencies.environment ?? process.env, fetch: dependencies.fetch ?? globalThis.fetch }); write(`Waterbox ${provider} setup completed. Restart the MCP client.`); return 0
     }
     if (arguments_[0] === "logout") { await logout(storage, credentials); write("Waterbox local configuration and stored credentials removed. Remote resources and local SQLite records were not deleted."); return 0 }
     const environment = dependencies.environment ?? process.env

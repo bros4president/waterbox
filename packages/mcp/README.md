@@ -27,6 +27,11 @@ Interactive setup stores only the provider credential in the native keyring.
 Non-secret settings are written atomically to `~/.waterbox/config.json` using
 the exact official direct-provider endpoints `https://ascii.dev/api/box/v1` and
 `https://api.vercel.com/`; hosted Waterbox is pinned to `https://api.waterbox.ai/`.
+Interactive setup shows hosted Waterbox only when its public capability document
+advertises availability. Existing hosted keyring configuration and explicit
+`WATERBOX_PROVIDER=waterbox` environment configuration remain valid independently.
+`FORCE_DISPLAY_WATERBOX=1` is a development/debug override that shows it without
+fetching capabilities.
 Status never prints credentials. Logout removes local settings and all three
 keyring entries but does not alter remote resources or
 the SQLite resource registry.
@@ -58,6 +63,7 @@ tools before filesystem, SQLite, artifact, or provider I/O.
 | --- | --- | --- |
 | `WATERBOX_PROVIDER` | Environment setup: `waterbox`, `box`, or `vercel` | none |
 | `WATERBOX_API_KEY` | Hosted Waterbox environment setup | none |
+| `FORCE_DISPLAY_WATERBOX` | Development/debug interactive-setup override; only `1` enables it | none |
 | `BOX_API_KEY` | Box environment setup | none |
 | `BOX_API_BASE_URL` | Environment-only override | `https://ascii.dev/api/box/v1` |
 | `BOX_POLL_INTERVAL_MS` | No | `1000` |

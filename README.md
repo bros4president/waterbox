@@ -31,7 +31,12 @@ npx waterbox@next logout
 Setup requires an interactive terminal. It stores the selected Waterbox API key,
 Box API key, or Vercel token only in the native keyring; only non-secret settings
 are written to `~/.waterbox/config.json`. Hosted Waterbox always uses the pinned
-`https://api.waterbox.ai/` endpoint. Restart the MCP client after a change.
+`https://api.waterbox.ai/` endpoint. Interactive setup shows hosted Waterbox
+only when its public capability document advertises availability; existing
+hosted configuration and explicit `WATERBOX_PROVIDER=waterbox` plus
+`WATERBOX_API_KEY` remain valid regardless. `FORCE_DISPLAY_WATERBOX=1` is a
+development/debug override that shows hosted Waterbox without a capability
+fetch. Restart the MCP client after a change.
 
 If the native keyring is unavailable, configure the MCP process through your
 client's environment or secret facility. Select exactly one provider:

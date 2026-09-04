@@ -6,6 +6,7 @@ import { ProviderConfigurationIdSchema, type ProviderConfigurationId } from "@wa
 import { automaticStopEnvironmentValue, deriveProviderConfigurationId, parseAutomaticStopDuration, providerCredential, type LocalProviderBindingInput } from "@waterbox/control-plane-local"
 
 export type Provider = "waterbox" | "box" | "vercel"
+export type CapabilityFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 export type CredentialState = "available" | "missing" | "inaccessible"
 export interface CredentialStore { get(provider: Provider): Promise<string | null | undefined>; set(provider: Provider, secret: string): Promise<void>; delete(provider: Provider): Promise<boolean> }
 export interface ConfigStorage { read(): Promise<string | undefined>; write(value: string): Promise<void>; remove(): Promise<void> }
@@ -19,6 +20,9 @@ export const KEYRING_SERVICE = "waterbox"
 export const OFFICIAL_BOX_API_BASE_URL = "https://ascii.dev/api/box/v1"
 export const OFFICIAL_VERCEL_API_ORIGIN = "https://api.vercel.com/"
 export const WATERBOX_API_ORIGIN = "https://api.waterbox.ai/"
+export const WATERBOX_CAPABILITIES_URL = "https://waterbox.ai/.well-known/waterbox-capabilities.json"
+const CAPABILITY_TIMEOUT_MS = 2_000
+const MAX_CAPABILITY_BYTES = 16 * 1024
 const accounts: Record<Provider, string> = { waterbox: "api-key", box: "box-api-key", vercel: "vercel-token" }
 const MAX_CONFIG_BYTES = 64 * 1024
 export const setupGuidance = "Waterbox MCP is not configured. Run npx waterbox@next setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Waterbox: WATERBOX_API_KEY; Box: BOX_API_KEY, WATERBOX_AUTO_STOP; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID, WATERBOX_AUTO_STOP). Do not provide credentials in chat or tool arguments."
@@ -92,13 +96,18 @@ export async function resolvedEnvironment(environment: Record<string, string | u
   return { environment: resolved, source: "keyring", provider: config.provider }
 }
 
-export interface SetupPrompts { selectProvider(): Promise<Provider>; input(message: string, initial: string): Promise<string>; secret(message: string): Promise<string>; confirm(message: string): Promise<boolean> }
+export interface SetupPrompts { selectProvider(providers: readonly Provider[]): Promise<unknown>; input(message: string, initial: string): Promise<string>; secret(message: string): Promise<string>; confirm(message: string): Promise<boolean> }
+export interface SetupDependencies { environment?: Record<string, string | undefined>; fetch?: CapabilityFetch }
 export const automaticStopGuidance = "How often should a sandbox be automatically stopped?\n\nImportant: a stopped sandbox is automatically resumed by the next coding operation. This is not a limit on total sandbox runtime or spending.\n\nThis is a safety mechanism that limits wasted compute if the agent does not stop a sandbox when finished. Agents are instructed to stop unused sandboxes, but this is not enforced.\n\nA short duration, such as 40m, minimizes wasted compute but may interrupt long-running commands. For long workflows, consider 6h or more. Provider limits apply, so check your plan's maximum execution time."
-export async function setup(storage: ConfigStorage, credentials: CredentialStore, prompts: SetupPrompts): Promise<Provider> {
+export async function setup(storage: ConfigStorage, credentials: CredentialStore, prompts: SetupPrompts, dependencies: SetupDependencies = {}): Promise<Provider> {
   let priorRaw: string | undefined
   try { priorRaw = await storage.read() } catch { throw new OnboardingError("Waterbox configuration is unavailable. Use environment-only setup instead.") }
   const priorConfig = parsePersistedConfigForSetup(priorRaw)
-  const provider = await prompts.selectProvider()
+  const hostedAvailable = dependencies.environment?.FORCE_DISPLAY_WATERBOX === "1" || dependencies.fetch !== undefined && await hostedWaterboxAvailable(dependencies.environment ?? {}, dependencies.fetch)
+  const providers = Object.freeze(hostedAvailable ? ["waterbox", "box", "vercel"] as Provider[] : ["box", "vercel"] as Provider[])
+  const selected = await prompts.selectProvider(providers)
+  if (!isProvider(selected) || selected === "waterbox" && !hostedAvailable || selected !== "waterbox" && selected !== "box" && selected !== "vercel") throw new OnboardingError("Waterbox setup provider selection is unavailable. No configuration was saved.")
+  const provider = selected
   let draft: PersistedConfig
   try {
     const priorAutomaticStop = provider !== "waterbox" && priorConfig?.provider === provider
@@ -142,6 +151,63 @@ export async function setup(storage: ConfigStorage, credentials: CredentialStore
   return provider
 }
 
+export async function hostedWaterboxAvailable(environment: Record<string, string | undefined>, fetch_: CapabilityFetch): Promise<boolean> {
+  if (environment.FORCE_DISPLAY_WATERBOX === "1") return true
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<false>(resolve => { timeout = setTimeout(() => { controller.abort(); resolve(false) }, CAPABILITY_TIMEOUT_MS) })
+  const probe = probeHostedWaterboxCapabilities(fetch_, controller.signal)
+  // The deadline may win while an injected fetch is still pending.
+  void probe.catch(() => {})
+  try { return await Promise.race([probe, deadline]) }
+  finally { if (timeout !== undefined) clearTimeout(timeout) }
+}
+
+async function probeHostedWaterboxCapabilities(fetch_: CapabilityFetch, signal: AbortSignal): Promise<boolean> {
+  let response: Response | undefined
+  try {
+    response = await fetch_(WATERBOX_CAPABILITIES_URL, { method: "GET", redirect: "manual", credentials: "omit", signal })
+    if (signal.aborted || !response.ok || response.type === "opaqueredirect" || response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") { discardResponse(response); return false }
+    const body = await boundedResponseText(response, MAX_CAPABILITY_BYTES, signal)
+    const value: unknown = JSON.parse(body)
+    const available = typeof value === "object" && value !== null && !Array.isArray(value)
+      && (value as Record<string, unknown>).schemaVersion === 1
+      && (value as Record<string, unknown>).available === true
+    if (!available) discardResponse(response)
+    return available
+  } catch { if (response) discardResponse(response); return false }
+}
+
+async function boundedResponseText(response: Response, maxBytes: number, signal: AbortSignal): Promise<string> {
+  if (!response.body) throw new Error("missing capability body")
+  const reader = response.body.getReader(), chunks: Uint8Array[] = []
+  let size = 0
+  try {
+    for (;;) {
+      const next = await readResponseChunk(reader, signal)
+      if (next.done) break
+      size += next.value.byteLength
+      if (size > maxBytes) throw new Error("capability response is too large")
+      chunks.push(next.value)
+    }
+  } catch (error) { discardReader(reader); throw error }
+  finally { reader.releaseLock() }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes)
+}
+
+function discardReader(reader: ReadableStreamDefaultReader<Uint8Array>): void { void reader.cancel().catch(() => {}) }
+function discardResponse(response: Response): void { void response.body?.cancel().catch(() => {}) }
+async function readResponseChunk(reader: ReadableStreamDefaultReader<Uint8Array>, signal: AbortSignal): Promise<Awaited<ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>>> {
+  if (signal.aborted) throw new Error("capability request aborted")
+  let rejectAbort: (() => void) | undefined
+  const aborted = new Promise<never>((_, reject) => { rejectAbort = () => reject(new Error("capability request aborted")); signal.addEventListener("abort", rejectAbort, { once: true }) })
+  try { return await Promise.race([reader.read(), aborted]) }
+  finally { if (rejectAbort) signal.removeEventListener("abort", rejectAbort) }
+}
+
 export async function credentialState(provider: Provider, credentials: CredentialStore): Promise<CredentialState> { try { const value = await credentials.get(provider); if (value == null) return "missing"; providerCredential(value); return "available" } catch { return "inaccessible" } }
 export async function logout(storage: ConfigStorage, credentials: CredentialStore): Promise<void> {
   let raw: string | undefined, prior: Record<Provider, string | undefined>
@@ -163,6 +229,7 @@ export async function logout(storage: ConfigStorage, credentials: CredentialStor
 
 function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_API_KEY", "WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }
 export function credentialVariable(provider: Provider): string { return provider === "waterbox" ? "WATERBOX_API_KEY" : provider === "box" ? "BOX_API_KEY" : "VERCEL_TOKEN, VERCEL_TEAM_ID, and VERCEL_PROJECT_ID" }
+function isProvider(value: unknown): value is Provider { return value === "waterbox" || value === "box" || value === "vercel" }
 function nonEmpty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 16_384 }
 const automaticStopSchema = z.number().int().positive().safe().refine(value => value % 60_000 === 0)
 const legacyPersistedSchema: z.ZodType<LegacyPersistedConfig> = z.discriminatedUnion("provider", [
