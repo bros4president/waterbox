@@ -99,17 +99,6 @@ async function buildAndPack(temporaryRoot: string, name: string) {
   await Promise.all(["build-waterbox.mjs", "verify-mcp-bundle-closure.mjs"].map(path => copyFile(join(root, "scripts", path), join(sourceRoot, "scripts", path))))
   await run("bun", ["install", "--frozen-lockfile", "--ignore-scripts"], { cwd: sourceRoot, maxBuffer: 8 * 1024 * 1024 })
   await run("bun", ["run", "build:libraries"], { cwd: sourceRoot, maxBuffer: 8 * 1024 * 1024 })
-  const providerPackage = join(sourceRoot, "packages/sandbox-provider-box")
-  const providerRuntime = join(sourceRoot, "packages/sandbox-provider-runtime")
-  const cliRuntime = join(sourceRoot, "packages/sandbox-cli")
-  const sandboxRuntime = join(sourceRoot, "packages/sandbox-runtime")
-  const providerNamespace = join(providerPackage, "node_modules/@waterbox")
-  await mkdir(providerNamespace, { recursive: true })
-  await Promise.all([
-    cp(providerRuntime, join(providerNamespace, "provider-runtime"), { recursive: true }),
-    cp(cliRuntime, join(providerNamespace, "cli"), { recursive: true }),
-    cp(sandboxRuntime, join(providerNamespace, "runtime"), { recursive: true }),
-  ])
   await run("bun", ["run", "build:provider-box"], { cwd: sourceRoot, maxBuffer: 8 * 1024 * 1024 })
   await run("node", ["../../scripts/build-waterbox.mjs", "mcp"], { cwd: join(sourceRoot, "packages/mcp"), maxBuffer: 8 * 1024 * 1024 })
   return packFromIsolatedSource(temporaryRoot, name, sourceRoot)
