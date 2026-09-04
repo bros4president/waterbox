@@ -2,7 +2,7 @@ name: Publish Waterbox packages
 
 on:
   push:
-    tags: [packages-v0.1.0-alpha.2]
+    tags: [packages-v0.1.0-alpha.2-r2]
 
 permissions:
   contents: read
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/packages-v0.1.0-alpha.2'
+    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/packages-v0.1.0-alpha.2-r2'
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -35,7 +35,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - name: Verify clean tag and version
         run: |
-          test "$(git tag --points-at HEAD)" = "packages-v0.1.0-alpha.2"
+          test "$(git tag --points-at HEAD)" = "packages-v0.1.0-alpha.2-r2"
           test -z "$(git status --porcelain)"
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
           node <<'NODE'
@@ -63,10 +63,10 @@ jobs:
       - name: Pack exact scoped artifacts
         run: |
           release_dir="${RUNNER_TEMP}/waterbox-release"
-          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-contracts
-          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-core
-          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-api
-          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-provider-box
+          npm pack --ignore-scripts --pack-destination "$release_dir" ./packages/sandbox-contracts
+          npm pack --ignore-scripts --pack-destination "$release_dir" ./packages/sandbox-core
+          npm pack --ignore-scripts --pack-destination "$release_dir" ./packages/sandbox-api
+          npm pack --ignore-scripts --pack-destination "$release_dir" ./packages/sandbox-provider-box
           cd "$release_dir"
           sha256sum \
             waterbox-contracts-0.1.0-alpha.2.tgz \

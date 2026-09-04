@@ -19,7 +19,7 @@ current Node 24 binary when running artifact certification locally. Missing
 binaries are reported and do not count as evidence. CI supplies both versions.
 
 Publishing is restricted to the protected `npm` GitHub environment. The
-`packages-v0.1.0-alpha.2` tag publishes the four scoped packages in dependency
+`packages-v0.1.0-alpha.2-r2` tag publishes the four scoped packages in dependency
 order under the `next` dist-tag. The workflow uses npm trusted publishing/OIDC
 and provenance, checks exact package versions and dependencies, retains the
 certified tarballs, and safely resumes a partial publication only when registry
