@@ -185,7 +185,8 @@ async function protocolSmoke(node: string, executable: string, temporaryRoot: st
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n")
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n")
   const listed = await waitForMessage(messages, 2)
-  if (!Array.isArray(listed.result?.tools) || listed.result.tools.length !== 15) throw new Error("Packaged MCP returned an unexpected tool catalog")
+  const expectedTools = ["create_sandbox", "probe_sandbox", "stop_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"]
+  if (!Array.isArray(listed.result?.tools) || JSON.stringify(listed.result.tools.map((tool: any) => tool.name)) !== JSON.stringify(expectedTools)) throw new Error("Packaged MCP returned an unexpected tool catalog")
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "create_sandbox", arguments: { idempotencyKey: "package-verification" } } }) + "\n")
   const called = await waitForMessage(messages, 3)
   if (called.result?.isError !== true || !called.result?.content?.[0]?.text?.toLowerCase().includes("run npx waterbox@next setup")) throw new Error("Packaged MCP did not return unconfigured setup guidance")
