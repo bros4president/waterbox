@@ -229,7 +229,7 @@ async function waitForMessage(messages: any[], id: number): Promise<any> { for (
 function cleanEnvironment(home: string, path = process.env.PATH): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), INIT_CWD: undefined, NODE_PATH: undefined }
   env.PATH = path
-  for (const key of ["WATERBOX_PROVIDER", "WATERBOX_API_KEY", "WATERBOX_AUTO_STOP", "WATERBOX_MCP_DIAGNOSTICS", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"]) delete env[key]
+  for (const key of ["WATERBOX_PROVIDER", "WATERBOX_API_KEY", "WATERBOX_AUTO_STOP", "WATERBOX_MCP_DIAGNOSTICS", "FORCE_DISPLAY_WATERBOX", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"]) delete env[key]
   return env
 }
 async function runExpectingExit(command: string, arguments_: string[], expectedExit: number, cwd: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> { try { const result = await run(command, arguments_, { cwd, env, maxBuffer: 4 * 1024 * 1024 }); if (expectedExit !== 0) throw new Error(`Packaged command unexpectedly exited 0 instead of ${expectedExit}`); return result } catch (caught) { const error = caught as Error & { code?: string | number; stdout?: string; stderr?: string }; if (Number(error.code) !== expectedExit) throw caught; return { stdout: error.stdout ?? "", stderr: error.stderr ?? "" } } }

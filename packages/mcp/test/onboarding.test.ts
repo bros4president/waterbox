@@ -4,14 +4,17 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { mkdtemp } from "node:fs/promises"
 import { runCli } from "../src/cli.ts"
+import { createHostedMcpClient } from "../src/composition.ts"
 import { dispatch } from "../src/dispatch.ts"
-import { automaticStopGuidance, configStorage, credentialState, loadPersisted, resolvedEnvironment, setup, type ConfigStorage, type CredentialStore, type Provider, type SetupPrompts } from "../src/onboarding.ts"
+import { automaticStopGuidance, configStorage, credentialState, hostedWaterboxAvailable, loadPersisted, resolvedEnvironment, setup, type CapabilityFetch, type ConfigStorage, type CredentialStore, type Provider, type SetupPrompts } from "../src/onboarding.ts"
 import { deriveProviderConfigurationId, parseLocalProviderConfiguration } from "@waterbox/control-plane-local"
 
 const automaticStopProse = "How often should a sandbox be automatically stopped?\n\nImportant: a stopped sandbox is automatically resumed by the next coding operation. This is not a limit on total sandbox runtime or spending.\n\nThis is a safety mechanism that limits wasted compute if the agent does not stop a sandbox when finished. Agents are instructed to stop unused sandboxes, but this is not enforced.\n\nA short duration, such as 40m, minimizes wasted compute but may interrupt long-running commands. For long workflows, consider 6h or more. Provider limits apply, so check your plan's maximum execution time."
 
 function fakeStorage(initial?: string): ConfigStorage & { value?: string; writes: number; failWrite: boolean; removes: number } { return { value: initial, writes: 0, failWrite: false, removes: 0, async read() { return this.value }, async write(value) { this.writes += 1; if (this.failWrite) throw new Error("write failed"); this.value = value }, async remove() { this.removes += 1; this.value = undefined } } }
 function fakeCredentials(values: Partial<Record<Provider, string>> = {}): CredentialStore & { inaccessible: boolean; fail?: "set" | "delete-box" | "delete-vercel" | "delete-waterbox"; values: Partial<Record<Provider, string>> } { return { values, inaccessible: false, async get(provider) { if (this.inaccessible) throw new Error("locked"); return this.values[provider] }, async set(provider, secret) { if (this.inaccessible || this.fail === "set") throw new Error("locked"); this.values[provider] = secret }, async delete(provider) { if (this.inaccessible || this.fail === `delete-${provider}`) throw new Error("locked"); const present = this.values[provider] !== undefined; delete this.values[provider]; return present } } }
+const availableHostedFetch: CapabilityFetch = async () => new Response(JSON.stringify({ schemaVersion: 1, available: true }), { headers: { "content-type": "application/json" } })
+function setupHosted(storage: ConfigStorage, credentials: CredentialStore, prompts: SetupPrompts) { return setup(storage, credentials, prompts, { environment: {}, fetch: availableHostedFetch }) }
 const boxPrompts: SetupPrompts = { async selectProvider() { return "box" }, async input(_message, initial) { return initial }, async secret() { return "box-secret" }, async confirm() { return true } }
 const boxSettings = { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, automaticStopMs: 2_400_000 }
 const vercelSettings = { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, requestTimeoutMs: 30000 as const, automaticStopMs: 2_400_000 }
@@ -22,6 +25,117 @@ function persistedV2Vercel(settings = vercelSettings) { return JSON.stringify({ 
 async function loadBoxConfig(storage: ConfigStorage) { const config = await loadPersisted(storage); if (config?.provider !== "box") throw new Error("Expected persisted Box configuration"); return config }
 
 describe("native-keyring onboarding", () => {
+  test("discovers hosted Waterbox only when the capability document explicitly advertises it", async () => {
+    const selected: Provider[][] = []
+    const prompts: SetupPrompts = { async selectProvider(providers) { selected.push([...providers]); return "waterbox" }, async input() { throw new Error("hosted setup has no local settings") }, async secret() { return "hosted-secret" }, async confirm() { return true } }
+    const fetch = async (url: string | URL | Request, init?: RequestInit) => {
+      expect(String(url)).toBe("https://waterbox.ai/.well-known/waterbox-capabilities.json")
+      expect(init?.redirect).toBe("manual")
+      expect(init?.credentials).toBe("omit")
+      expect(init?.headers).toBeUndefined()
+      return new Response(JSON.stringify({ schemaVersion: 1, available: true, apiOrigin: "https://attacker.example" }), { headers: { "content-type": "application/json; charset=utf-8" } })
+    }
+    await setup(fakeStorage(), fakeCredentials(), prompts, { environment: {}, fetch })
+    expect(selected).toEqual([["waterbox", "box", "vercel"]])
+  })
+
+  test("fails closed for unavailable and invalid hosted capability responses while retaining direct providers", async () => {
+    const cases: Array<() => Promise<Response>> = [
+      async () => new Response(JSON.stringify({ schemaVersion: 1, available: false }), { headers: { "content-type": "application/json" } }),
+      async () => new Response("{}", { status: 302, headers: { "content-type": "application/json", location: "https://attacker.example" } }),
+      async () => new Response("{}", { status: 503, headers: { "content-type": "application/json" } }),
+      async () => new Response("{}", { headers: { "content-type": "text/plain" } }),
+      async () => new Response("not json", { headers: { "content-type": "application/json" } }),
+      async () => new Response(JSON.stringify({ schemaVersion: 2, available: true }), { headers: { "content-type": "application/json" } }),
+      async () => new Response(JSON.stringify({ schemaVersion: 1, available: "true" }), { headers: { "content-type": "application/json" } }),
+      async () => new Response(" ".repeat(16 * 1024 + 1), { headers: { "content-type": "application/json" } }),
+    ]
+    for (const response of cases) {
+      let offered: readonly Provider[] = []
+      await setup(fakeStorage(), fakeCredentials(), { ...boxPrompts, async selectProvider(providers) { offered = providers; return "box" } }, { environment: {}, fetch: response })
+      expect(offered).toEqual(["box", "vercel"])
+    }
+    let offered: readonly Provider[] = []
+    const pendingFetch = async (_url: string | URL | Request, init?: RequestInit) => await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new Error("aborted"))))
+    await setup(fakeStorage(), fakeCredentials(), { ...boxPrompts, async selectProvider(providers) { offered = providers; return "box" } }, { environment: {}, fetch: pendingFetch })
+    expect(offered).toEqual(["box", "vercel"])
+  }, 5_000)
+
+  test("development override bypasses capability fetching and hidden provider selections are rejected", async () => {
+    let fetches = 0, offered: readonly Provider[] = []
+    await setup(fakeStorage(), fakeCredentials(), { async selectProvider(providers) { offered = providers; return "waterbox" }, async input() { throw new Error("hosted setup has no local settings") }, async secret() { return "hosted-secret" }, async confirm() { return true } }, { environment: { FORCE_DISPLAY_WATERBOX: "1" }, fetch: async () => { fetches += 1; throw new Error("must not fetch") } })
+    expect(fetches).toBe(0)
+    expect(offered).toEqual(["waterbox", "box", "vercel"])
+    let otherFetches = 0
+    await expect(setup(fakeStorage(), fakeCredentials(), { ...boxPrompts, async selectProvider() { return "waterbox" } }, { environment: { FORCE_DISPLAY_WATERBOX: "true" }, fetch: async () => { otherFetches += 1; return new Response(JSON.stringify({ schemaVersion: 1, available: false }), { headers: { "content-type": "application/json" } }) } })).rejects.toThrow("selection is unavailable")
+    expect(otherFetches).toBe(1)
+  })
+
+  test("a prompt cannot mutate hidden Waterbox into the immutable provider decision", async () => {
+    const storage = fakeStorage(), credentials = fakeCredentials()
+    await expect(setup(storage, credentials, { async selectProvider(providers) { try { (providers as Provider[]).unshift("waterbox") } catch {} return "waterbox" }, async input() { throw new Error("must not prompt") }, async secret() { throw new Error("must not prompt") }, async confirm() { throw new Error("must not prompt") } })).rejects.toThrow("selection is unavailable")
+    expect(storage.writes).toBe(0)
+    expect(credentials.values).toEqual({})
+  })
+
+  test("discards rejected capability bodies and cancels oversized streams", async () => {
+    let nonOkCancels = 0, wrongMediaCancels = 0, oversizedCancels = 0
+    for (const response of [
+      new Response(new ReadableStream({ cancel() { nonOkCancels += 1 } }), { status: 503, headers: { "content-type": "application/json" } }),
+      new Response(new ReadableStream({ cancel() { wrongMediaCancels += 1 } }), { headers: { "content-type": "text/plain" } }),
+    ]) expect(await hostedWaterboxAvailable({}, async () => response)).toBeFalse()
+    const oversized = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(16 * 1024 + 1)) }, cancel() { oversizedCancels += 1 } })
+    expect(await hostedWaterboxAvailable({}, async () => new Response(oversized, { headers: { "content-type": "application/json" } }))).toBeFalse()
+    expect(nonOkCancels).toBe(1)
+    expect(wrongMediaCancels).toBe(1)
+    expect(oversizedCancels).toBe(1)
+  })
+
+  test("timeout cancels a capability body that ignores the fetch abort signal", async () => {
+    let cancellations = 0
+    const endless = new ReadableStream<Uint8Array>({ pull(controller) { controller.enqueue(new Uint8Array([32])); return new Promise(() => {}) }, cancel() { cancellations += 1 } })
+    expect(await hostedWaterboxAvailable({}, async () => new Response(endless, { headers: { "content-type": "application/json" } }))).toBeFalse()
+    expect(cancellations).toBe(1)
+  }, 5_000)
+
+  test("deadline bounds a fetch that never settles and discarding cannot block setup", async () => {
+    const started = Date.now()
+    expect(await hostedWaterboxAvailable({}, async () => await new Promise<Response>(() => {}))).toBeFalse()
+    expect(Date.now() - started).toBeLessThan(3_000)
+
+    const blockedCancellation = new Response(new ReadableStream({ cancel() { return new Promise(() => {}) } }), { status: 503, headers: { "content-type": "application/json" } })
+    const discardStarted = Date.now()
+    expect(await hostedWaterboxAvailable({}, async () => blockedCancellation)).toBeFalse()
+    expect(Date.now() - discardStarted).toBeLessThan(1_000)
+  }, 5_000)
+
+  test("capability requests and failures contain no credentials", async () => {
+    const secret = "capability-secret"
+    let captured: RequestInit | undefined
+    expect(await hostedWaterboxAvailable({}, async (_url, init) => { captured = init; throw new Error(secret) })).toBeFalse()
+    expect(captured?.credentials).toBe("omit")
+    expect(captured?.headers).toBeUndefined()
+  })
+
+  test("persisted and explicit hosted runtime configuration do not consult discovery", async () => {
+    const persisted = await resolvedEnvironment({}, fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" })), fakeCredentials({ waterbox: "persisted-secret" }))
+    const explicit = await resolvedEnvironment({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "environment-secret" }, fakeStorage(), fakeCredentials())
+    expect(persisted.environment).toEqual({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "persisted-secret" })
+    expect(explicit.environment).toEqual({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "environment-secret" })
+  })
+
+  test("capability apiOrigin cannot redirect hosted API requests", async () => {
+    expect(await hostedWaterboxAvailable({}, async () => new Response(JSON.stringify({ schemaVersion: 1, available: true, apiOrigin: "https://attacker.example" }), { headers: { "content-type": "application/json" } }))).toBeTrue()
+    const requests: Request[] = []
+    const client = createHostedMcpClient({ provider: { type: "waterbox", apiKey: "hosted-secret" } }, async request => {
+      requests.push(request)
+      return new Response(JSON.stringify({ items: [] }), { headers: { "content-type": "application/json" } })
+    })
+    try { await client.listSnapshots({}, { signal: new AbortController().signal }) }
+    finally { await client.close() }
+    expect(requests[0]?.url).toBe("https://api.waterbox.ai/v1/snapshots")
+  })
+
   test("resolves persisted Box and Vercel settings only when provider is absent", async () => {
     const box = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
     expect((await resolvedEnvironment({}, box, fakeCredentials({ box: "secret" }))).environment).toMatchObject({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret" })
@@ -34,7 +148,7 @@ describe("native-keyring onboarding", () => {
   test("stores hosted setup as strict non-secret metadata and hydrates its keyring key", async () => {
     const storage = fakeStorage(), credentials = fakeCredentials()
     const prompts: SetupPrompts = { async selectProvider() { return "waterbox" }, async input() { throw new Error("hosted setup has no local settings") }, async secret() { return "hosted-secret" }, async confirm() { throw new Error("first setup must not warn") } }
-    await setup(storage, credentials, prompts)
+    await setupHosted(storage, credentials, prompts)
     expect(storage.value).toBe(JSON.stringify({ version: 2, provider: "waterbox" }))
     expect(credentials.values).toEqual({ waterbox: "hosted-secret" })
     expect((await resolvedEnvironment({}, storage, credentials)).environment).toEqual({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "hosted-secret" })
@@ -48,7 +162,7 @@ describe("native-keyring onboarding", () => {
       async delete(provider) { const present = values[provider] != null; values[provider] = null; return present },
     }
     expect(await credentialState("waterbox", credentials)).toBe("missing")
-    await setup(fakeStorage(), credentials, {
+    await setupHosted(fakeStorage(), credentials, {
       async selectProvider() { return "waterbox" }, async input() { throw new Error("hosted setup has no local settings") }, async secret() { return "hosted-secret" }, async confirm() { throw new Error("first setup must not warn") },
     })
     expect(values.waterbox).toBe("hosted-secret")
@@ -61,7 +175,7 @@ describe("native-keyring onboarding", () => {
       const prompts: SetupPrompts = provider === "waterbox"
         ? { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "replacement-hosted" }, async confirm() { return false } }
         : { ...boxPrompts, async confirm() { return false } }
-      await expect(setup(storage, credentials, prompts)).rejects.toThrow("canceled")
+      await expect(setupHosted(storage, credentials, prompts)).rejects.toThrow("canceled")
       expect(storage.value).toBe(raw)
       expect(credentials.values).toEqual({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
     }
@@ -70,7 +184,7 @@ describe("native-keyring onboarding", () => {
   test("re-running hosted setup with the same key does not warn", async () => {
     let confirmations = 0
     const storage = fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" }))
-    await setup(storage, fakeCredentials({ waterbox: "hosted-secret" }), {
+    await setupHosted(storage, fakeCredentials({ waterbox: "hosted-secret" }), {
       async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "hosted-secret" }, async confirm() { confirmations += 1; return false },
     })
     expect(confirmations).toBe(0)
@@ -401,11 +515,11 @@ describe("native-keyring onboarding", () => {
   })
 
   test("CLI setup rejects non-interactive input before prompting", async () => {
-    let prompted = false
+    let prompted = false, fetches = 0
     const prompts: SetupPrompts = { async selectProvider() { prompted = true; return "box" }, async input(_message, initial) { return initial }, async secret() { return "secret" }, async confirm() { return true } }
     const errors: string[] = []
-    expect(await runCli(["setup"], { storage: fakeStorage(), credentials: fakeCredentials(), prompts, interactive: false, write() {}, error: line => errors.push(line) })).toBe(1)
-    expect(prompted).toBeFalse(); expect(errors.join("\n")).toContain("interactive terminal")
+    expect(await runCli(["setup"], { storage: fakeStorage(), credentials: fakeCredentials(), prompts, interactive: false, fetch: async () => { fetches += 1; throw new Error("must not fetch") }, write() {}, error: line => errors.push(line) })).toBe(1)
+    expect(prompted).toBeFalse(); expect(fetches).toBe(0); expect(errors.join("\n")).toContain("interactive terminal")
   })
 
   test("default storage writes private atomic configuration without the keyring secret", async () => {
@@ -480,7 +594,7 @@ describe("native-keyring onboarding", () => {
   test("hosted setup rollback restores all three credentials", async () => {
     const storage = fakeStorage(JSON.stringify({ version: 2, provider: "waterbox" })); storage.failWrite = true
     const credentials = fakeCredentials({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
-    await expect(setup(storage, credentials, { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "replacement-hosted" }, async confirm() { return true } })).rejects.toThrow("rollback could not be confirmed")
+    await expect(setupHosted(storage, credentials, { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "replacement-hosted" }, async confirm() { return true } })).rejects.toThrow("rollback could not be confirmed")
     expect(credentials.values).toEqual({ waterbox: "old-hosted", box: "old-box", vercel: "old-vercel" })
   })
 
@@ -493,7 +607,7 @@ describe("native-keyring onboarding", () => {
       async delete(provider) { return provider !== "waterbox" },
     }
     let message = ""
-    try { await setup(storage, credentials, { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "hosted-secret" }, async confirm() { return true } }) } catch (error) { message = String(error) }
+    try { await setupHosted(storage, credentials, { async selectProvider() { return "waterbox" }, async input() { throw new Error("no hosted settings") }, async secret() { return "hosted-secret" }, async confirm() { return true } }) } catch (error) { message = String(error) }
     expect(message).toContain("rollback could not be confirmed")
     expect(message).not.toContain("hosted-secret")
   })
