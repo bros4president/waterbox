@@ -8,19 +8,19 @@ It is not the hosted Waterbox service and has no JavaScript library API.
 ## Install And Configure
 
 ```sh
-npx add-mcp waterbox@next
+npx add-mcp waterbox
 ```
 
-This prerelease is distributed under the npm `next` tag. The command installs
+This prerelease is available through npm's default tag. The command installs
 MCP client configuration equivalent to `{ "command": "npx", "args": ["-y",
-"waterbox@next"] }`. It does not collect provider credentials. Running `npx
-waterbox@next` directly starts the stdio server; use an explicit argument for
+"waterbox"] }`. It does not collect provider credentials. Running `npx
+waterbox` directly starts the stdio server; use an explicit argument for
 terminal-only onboarding:
 
 ```sh
-npx waterbox@next setup
-npx waterbox@next status
-npx waterbox@next logout
+npx waterbox setup
+npx waterbox status
+npx waterbox logout
 ```
 
 Interactive setup stores only the provider credential in the native keyring.

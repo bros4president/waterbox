@@ -22,7 +22,7 @@ export async function runCli(arguments_: string[], dependencies: CliDependencies
     const environment = dependencies.environment ?? process.env
     if (environment.WATERBOX_PROVIDER === undefined && !providerVariablesPresent(environment)) {
       const config = await loadPersisted(storage)
-      if (!config) { write("Waterbox status: not configured. Run npx waterbox@next setup."); return 0 }
+      if (!config) { write("Waterbox status: not configured. Run npx waterbox setup."); return 0 }
       const state = await credentialState(config.provider, credentials)
       if (state === "available") await parseMcpConfig(environment, undefined, { storage, credentials })
       write(`Waterbox status: provider ${config.provider}; local configuration keyring; credential ${state}.${state === "available" ? "" : ` Environment fallback: WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}.`}`)

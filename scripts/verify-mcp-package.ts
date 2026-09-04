@@ -29,7 +29,7 @@ export function assertCompleteFriendlyWords(bundle: string, predicates: string, 
 export function assertSameBytes(expected: Uint8Array, actual: Uint8Array, label: string): void { if (expected.byteLength !== actual.byteLength || !Buffer.from(expected).equals(Buffer.from(actual))) throw new Error(`${label} does not match the exact packed artifact`) }
 export function assertPackedFileAllowlist(paths: Iterable<string>): void { const actual = new Set(paths); if (actual.size !== packedFiles.size || [...actual].some(path => !packedFiles.has(path))) throw new Error(`MCP package file allowlist mismatch: ${[...actual].sort().join(", ")}`) }
 export function assertCliOnlyManifest(manifest: Record<string, any>): void {
-  if (manifest.name !== "waterbox" || manifest.version !== "0.1.0-alpha.1" || manifest.engines?.node !== ">=24.15.0" || manifest.license !== "MIT" || manifest.publishConfig?.access !== "public" || manifest.publishConfig?.tag !== "next") throw new Error("Packed manifest identity, version, channel, engine, or license is invalid")
+  if (manifest.name !== "waterbox" || manifest.version !== "0.1.0-alpha.2" || manifest.engines?.node !== ">=24.15.0" || manifest.license !== "MIT" || manifest.publishConfig?.access !== "public" || manifest.publishConfig?.tag !== "latest") throw new Error("Packed manifest identity, version, channel, engine, or license is invalid")
   if (JSON.stringify(manifest.bin) !== JSON.stringify({ waterbox: "./dist/waterbox.js" }) || "exports" in manifest || "main" in manifest || "types" in manifest) throw new Error("Packed package must expose only the waterbox executable")
 }
 export function assertNodeOnlyBundles(bundles: Iterable<[string, string]>): void { for (const [name, bundle] of bundles) if (/\bbun:|\bBun\.|\/usr\/bin\/env bun|\/Users\/|\\Users\\/.test(bundle)) throw new Error(`${name} contains a Bun runtime or release-machine path reference`) }
@@ -59,10 +59,10 @@ export async function verifyMcpPackage(): Promise<void> {
     if (process.env.WATERBOX_RELEASE_ARTIFACT_DIR) {
       const output = resolve(process.env.WATERBOX_RELEASE_ARTIFACT_DIR)
       await mkdir(output, { recursive: true })
-      await copyFile(first.identity.path, join(output, "waterbox-0.1.0-alpha.1.tgz"))
-      assertSameBytes(await readFile(first.identity.path), await readFile(join(output, "waterbox-0.1.0-alpha.1.tgz")), "Retained release tarball")
-      await writeFile(join(output, "waterbox-0.1.0-alpha.1.sha256"), `${first.identity.sha256}  waterbox-0.1.0-alpha.1.tgz\n`)
-      await writeFile(join(output, "waterbox-0.1.0-alpha.1.files.sha256"), `${(await contentManifest(first.extractDirectory)).join("\n")}\n`)
+      await copyFile(first.identity.path, join(output, "waterbox-0.1.0-alpha.2.tgz"))
+      assertSameBytes(await readFile(first.identity.path), await readFile(join(output, "waterbox-0.1.0-alpha.2.tgz")), "Retained release tarball")
+      await writeFile(join(output, "waterbox-0.1.0-alpha.2.sha256"), `${first.identity.sha256}  waterbox-0.1.0-alpha.2.tgz\n`)
+      await writeFile(join(output, "waterbox-0.1.0-alpha.2.files.sha256"), `${(await contentManifest(first.extractDirectory)).join("\n")}\n`)
     }
     console.log(`Verified retained artifact ${basename(first.identity.path)} (${first.identity.sha256}), exact reproducible contents, legal and bundle closure, isolated installation, stdio protocol, and add-mcp@2.3.0 configuration where local Node 24 binaries were available.`)
   } finally {
@@ -72,7 +72,7 @@ export async function verifyMcpPackage(): Promise<void> {
 
 async function verifyImplementationVersions(): Promise<void> {
   const [server, composition, development] = await Promise.all([readFile(join(packageRoot, "src/server.ts"), "utf8"), readFile(join(root, "packages/control-plane-local/src/index.ts"), "utf8"), readFile(join(root, "apps/api-local/src/app.ts"), "utf8")])
-  if (!server.includes('new Server({ name: "waterbox", version: "0.1.0-alpha.1" }') || !composition.includes('loadSandboxRuntimeArtifact(artifactLocation, "0.1.0-alpha.1")') || !development.includes('DEVELOPMENT_ARTIFACT_VERSION = "0.1.0-alpha.1"')) throw new Error("Package, MCP server, and sandbox artifact versions are not aligned at 0.1.0-alpha.1")
+  if (!server.includes('new Server({ name: "waterbox", version: "0.1.0-alpha.2" }') || !composition.includes('loadSandboxRuntimeArtifact(artifactLocation, "0.1.0-alpha.2")') || !development.includes('DEVELOPMENT_ARTIFACT_VERSION = "0.1.0-alpha.2"')) throw new Error("Package, MCP server, and sandbox artifact versions are not aligned at 0.1.0-alpha.2")
 }
 
 async function packFromIsolatedSource(temporaryRoot: string, name: string, sourceRoot: string) {
@@ -189,7 +189,7 @@ async function protocolSmoke(node: string, executable: string, temporaryRoot: st
   if (!Array.isArray(listed.result?.tools) || JSON.stringify(listed.result.tools.map((tool: any) => tool.name)) !== JSON.stringify(expectedTools)) throw new Error("Packaged MCP returned an unexpected tool catalog")
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "create_sandbox", arguments: { idempotencyKey: "package-verification" } } }) + "\n")
   const called = await waitForMessage(messages, 3)
-  if (called.result?.isError !== true || !called.result?.content?.[0]?.text?.toLowerCase().includes("run npx waterbox@next setup")) throw new Error("Packaged MCP did not return unconfigured setup guidance")
+  if (called.result?.isError !== true || !called.result?.content?.[0]?.text?.toLowerCase().includes("run npx waterbox setup")) throw new Error("Packaged MCP did not return unconfigured setup guidance")
   child.stdin.end()
   const exit = await new Promise<number | null>((resolveExit, reject) => { const timer = setTimeout(() => { child.kill(); reject(new Error("Packaged MCP did not shut down after stdio EOF")) }, 5_000); child.once("exit", code => { clearTimeout(timer); resolveExit(code) }) })
   if (exit !== 0 || stdoutLines.length !== messages.length || Buffer.concat(stderr).toString().includes("package-verification")) throw new Error("Packaged MCP stdio was not protocol-clean or diagnostics-safe")
@@ -199,13 +199,13 @@ async function verifyAddMcp(temporaryRoot: string): Promise<void> {
   for (const agent of ["opencode", "codex"] as const) {
     const project = join(temporaryRoot, `add-mcp-${agent}`), home = join(temporaryRoot, `add-mcp-${agent}-home`)
     await Promise.all([mkdir(project), mkdir(home)])
-    await run(join(root, "node_modules/.bin/add-mcp"), ["waterbox@next", "--name", "waterbox", "-a", agent, "-y"], { cwd: project, env: cleanEnvironment(home), maxBuffer: 4 * 1024 * 1024 })
+    await run(join(root, "node_modules/.bin/add-mcp"), ["waterbox", "--name", "waterbox", "-a", agent, "-y"], { cwd: project, env: cleanEnvironment(home), maxBuffer: 4 * 1024 * 1024 })
     if (agent === "opencode") {
       const config = JSON.parse(await readFile(join(project, "opencode.jsonc"), "utf8"))
-      if (JSON.stringify(config.mcp?.waterbox?.command) !== JSON.stringify(["npx", "-y", "waterbox@next"]) || config.mcp.waterbox.type !== "local") throw new Error("add-mcp@2.3.0 generated an unexpected OpenCode command")
+      if (JSON.stringify(config.mcp?.waterbox?.command) !== JSON.stringify(["npx", "-y", "waterbox"]) || config.mcp.waterbox.type !== "local") throw new Error("add-mcp@2.3.0 generated an unexpected OpenCode command")
     } else {
       const config = await readFile(join(project, ".codex/config.toml"), "utf8")
-      if (!config.includes('command = "npx"') || !/args\s*=\s*\[\s*"-y"\s*,\s*"waterbox@next"\s*\]/.test(config)) throw new Error("add-mcp@2.3.0 generated an unexpected Codex command")
+      if (!config.includes('command = "npx"') || !/args\s*=\s*\[\s*"-y"\s*,\s*"waterbox"\s*\]/.test(config)) throw new Error("add-mcp@2.3.0 generated an unexpected Codex command")
     }
   }
 }
