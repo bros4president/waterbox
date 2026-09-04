@@ -1,25 +1,26 @@
 import {
   BashJobObservationSchema,
   BashToolArgumentsSchema,
-  BashToolEventSchema,
   BashToolResultSchema,
   CreateSandboxRequestSchema,
   CreateSnapshotRequestSchema,
   CursorPaginationRequestSchema,
   EditToolArgumentsSchema,
-  EditToolEventSchema,
+  EditToolResultSchema,
   ErrorEnvelopeSchema,
   GlobToolArgumentsSchema,
-  GlobToolEventSchema,
+  GlobToolResultSchema,
   GrepToolArgumentsSchema,
-  GrepToolEventSchema,
+  GrepToolResultSchema,
   IdempotencyKeySchema,
   MAX_SECURE_CIPHERTEXT_BYTES,
   MAX_SECURE_FILE_BYTES,
+  MAX_BASH_OUTPUT_BYTES,
+  MAX_TOOL_RESULT_BYTES,
   PatchToolArgumentsSchema,
-  PatchToolEventSchema,
+  PatchToolResultSchema,
   ReadToolArgumentsSchema,
-  ReadToolEventSchema,
+  ReadToolResultSchema,
   SandboxIdSchema,
   SandboxSchema,
   SnapshotIdSchema,
@@ -29,7 +30,7 @@ import {
   SecureTransferInitiatedSchema,
   SecureTransferConsumeRequestSchema,
   WriteToolArgumentsSchema,
-  WriteToolEventSchema,
+  WriteToolResultSchema,
   type BashJobObservation,
   type BashToolArguments,
   type BashToolResult,
@@ -54,7 +55,6 @@ import {
   type Snapshot,
   type SnapshotId,
   type SnapshotPage,
-  type ToolEventByName,
   type ToolName,
   type WriteToolArguments,
   type WriteToolResult,
@@ -64,11 +64,10 @@ import type { z } from "zod"
 
 export const MAX_API_ERROR_RESPONSE_BYTES = 65_536
 export const MAX_API_JSON_RESPONSE_BYTES = 1_048_576
-export const MAX_API_NDJSON_LINE_BYTES = 8_388_608
-export const MAX_API_NDJSON_TOTAL_BYTES = 16_777_216
+// Two 1 MiB command streams can expand to 6 MiB when escaped as JSON strings.
+export const MAX_API_TOOL_RESULT_BYTES = MAX_TOOL_RESULT_BYTES
 
 const BASH_CHUNK_BYTES = 65_536
-const MAX_BASH_OUTPUT_BYTES = 1_048_576
 const BASH_OBSERVATION_INTERVAL_MS = 1_000
 const BASH_CLEANUP_DEADLINE_MS = 5_000
 
@@ -182,32 +181,32 @@ export class WaterboxClient {
 
   read(input: ReadToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<ReadToolResult> {
     const { sandboxId, ...arguments_ } = input
-    return this.#tool("read", sandboxId, ReadToolArgumentsSchema.parse(arguments_), ReadToolEventSchema, context)
+    return this.#tool("read", sandboxId, ReadToolArgumentsSchema.parse(arguments_), ReadToolResultSchema, context)
   }
   write(input: WriteToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<WriteToolResult> {
     const { sandboxId, ...arguments_ } = input
-    return this.#tool("write", sandboxId, WriteToolArgumentsSchema.parse(arguments_), WriteToolEventSchema, context)
+    return this.#tool("write", sandboxId, WriteToolArgumentsSchema.parse(arguments_), WriteToolResultSchema, context)
   }
   edit(input: EditToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<EditToolResult> {
     const { sandboxId, ...arguments_ } = input
-    return this.#tool("edit", sandboxId, EditToolArgumentsSchema.parse(arguments_), EditToolEventSchema, context)
+    return this.#tool("edit", sandboxId, EditToolArgumentsSchema.parse(arguments_), EditToolResultSchema, context)
   }
   patch(input: PatchToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<PatchToolResult> {
     const { sandboxId, ...arguments_ } = input
-    return this.#tool("patch", sandboxId, PatchToolArgumentsSchema.parse(arguments_), PatchToolEventSchema, context)
+    return this.#tool("patch", sandboxId, PatchToolArgumentsSchema.parse(arguments_), PatchToolResultSchema, context)
   }
   glob(input: GlobToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<GlobToolResult> {
     const { sandboxId, ...arguments_ } = input
-    return this.#tool("glob", sandboxId, GlobToolArgumentsSchema.parse(arguments_), GlobToolEventSchema, context)
+    return this.#tool("glob", sandboxId, GlobToolArgumentsSchema.parse(arguments_), GlobToolResultSchema, context)
   }
   grep(input: GrepToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<GrepToolResult> {
     const { sandboxId, ...arguments_ } = input
-    return this.#tool("grep", sandboxId, GrepToolArgumentsSchema.parse(arguments_), GrepToolEventSchema, context)
+    return this.#tool("grep", sandboxId, GrepToolArgumentsSchema.parse(arguments_), GrepToolResultSchema, context)
   }
 
   async bash(input: BashToolArguments & { sandboxId: SandboxId }, context: CommandContext): Promise<BashToolResult> {
     const { sandboxId, ...arguments_ } = input
-    const receipt = await this.#tool("bash", sandboxId, BashToolArgumentsSchema.parse(arguments_), BashToolEventSchema, context) as BashToolResult
+    const receipt = await this.#tool("bash", sandboxId, BashToolArgumentsSchema.parse(arguments_), BashToolResultSchema, context) as BashToolResult
     if (receipt.outcome === "completed") return receipt
     return this.#observeBash(sandboxId, receipt, context)
   }
@@ -239,28 +238,22 @@ export class WaterboxClient {
     }
   }
 
-  async #tool<N extends ToolName, S extends z.ZodType<Extract<ToolEventByName[N], { type: "result" }> | ToolEventByName[N]>>(
+  async #tool<N extends ToolName, S extends z.ZodType>(
     name: N, sandboxId: SandboxId, input: unknown, schema: S, context: CommandContext,
-  ): Promise<Omit<Extract<z.output<S>, { type: "result" }>, "type">> {
+  ): Promise<z.output<S>> {
     const response = await this.#request("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/tools/${name}`, context.signal, input)
     await requireStatus(response, 200, context.signal)
     await propagateResponseAbort(response, context.signal)
-    if (!hasMediaType(response, "application/x-ndjson")) { await cancelBody(response); throw protocolError() }
-    let terminal: Extract<z.output<S>, { type: "result" }> | undefined
-    try {
-      for await (const raw of parseNdjson(response, context.signal)) {
-        const event = schema.safeParse(raw)
-        if (!event.success) { await cancelBody(response); throw protocolError() }
-        if (terminal !== undefined) { await cancelBody(response); throw protocolError() }
-        if (event.data.type === "result") terminal = event.data as Extract<z.output<S>, { type: "result" }>
-      }
-    } catch (error) {
+    if (!hasMediaType(response, "application/json")) { await cancelBody(response); throw protocolError() }
+    let value: unknown
+    try { value = await parseJson(response, MAX_API_TOOL_RESULT_BYTES, context.signal) }
+    catch (error) {
       if (context.signal.aborted) throw context.signal.reason ?? error
       throw protocolError()
     }
-    if (terminal === undefined) throw protocolError()
-    const { type: _, ...result } = terminal
-    return result
+    const result = schema.safeParse(value)
+    if (!result.success) throw protocolError()
+    return result.data
   }
 
   async #observeBash(sandboxId: SandboxId, receipt: DispatchedBashToolResult, context: CommandContext): Promise<BashToolResult> {
@@ -411,73 +404,6 @@ async function readBounded(response: Response, limit: number, signal: AbortSigna
   return result
 }
 
-async function* parseNdjson(response: Response, signal: AbortSignal): AsyncGenerator<unknown> {
-  if (response.body === null) throw protocolError()
-  const reader = response.body.getReader()
-  let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0)
-  let pendingLength = 0
-  let total = 0
-  let complete = false
-  const abort = () => { void reader.cancel(signal.reason).catch(() => undefined) }
-  signal.addEventListener("abort", abort, { once: true })
-  try {
-    while (true) {
-      signal.throwIfAborted()
-      const item = await reader.read()
-      signal.throwIfAborted()
-      if (item.done) break
-      total += item.value.byteLength
-      if (total > MAX_API_NDJSON_TOTAL_BYTES) { await reader.cancel(); throw protocolError() }
-      let start = 0
-      for (let index = 0; index < item.value.byteLength; index += 1) {
-        if (item.value[index] !== 10) continue
-        const fragment = item.value.subarray(start, index)
-        const lineLength = pendingLength + fragment.byteLength
-        if (lineLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
-        if (pendingLength !== 0) {
-          pending = appendPending(pending, pendingLength, fragment)
-          pendingLength = lineLength
-        }
-        const line = pendingLength === 0 ? fragment : pending.subarray(0, pendingLength)
-        if (line.byteLength !== 0) yield decodeJsonLine(line)
-        start = index + 1
-        pendingLength = 0
-      }
-      const fragment = item.value.subarray(start)
-      if (fragment.byteLength !== 0) {
-        if (pendingLength + fragment.byteLength > MAX_API_NDJSON_LINE_BYTES) { await reader.cancel(); throw protocolError() }
-        pending = appendPending(pending, pendingLength, fragment)
-        pendingLength += fragment.byteLength
-      }
-    }
-    signal.throwIfAborted()
-    if (pendingLength !== 0) yield decodeJsonLine(pending.subarray(0, pendingLength))
-    complete = true
-  } catch (error) {
-    await reader.cancel().catch(() => undefined)
-    throw error
-  } finally {
-    signal.removeEventListener("abort", abort)
-    if (!complete) await reader.cancel().catch(() => undefined)
-    reader.releaseLock()
-  }
-}
-
-function appendPending(pending: Uint8Array<ArrayBufferLike>, length: number, fragment: Uint8Array<ArrayBufferLike>): Uint8Array<ArrayBufferLike> {
-  const required = length + fragment.byteLength
-  if (required > pending.byteLength) {
-    const expanded = new Uint8Array(Math.min(MAX_API_NDJSON_LINE_BYTES, Math.max(required, pending.byteLength * 2, 1_024)))
-    expanded.set(pending.subarray(0, length))
-    pending = expanded
-  }
-  pending.set(fragment, length)
-  return pending
-}
-
-function decodeJsonLine(line: Uint8Array): unknown {
-  try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(line)) }
-  catch { throw protocolError() }
-}
 async function cancelBody(response: Response): Promise<void> { await response.body?.cancel().catch(() => undefined) }
 async function propagateResponseAbort(response: Response, signal: AbortSignal): Promise<void> {
   if (!signal.aborted) return

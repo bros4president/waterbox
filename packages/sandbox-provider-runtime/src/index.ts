@@ -1,10 +1,17 @@
-import type { SandboxId, SandboxState, SnapshotId, SnapshotState } from "@waterbox/contracts"
+import { MAX_TOOL_RESULT_BYTES, type SandboxId, type SandboxState, type SnapshotId, type SnapshotState } from "@waterbox/contracts"
 
 /** JSON stays opaque above an infrastructure adapter. */
 export type JsonValue = null | JsonReference
 export type JsonReference = boolean | number | string | readonly JsonReference[] | { readonly [key: string]: JsonReference }
 
-export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576
+/** The CLI's one-line JSON result must carry a worst-case escaped 1 MiB Bash output. */
+export const MAX_COMMAND_OUTPUT_BYTES = MAX_TOOL_RESULT_BYTES
+/**
+ * Production command stdout is either a small bootstrap token or one bounded
+ * Waterbox CLI JSON result; successful CLI stderr is empty. Enclosing that
+ * already-serialized JSON can at most escape each backslash once more.
+ */
+export const MAX_COMMAND_RESPONSE_BYTES = MAX_COMMAND_OUTPUT_BYTES * 2 + 65_536
 export const MAX_FILE_BYTES = 32 * 1_024 * 1_024
 export const MAX_COMMAND_TIMEOUT_MS = 10 * 60 * 1_000
 export const MAX_COMMAND_SCRIPT_BYTES = 65_536

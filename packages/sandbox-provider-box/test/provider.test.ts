@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import type { Identity, SandboxId } from "@waterbox/contracts"
+import { MAX_BASH_OUTPUT_BYTES, MAX_TOOL_RESULT_BYTES, type Identity, type SandboxId } from "@waterbox/contracts"
 import { SandboxService } from "@waterbox/core"
 import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { decodeInvocation } from "@waterbox/cli/protocol"
+import { MAX_COMMAND_OUTPUT_BYTES } from "@waterbox/provider-runtime"
 import { createHash } from "node:crypto"
 import { BOX_RUNTIME_PATH_PROVISIONER, BOX_RUNTIME_PROFILE, BoxSandboxInfrastructure, BoxSandboxProvider, type BoxProviderClock } from "../src/index.ts"
 
@@ -31,6 +32,29 @@ const box = (state = "ready") => Response.json({ ok: true, type: "box.info", box
 const command = (stdout: string, options: Record<string, unknown> = {}) => Response.json({ ok: true, type: "command.finished", success: true, exitCode: 0, stdout, stderr: "", timedOut: false, ...options })
 
 describe("Box primitive contracts", () => {
+  test("preserves dispatch ambiguity when caller cancellation races the command request", async () => {
+    const controller = new AbortController()
+    const { value, requests } = infrastructure(() => {
+      controller.abort(new DOMException("caller left", "AbortError"))
+      throw new DOMException("response lost", "AbortError")
+    })
+    await expect(value.runCommand({ accountId: "account", providerRef: sandboxRef, script: "true", timeoutMs: 1_000, signal: controller.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(requests).toHaveLength(1)
+
+    const beforeDispatch = new AbortController(); beforeDispatch.abort(new DOMException("before dispatch", "AbortError"))
+    await expect(value.runCommand({ accountId: "account", providerRef: sandboxRef, script: "true", timeoutMs: 1_000, signal: beforeDispatch.signal })).rejects.toMatchObject({ name: "AbortError" })
+    expect(requests).toHaveLength(1)
+  })
+
+  test("accepts Box JSON enclosing a maximum escaped Waterbox CLI result", async () => {
+    const output = "\0".repeat(MAX_BASH_OUTPUT_BYTES)
+    const cliResult = JSON.stringify({ title: "Bash command", outcome: "completed", output, metadata: { command: "printf", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } })
+    expect(Buffer.byteLength(cliResult)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES)
+    const { value } = infrastructure(() => command(cliResult))
+    const result = await value.runCommand({ accountId: "account", providerRef: sandboxRef, script: "true", timeoutMs: 1_000, maxStdoutBytes: MAX_COMMAND_OUTPUT_BYTES, maxStderrBytes: MAX_COMMAND_OUTPUT_BYTES, signal: signal() })
+    expect(Buffer.from(result.stdout).toString()).toBe(cliResult)
+    expect(result.stderr).toHaveLength(0)
+  })
   test("rejects configuration without automatic stop", () => {
     const { automaticStopMs: _, ...missingAutomaticStop } = { apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }
     expect(() => new BoxSandboxInfrastructure(missingAutomaticStop as any, { clock: new Clock() })).toThrow("configuration")
@@ -592,20 +616,20 @@ describe("assembled Box compatibility", () => {
       if (body.command.includes("transfer-consume")) return command(JSON.stringify({ transferId, targetPath: "secret", bytes: 6 }) + "\n")
       if (body.command.includes("__internal-bash-observe")) return command(JSON.stringify({ jobId: `job_${"a".repeat(32)}`, state: "completed", chunkBase64: "b2s=", nextOffset: 2, outputSize: 2, exitCode: 0, timedOut: false, durationMs: 1 }) + "\n")
       if (body.command.includes("__internal-bash-cleanup")) return command(JSON.stringify({ jobId: `job_${"a".repeat(32)}`, cleaned: true }) + "\n")
-      const events = [
-        { type: "result", title: "read", output: "", metadata: { filePath: "a", offset: 1 } },
-        { type: "result", title: "write", output: "", metadata: { filePath: "a", bytes: 0 } },
-        { type: "result", title: "edit", output: "", metadata: { filePath: "a", replacements: 0, bytes: 0 } },
-        { type: "result", title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
-        { type: "result", title: "glob", output: "", metadata: { pattern: "*", path: ".", count: 0, truncated: false } },
-        { type: "result", title: "grep", output: "", metadata: { pattern: "x", path: ".", matches: 0, truncated: false } },
-        { type: "result", title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/home/user/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
+      const results = [
+        { title: "read", output: "", metadata: { filePath: "a", offset: 1 } },
+        { title: "write", output: "", metadata: { filePath: "a", bytes: 0 } },
+        { title: "edit", output: "", metadata: { filePath: "a", replacements: 0, bytes: 0 } },
+        { title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
+        { title: "glob", output: "", metadata: { pattern: "*", path: ".", count: 0, truncated: false } },
+        { title: "grep", output: "", metadata: { pattern: "x", path: ".", matches: 0, truncated: false } },
+        { title: "bash", output: "", outcome: "completed", metadata: { command: "true", workdir: "/home/user/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
       ]
-      return command(JSON.stringify(events[toolIndex++]) + "\n")
+      return command(JSON.stringify(results[toolIndex++]) + "\n")
     })
     const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const inputs = [["read", { filePath: "a" }], ["write", { filePath: "a", content: "" }], ["edit", { filePath: "a", oldString: "a", newString: "b" }], ["patch", { patchText: "x" }], ["glob", { pattern: "*" }], ["grep", { pattern: "x" }], ["bash", { command: "true" }]] as const
-    for (const [toolName, arguments_] of inputs) { for await (const _event of provider.executeTool({ accountId: "account", providerRef: sandboxRef, toolName, arguments: arguments_, signal: signal() } as never)) {} }
+    for (const [toolName, arguments_] of inputs) await provider.executeTool({ accountId: "account", providerRef: sandboxRef, toolName, arguments: arguments_, signal: signal() } as never)
     const ciphertext = Buffer.from("cipher").toString("base64")
     await provider.secureFileTransfer.initiate({ accountId: "account", providerRef: sandboxRef, signal: signal() })
     await provider.secureFileTransfer.consume({ accountId: "account", providerRef: sandboxRef, transferId, targetPath: "secret", ciphertext, signal: signal() })

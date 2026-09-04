@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { BashToolEventSchema, ReadToolEventSchema, WriteToolEventSchema } from "@waterbox/contracts"
+import { BashToolResultSchema, ReadToolResultSchema, WriteToolResultSchema } from "@waterbox/contracts"
 import { Encrypter } from "age-encryption"
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -33,11 +33,11 @@ describe("Waterbox one-shot CLI", () => {
     const root = await fixture()
     const written = await invoke(root, "write", { filePath: "a.txt", content: "alpha\n" })
     expect(written.code).toBe(0)
-    WriteToolEventSchema.parse(JSON.parse(written.stdout))
+    WriteToolResultSchema.parse(JSON.parse(written.stdout))
     expect(await readFile(join(root, "a.txt"), "utf8")).toBe("alpha\n")
-    ReadToolEventSchema.parse(JSON.parse((await invoke(root, "read", { filePath: "a.txt" })).stdout))
+    ReadToolResultSchema.parse(JSON.parse((await invoke(root, "read", { filePath: "a.txt" })).stdout))
     const bash = JSON.parse((await invoke(root, "bash", { command: "printf out; printf err >&2" })).stdout)
-    expect(BashToolEventSchema.parse(bash).type).toBe("result")
+    BashToolResultSchema.parse(bash)
     expect(bash.output).toContain("out")
     expect(bash.output).toContain("err")
     expect(bash.outcome).toBe("completed")
@@ -63,8 +63,8 @@ describe("Waterbox one-shot CLI", () => {
     })], { stdout: "pipe", stderr: "pipe" })
     expect(await child.exited).toBe(0)
     expect(Date.now() - started).toBeLessThan(500)
-    const receipt = BashToolEventSchema.parse(JSON.parse(await new Response(child.stdout).text()))
-    if (receipt.type !== "result" || receipt.outcome !== "dispatched") throw new Error("Expected receipt")
+    const receipt = BashToolResultSchema.parse(JSON.parse(await new Response(child.stdout).text()))
+    if (receipt.outcome !== "dispatched") throw new Error("Expected receipt")
     const localOutputPath = join(jobRoot, receipt.metadata.jobId, "output.log")
     const localStatusPath = join(jobRoot, receipt.metadata.jobId, "status.json")
     expect("timeout" in receipt.metadata).toBe(false)

@@ -4,6 +4,7 @@ import { dirname, relative, resolve, sep } from "node:path"
 import { StringDecoder } from "node:string_decoder"
 import { spawn, type ChildProcess } from "node:child_process"
 import {
+  MAX_BASH_OUTPUT_BYTES,
   type BashToolArguments as BashArgs,
   type BashToolEvent as BashStreamEvent,
   type CompletedBashToolResult,
@@ -33,7 +34,6 @@ import {
   type Hunk,
 } from "./vendor/opencode-patch.ts"
 
-const MAX_BASH_OUTPUT_BYTES = 1_048_576
 const MAX_TIMEOUT_MS = 2_147_483_647
 type ToolResponse<Metadata extends Record<string, unknown>> = { title: string; output: string; metadata: Metadata }
 type ReadMetadata = ReadToolResult["metadata"]
@@ -56,17 +56,11 @@ export interface RuntimeOptions {
 }
 
 export interface Runtime {
-  execute(name: ToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<CanonicalToolEvent | ReadableStream<BashStreamEvent>>
+  execute(name: ToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<CanonicalToolResult | ReadableStream<BashStreamEvent>>
   shutdown(): void
 }
 
-export type CanonicalToolEvent =
-  | ({ type: "result" } & ReadToolResult)
-  | ({ type: "result" } & WriteToolResult)
-  | ({ type: "result" } & EditToolResult)
-  | ({ type: "result" } & PatchToolResult)
-  | ({ type: "result" } & GlobToolResult)
-  | ({ type: "result" } & GrepToolResult)
+export type CanonicalToolResult = ReadToolResult | WriteToolResult | EditToolResult | PatchToolResult | GlobToolResult | GrepToolResult
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -613,12 +607,12 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       combinedSignal.throwIfAborted()
       const root = await realpath(configuredRoot)
       combinedSignal.throwIfAborted()
-      if (name === "write") return { type: "result", ...await writeTool(root, body) }
-      if (name === "edit") return { type: "result", ...await editTool(root, body) }
-      if (name === "patch") return { type: "result", ...await patchTool(root, body) }
-      if (name === "read") return { type: "result", ...await readTool(root, body) }
-      if (name === "glob") return { type: "result", ...await globTool(root, body, combinedSignal) }
-      if (name === "grep") return { type: "result", ...await grepTool(root, body, combinedSignal) }
+      if (name === "write") return await writeTool(root, body)
+      if (name === "edit") return await editTool(root, body)
+      if (name === "patch") return await patchTool(root, body)
+      if (name === "read") return await readTool(root, body)
+      if (name === "glob") return await globTool(root, body, combinedSignal)
+      if (name === "grep") return await grepTool(root, body, combinedSignal)
       return await bashTool(root, body, combinedSignal)
     },
     shutdown() {

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
-import { BashToolResultSchema } from "@waterbox/contracts"
+import { BashToolResultSchema, MAX_TOOL_RESULT_BYTES } from "@waterbox/contracts"
 import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -16,7 +16,7 @@ describe("experimental control-plane MCP", () => {
       const request = new Request(input, init); requests.push(request)
       if (request.url.endsWith("/v1/sandboxes")) return Response.json(sandbox, { status: 201 })
       const name = request.url.split("/").at(-1)!
-      return new Response(toolResponse(name), { headers: { "content-type": "application/x-ndjson" } })
+      return Response.json(toolResponse(name))
     }) as typeof fetch
     const directory = await mkdtemp(join(tmpdir(), "waterbox-mcp-test-")), statePath = join(directory, "state.json")
     const server = createExperimentalMcpServer({ apiUrl: "http://127.0.0.1:8787", apiKey: "local-secret", idempotencyKey: "smoke-run", statePath }, fetcher)
@@ -57,10 +57,29 @@ describe("experimental control-plane MCP", () => {
     expect(() => parseExperimentalMcpOptions({ WATERBOX_API_URL: "file:///tmp/x", WATERBOX_API_KEY: "key", WATERBOX_MCP_IDEMPOTENCY_KEY: "run" })).toThrow("invalid")
   })
 
+  test("bounds and cancels invalid public tool result bodies", async () => {
+    let mode = 0, cancelled = false
+    const fetcher = (async (input: RequestInfo | URL) => {
+      if (String(input).endsWith("/v1/sandboxes")) return Response.json(sandbox, { status: 201 })
+      if (mode === 0) return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new TextEncoder().encode("not json")) }, cancel() { cancelled = true } }), { headers: { "content-type": "text/plain" } })
+      if (mode === 1) return new Response("{malformed}", { headers: { "content-type": "application/json" } })
+      return new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(MAX_TOOL_RESULT_BYTES + 1)) }, cancel() { cancelled = true } }), { headers: { "content-type": "application/json" } })
+    }) as typeof fetch
+    const server = createExperimentalMcpServer({ apiUrl: "http://127.0.0.1:8787", apiKey: "local-secret", idempotencyKey: "smoke-run" }, fetcher)
+    const client = new Client({ name: "test", version: "1" })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    try {
+      await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+      await client.callTool({ name: "create_sandbox", arguments: {} })
+      for (mode = 0; mode < 3; mode += 1) expect((await client.callTool({ name: "read", arguments: { filePath: "/workspace/a" } })).isError).toBe(true)
+      expect(cancelled).toBe(true)
+    } finally { await Promise.all([client.close(), server.close()]) }
+  })
+
   test("absorbs a dispatched bash receipt without adding a job tool", async () => {
     const jobId = `job_${"a".repeat(32)}`
     const receipt = {
-      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.", metadata: {
+      outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.", metadata: {
         command: "sleep 20", workdir: "/workspace", timeout: 20_000, jobId,
         outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`,
         statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json`,
@@ -82,7 +101,7 @@ describe("experimental control-plane MCP", () => {
           if (request.signal.aborted) abort()
         })
       }
-      return new Response(`${JSON.stringify(receipt)}\n`, { headers: { "content-type": "application/x-ndjson" } })
+      return Response.json(receipt)
     }) as typeof fetch
     const server = createExperimentalMcpServer({ apiUrl: "http://127.0.0.1:8787", apiKey: "local-secret", idempotencyKey: "smoke-run" }, fetcher, { bashObservationIntervalMs: 5, bashCleanupDeadlineMs: 10 })
     const client = new Client({ name: "test", version: "1" })
@@ -122,7 +141,7 @@ describe("experimental control-plane MCP", () => {
 
   test("renders canonical recovery paths when API observation fails", async () => {
     const jobId = `job_${"f".repeat(32)}`
-    const receipt = { type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "dispatched", metadata: {
+    const receipt = { outcome: "dispatched", title: "Bash command dispatched", output: "dispatched", metadata: {
       command: "top-secret command", workdir: "/workspace", jobId,
       outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json`,
     } }
@@ -130,7 +149,7 @@ describe("experimental control-plane MCP", () => {
       const url = String(input)
       if (url.endsWith("/v1/sandboxes")) return Response.json(sandbox, { status: 201 })
       if (url.endsWith("/observations")) return new Response("sensitive observer failure", { status: 500 })
-      return new Response(`${JSON.stringify(receipt)}\n`, { headers: { "content-type": "application/x-ndjson" } })
+      return Response.json(receipt)
     }) as typeof fetch
     const server = createExperimentalMcpServer({ apiUrl: "http://127.0.0.1:8787", apiKey: "local-secret", idempotencyKey: "smoke-run" }, fetcher)
     const client = new Client({ name: "test", version: "1" })
@@ -151,15 +170,15 @@ describe("experimental control-plane MCP", () => {
   })
 })
 
-function toolResponse(name: string): string {
-  const events: Record<string, unknown> = {
-    read: { type: "result", title: "read", output: "A\n", metadata: { filePath: "/workspace/a.txt", type: "text", offset: 1, lines: 1, totalLines: 1, truncated: false } },
-    write: { type: "result", title: "write", output: "", metadata: { filePath: "/workspace/a.txt", bytes: 2 } },
-    edit: { type: "result", title: "edit", output: "", metadata: { filePath: "/workspace/a.txt", replacements: 1, bytes: 2 } },
-    patch: { type: "result", title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
-    glob: { type: "result", title: "glob", output: "/workspace/a.txt\n", metadata: { pattern: "*.txt", path: "/workspace", count: 1, truncated: false } },
-    grep: { type: "result", title: "grep", output: "/workspace/a.txt:1:B\n", metadata: { pattern: "B", path: "/workspace", matches: 1, truncated: false } },
+function toolResponse(name: string): unknown {
+  const results: Record<string, unknown> = {
+    read: { title: "read", output: "A\n", metadata: { filePath: "/workspace/a.txt", type: "text", offset: 1, lines: 1, totalLines: 1, truncated: false } },
+    write: { title: "write", output: "", metadata: { filePath: "/workspace/a.txt", bytes: 2 } },
+    edit: { title: "edit", output: "", metadata: { filePath: "/workspace/a.txt", replacements: 1, bytes: 2 } },
+    patch: { title: "patch", output: "", metadata: { added: [], updated: [], deleted: [], moved: [] } },
+    glob: { title: "glob", output: "/workspace/a.txt\n", metadata: { pattern: "*.txt", path: "/workspace", count: 1, truncated: false } },
+    grep: { title: "grep", output: "/workspace/a.txt:1:B\n", metadata: { pattern: "B", path: "/workspace", matches: 1, truncated: false } },
   }
-  if (name === "bash") return `${JSON.stringify({ type: "stdout", data: "/workspace\n" })}\n${JSON.stringify({ type: "result", outcome: "completed", title: "bash", output: "/workspace\n", metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } })}\n`
-  return `${JSON.stringify(events[name])}\n`
+  if (name === "bash") return { outcome: "completed", title: "bash", output: "/workspace\n", metadata: { command: "pwd", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
+  return results[name]
 }

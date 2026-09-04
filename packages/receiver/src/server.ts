@@ -72,8 +72,7 @@ export function createReceiver(options: ReceiverOptions = {}): Receiver {
         const name = canonicalPaths.get(path); if (!name) throw new HttpError(404, "Not found")
         const result = await runtime.execute(name, await parseJson(request), request.signal)
         if (result instanceof ReadableStream) return ndjson(result)
-        const { type: _type, ...legacy } = result
-        return json(legacy)
+        return json(result)
       } catch (error) { return errorResponse(error) }
     },
     shutdown: () => runtime.shutdown(),

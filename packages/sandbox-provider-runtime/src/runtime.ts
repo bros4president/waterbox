@@ -1,19 +1,19 @@
 import {
   BashJobObservationSchema,
-  BashToolEventSchema,
-  EditToolEventSchema,
-  GlobToolEventSchema,
-  GrepToolEventSchema,
+  BashToolResultSchema,
+  EditToolResultSchema,
+  GlobToolResultSchema,
+  GrepToolResultSchema,
   MAX_SECURE_CIPHERTEXT_BYTES,
-  PatchToolEventSchema,
-  ReadToolEventSchema,
+  PatchToolResultSchema,
+  ReadToolResultSchema,
   SecureTransferDeliveredSchema,
   SecureTransferInitiatedSchema,
-  WriteToolEventSchema,
+  WriteToolResultSchema,
   type BashJobObservation,
   type SecureTransferDelivered,
   type SecureTransferInitiated,
-  type ToolEventByName,
+  type ToolResultByName,
   type ToolName,
 } from "@waterbox/contracts"
 import {
@@ -74,7 +74,7 @@ const BOOTSTRAP_TIMEOUT_MS = 120_000
 const TOOL_TIMEOUT_MS = 10 * 60 * 1_000
 const HEALTH = JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })
 const VERSION = JSON.stringify({ protocolVersion: 2 })
-const EVENT_SCHEMAS = { read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema, bash: BashToolEventSchema } as const
+const RESULT_SCHEMAS = { read: ReadToolResultSchema, write: WriteToolResultSchema, edit: EditToolResultSchema, patch: PatchToolResultSchema, glob: GlobToolResultSchema, grep: GrepToolResultSchema, bash: BashToolResultSchema } as const
 
 /**
  * Product runtime composition over semantic infrastructure primitives. It has
@@ -222,14 +222,14 @@ export class WaterboxSandboxBackend implements SandboxProvider {
     throw new ProviderError("ambiguous_execution", "Runtime preparation outcome is unknown")
   }
 
-  async *executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]> {
+  async executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): Promise<ToolResultByName[N]> {
+    input.signal.throwIfAborted()
     let payload: string
     try { payload = encodeInvocation(input.toolName, input.arguments as never) }
     catch (error) { if (error instanceof CliProtocolError) throw new ProviderError("failure", "The tool invocation exceeds the runtime command limit"); throw error }
     const result = await this.#runUserCommand(primitiveInput(input), `${quotePosixShellWord(this.#runtimeProfile.persistentPaths.launcherPath)} run ${quotePosixShellWord(payload)}`, input.toolName)
-    try { yield EVENT_SCHEMAS[input.toolName].parse(oneJsonLine(result.stdout)) as ToolEventByName[N] }
-    catch (error) {
-      if (input.signal.aborted) throw input.signal.reason ?? error
+    try { return RESULT_SCHEMAS[input.toolName].parse(oneJsonLine(result.stdout)) as ToolResultByName[N] }
+    catch (_error) {
       this.#emit({ type: "tool-event-invalid", tool: input.toolName })
       throw new ProviderError("ambiguous_execution", "Tool execution outcome is unknown")
     }
@@ -290,7 +290,7 @@ export class WaterboxSandboxBackend implements SandboxProvider {
     let result: InfrastructureCommandResult
     try { result = await this.#command(input, script, TOOL_TIMEOUT_MS) }
     catch (error) {
-      if (input.signal.aborted) throw input.signal.reason ?? error
+      if (error instanceof ProviderError && error.kind === "ambiguous_execution") throw error
       if (error instanceof ProviderError && error.kind !== "ambiguous_execution") throw error
       throw new ProviderError("ambiguous_execution", "Tool execution outcome is unknown")
     }

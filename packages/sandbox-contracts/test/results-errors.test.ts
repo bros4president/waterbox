@@ -3,16 +3,16 @@ import {
   BashJobObservationSchema,
   BashToolEventSchema,
   BashToolResultSchema,
-  EditToolEventSchema,
+  EditToolResultSchema,
   type ErrorEnvelope,
   ErrorCodeSchema,
   ErrorEnvelopeSchema,
-  GlobToolEventSchema,
-  GrepToolEventSchema,
-  PatchToolEventSchema,
-  ReadToolEventSchema,
+  GlobToolResultSchema,
+  GrepToolResultSchema,
+  PatchToolResultSchema,
+  ReadToolResultSchema,
   ToolNameSchema,
-  WriteToolEventSchema,
+  WriteToolResultSchema,
 } from "../src/index.ts"
 
 const base = { title: "complete", output: "ok" }
@@ -22,17 +22,17 @@ describe("tool results and events", () => {
     expect(ToolNameSchema.options).toEqual(["read", "write", "edit", "patch", "glob", "grep", "bash"])
   })
 
-  test("accepts one final result event for every non-streaming tool", () => {
-    const events = [
-      [ReadToolEventSchema, { ...base, metadata: { filePath: "a.ts", type: "text", offset: 1, lines: 1, totalLines: 1 } }],
-      [WriteToolEventSchema, { ...base, metadata: { filePath: "a.ts", bytes: 2 } }],
-      [EditToolEventSchema, { ...base, metadata: { filePath: "a.ts", replacements: 1, bytes: 2 } }],
-      [PatchToolEventSchema, { ...base, metadata: { added: [], updated: ["a.ts"], deleted: [], moved: [] } }],
-      [GlobToolEventSchema, { ...base, metadata: { pattern: "*.ts", path: ".", count: 1, truncated: false } }],
-      [GrepToolEventSchema, { ...base, metadata: { pattern: "x", path: ".", matches: 1, truncated: false } }],
+  test("accepts one result for every non-Bash tool", () => {
+    const results = [
+      [ReadToolResultSchema, { ...base, metadata: { filePath: "a.ts", type: "text", offset: 1, lines: 1, totalLines: 1 } }],
+      [WriteToolResultSchema, { ...base, metadata: { filePath: "a.ts", bytes: 2 } }],
+      [EditToolResultSchema, { ...base, metadata: { filePath: "a.ts", replacements: 1, bytes: 2 } }],
+      [PatchToolResultSchema, { ...base, metadata: { added: [], updated: ["a.ts"], deleted: [], moved: [] } }],
+      [GlobToolResultSchema, { ...base, metadata: { pattern: "*.ts", path: ".", count: 1, truncated: false } }],
+      [GrepToolResultSchema, { ...base, metadata: { pattern: "x", path: ".", matches: 1, truncated: false } }],
     ] as const
 
-    for (const [schema, result] of events) expect(schema.safeParse({ type: "result", ...result }).success).toBe(true)
+    for (const [schema, result] of results) expect(schema.safeParse(result).success).toBe(true)
   })
 
   test("accepts ordered NDJSON-compatible bash event shapes", () => {
@@ -99,7 +99,7 @@ describe("tool results and events", () => {
     expect(BashToolEventSchema.safeParse({ type: "stdout", data: 1 }).success).toBe(false)
     expect(BashToolEventSchema.safeParse({ type: "progress", data: "x" }).success).toBe(false)
     expect(BashToolEventSchema.safeParse({ type: "stderr", data: "x", providerRef: {} }).success).toBe(false)
-    expect(ReadToolEventSchema.safeParse({ type: "stdout", data: "x" }).success).toBe(false)
+    expect(ReadToolResultSchema.safeParse({ type: "stdout", data: "x" }).success).toBe(false)
     expect(BashToolEventSchema.safeParse({
       type: "result",
       outcome: "completed",

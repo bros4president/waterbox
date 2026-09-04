@@ -3,8 +3,7 @@ import { Decrypter, generateIdentity, identityToRecipient } from "age-encryption
 import {
   MAX_API_ERROR_RESPONSE_BYTES,
   MAX_API_JSON_RESPONSE_BYTES,
-  MAX_API_NDJSON_LINE_BYTES,
-  MAX_API_NDJSON_TOTAL_BYTES,
+  MAX_API_TOOL_RESULT_BYTES,
   WaterboxClient,
   WaterboxClientError,
   createRemoteApiBackend,
@@ -32,9 +31,6 @@ class FakeBackend implements ApiBackend {
 
 function json(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } })
-}
-function ndjson(...values: unknown[]): Response {
-  return new Response(values.map(value => `${JSON.stringify(value)}\n`).join(""), { headers: { "content-type": "application/x-ndjson" } })
 }
 
 describe("remote backend", () => {
@@ -105,8 +101,8 @@ describe("simple commands", () => {
   })
 })
 
-describe("tool streams", () => {
-  test("all simple tools decode their canonical terminal result from split NDJSON", async () => {
+describe("tool results", () => {
+  test("all simple tools decode their canonical JSON result", async () => {
     const results = {
       read: { title: "Read", output: "x", metadata: { filePath: "/x", offset: 1 } },
       write: { title: "Write", output: "ok", metadata: { filePath: "/x", bytes: 1 } },
@@ -117,8 +113,7 @@ describe("tool streams", () => {
     }
     const names = Object.keys(results) as (keyof typeof results)[]
     const backend = new FakeBackend((_, index) => {
-      const bytes = new TextEncoder().encode(JSON.stringify({ type: "result", ...results[names[index]!] }) + "\n")
-      return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes.slice(0, 3)); controller.enqueue(bytes.slice(3)); controller.close() } }), { headers: { "content-type": "application/x-ndjson" } })
+      return json(results[names[index]!])
     })
     const client = new WaterboxClient(backend)
     expect(await client.read({ sandboxId, filePath: "/x" }, { signal })).toEqual(results.read)
@@ -130,11 +125,8 @@ describe("tool streams", () => {
     expect(backend.requests).toHaveLength(6)
   })
 
-  test("rejects missing, malformed, and followed terminal results", async () => {
-    const responses = [ndjson(), ndjson({ nope: true }), ndjson(
-      { type: "result", title: "Read", output: "x", metadata: { filePath: "/x", offset: 1 } },
-      { type: "result", title: "Read", output: "x", metadata: { filePath: "/x", offset: 1 } },
-    )]
+  test("rejects missing, malformed, and unexpected result fields", async () => {
+    const responses = [json({}), json({ nope: true }), json({ title: "Read", output: "x", metadata: { filePath: "/x", offset: 1 }, type: "result" })]
     const client = new WaterboxClient(new FakeBackend((_, index) => responses[index]!))
     for (let index = 0; index < 3; index += 1) await expect(client.read({ sandboxId, filePath: "/x" }, { signal })).rejects.toBeInstanceOf(WaterboxClientError)
   })
@@ -237,46 +229,36 @@ describe("bounded parsing", () => {
     }
   })
 
-  test("cancels oversized NDJSON lines, pending lines, and total streams", async () => {
+  test("cancels oversized tool result bodies", async () => {
     const cases = [
-      [new Uint8Array(MAX_API_NDJSON_LINE_BYTES + 2).fill(97)],
-      [new Uint8Array(MAX_API_NDJSON_LINE_BYTES + 1).fill(97), new Uint8Array([10])],
-      [new Uint8Array(MAX_API_NDJSON_LINE_BYTES).fill(10), new Uint8Array(MAX_API_NDJSON_LINE_BYTES).fill(10), new Uint8Array([10])],
+      [new Uint8Array(MAX_API_TOOL_RESULT_BYTES + 1).fill(97)],
     ]
     for (const chunks of cases) {
       let cancelled = false
       const body = new ReadableStream<Uint8Array>({ start(controller) { for (const chunk of chunks) controller.enqueue(chunk) }, cancel() { cancelled = true } })
-      const client = new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/x-ndjson" } })))
+      const client = new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/json" } })))
       await expect(client.read({ sandboxId, filePath: "/x" }, { signal })).rejects.toBeInstanceOf(WaterboxClientError)
       expect(cancelled).toBe(true)
     }
   })
 
-  test("cancels the active NDJSON reader on schema, sequence, and line parse rejection", async () => {
+  test("rejects malformed JSON results", async () => {
     const values = [
-      `${JSON.stringify({ invalid: true })}\n`,
-      `${JSON.stringify({ type: "result", title: "Read", output: "x", metadata: { filePath: "/x", offset: 1 } })}\n${JSON.stringify({ type: "result", title: "Read", output: "late", metadata: { filePath: "/x", offset: 1 } })}\n`,
-      "{not-json}\n",
+      JSON.stringify({ invalid: true }),
+      "{not-json}",
     ]
     for (const value of values) {
-      let cancelled = false
       const body = new ReadableStream<Uint8Array>({
-        start(controller) { controller.enqueue(new TextEncoder().encode(value)) },
-        cancel() { cancelled = true },
+        start(controller) { controller.enqueue(new TextEncoder().encode(value)); controller.close() },
       })
-      const client = new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/x-ndjson" } })))
+      const client = new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/json" } })))
       await expect(client.read({ sandboxId, filePath: "/x" }, { signal })).rejects.toBeInstanceOf(WaterboxClientError)
-      expect(cancelled).toBe(true)
     }
   })
 
-  test("redacts successful JSON and NDJSON reader failures", async () => {
+  test("redacts successful JSON reader failures", async () => {
     const secret = "https://reader-secret.test/?token=credential"
-    const responses = [
-      new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error(secret)) } }), { headers: { "content-type": "application/json" } }),
-      new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error(secret)) } }), { headers: { "content-type": "application/x-ndjson" } }),
-    ]
-    const client = new WaterboxClient(new FakeBackend((_, index) => responses[index]!))
+    const client = new WaterboxClient(new FakeBackend(() => new Response(new ReadableStream<Uint8Array>({ pull(controller) { controller.error(new Error(secret)) } }), { headers: { "content-type": "application/json" } })))
     for (const operation of [
       () => client.probeSandbox({ sandboxId }, { signal }),
       () => client.read({ sandboxId, filePath: "/x" }, { signal }),
@@ -288,15 +270,15 @@ describe("bounded parsing", () => {
     }
   })
 
-  test("parses a highly fragmented NDJSON line without changing its output", async () => {
-    const event = { type: "result", title: "Read", output: "x".repeat(12_000), metadata: { filePath: "/x", offset: 1 } }
-    const bytes = new TextEncoder().encode(`${JSON.stringify(event)}\n`)
+  test("parses a highly fragmented JSON result without changing its output", async () => {
+    const result = { title: "Read", output: "x".repeat(12_000), metadata: { filePath: "/x", offset: 1 } }
+    const bytes = new TextEncoder().encode(JSON.stringify(result))
     const body = new ReadableStream<Uint8Array>({
       start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close() },
     })
-    const result = await new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/x-ndjson" } })))
+    const parsed = await new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/json" } })))
       .read({ sandboxId, filePath: "/x" }, { signal })
-    expect(result).toEqual({ title: event.title, output: event.output, metadata: event.metadata })
+    expect(parsed).toEqual(result)
   })
 
   test("propagates caller abort and cancels an uncoupled JSON response reader", async () => {
@@ -314,7 +296,7 @@ describe("bounded parsing", () => {
     expect(cancelled).toBe(true)
   })
 
-  test("propagates caller abort and cancels an uncoupled NDJSON response reader", async () => {
+  test("propagates caller abort and cancels an uncoupled tool result reader", async () => {
     const controller = new AbortController()
     const reason = new DOMException("stream cancelled", "AbortError")
     let cancelled = false
@@ -322,7 +304,7 @@ describe("bounded parsing", () => {
       start(stream) { stream.enqueue(new TextEncoder().encode("{")) },
       cancel(value) { cancelled = value === reason || value === undefined },
     })
-    const pending = new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/x-ndjson" } })))
+    const pending = new WaterboxClient(new FakeBackend(() => new Response(body, { headers: { "content-type": "application/json" } })))
       .read({ sandboxId, filePath: "/x" }, { signal: controller.signal })
     const result = pending.catch(value => value)
     await Bun.sleep(0); controller.abort(reason)
@@ -377,7 +359,7 @@ describe("bounded parsing", () => {
 })
 
 describe("composite Bash", () => {
-  const receipt = { type: "result", title: "Bash", outcome: "dispatched", output: "started", metadata: {
+  const receipt = { title: "Bash", outcome: "dispatched", output: "started", metadata: {
     command: "printf hi", workdir: "/workspace", jobId: "job_0123456789abcdef0123456789abcdef",
     outputPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/output.log",
     statusPath: "/run/waterbox/bash-jobs/job_0123456789abcdef0123456789abcdef/status.json",
@@ -388,7 +370,7 @@ describe("composite Bash", () => {
       { jobId: receipt.metadata.jobId, state: "running", chunkBase64: btoa("hi"), nextOffset: 2, outputSize: 2 },
       { jobId: receipt.metadata.jobId, state: "completed", chunkBase64: btoa("!"), nextOffset: 3, outputSize: 3, exitCode: 0, signal: null, timedOut: false, durationMs: 2 },
     ]
-    const backend = new FakeBackend((request, index) => index === 0 ? ndjson(receipt) : index < 3 ? json(observations[index - 1]) : new Response(null, { status: 204 }))
+    const backend = new FakeBackend((request, index) => index === 0 ? json(receipt) : index < 3 ? json(observations[index - 1]) : new Response(null, { status: 204 }))
     let progress = 0
     const result = await new WaterboxClient(backend, { bashObservationIntervalMs: 0, bashCleanupDeadlineMs: 100 }).bash({ sandboxId, command: "printf hi" }, { signal, onProgress() { progress += 1 } })
     expect(result).toMatchObject({ outcome: "completed", output: "hi!", metadata: { outputTruncated: false } })
@@ -400,7 +382,7 @@ describe("composite Bash", () => {
   })
 
   test("returns the original recovery receipt on observation failure or cancellation", async () => {
-    const backend = new FakeBackend((_, index) => index === 0 ? ndjson(receipt) : json({ invalid: true }))
+    const backend = new FakeBackend((_, index) => index === 0 ? json(receipt) : json({ invalid: true }))
     const result = await new WaterboxClient(backend).bash({ sandboxId, command: "printf hi" }, { signal })
     expect(result).toMatchObject({ outcome: "dispatched", metadata: { jobId: receipt.metadata.jobId } })
     expect(result.output).toContain("Recovery statusPath")
@@ -409,7 +391,7 @@ describe("composite Bash", () => {
 
   test("turns observation cancellation into the durable receipt fallback", async () => {
     const controller = new AbortController()
-    const backend = new FakeBackend((request, index) => index === 0 ? ndjson(receipt) : new Promise((_, reject) => {
+    const backend = new FakeBackend((request, index) => index === 0 ? json(receipt) : new Promise((_, reject) => {
       request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true })
     }))
     const pending = new WaterboxClient(backend).bash({ sandboxId, command: "printf hi" }, { signal: controller.signal })
@@ -423,7 +405,7 @@ describe("composite Bash", () => {
     const encoded = btoa("a".repeat(chunk.byteLength))
     let offset = 0
     const backend = new FakeBackend((_, index) => {
-      if (index === 0) return ndjson(receipt)
+      if (index === 0) return json(receipt)
       offset += chunk.byteLength
       return json({ jobId: receipt.metadata.jobId, state: index === 17 ? "completed" : "running", chunkBase64: encoded,
         nextOffset: offset, outputSize: offset, ...(index === 17 ? { exitCode: 0, signal: null, timedOut: false, durationMs: 1 } : {}) })
@@ -437,7 +419,7 @@ describe("composite Bash", () => {
     const completed = { jobId: receipt.metadata.jobId, state: "completed", chunkBase64: "", nextOffset: 0, outputSize: 0,
       exitCode: 0, signal: null, timedOut: false, durationMs: 1 }
     let cleanupAborted = false
-    const backend = new FakeBackend((request, index) => index === 0 ? ndjson(receipt) : index === 1 ? json(completed) : new Promise((_, reject) => {
+    const backend = new FakeBackend((request, index) => index === 0 ? json(receipt) : index === 1 ? json(completed) : new Promise((_, reject) => {
       request.signal.addEventListener("abort", () => { cleanupAborted = true; reject(request.signal.reason) }, { once: true })
     }))
     await new WaterboxClient(backend, { bashCleanupDeadlineMs: 1 }).bash({ sandboxId, command: "true" }, { signal })
@@ -446,10 +428,10 @@ describe("composite Bash", () => {
   })
 
   test("does not observe a completed execution", async () => {
-    const completed = { type: "result", title: "Bash", outcome: "completed", output: "ok", metadata: {
+    const completed = { title: "Bash", outcome: "completed", output: "ok", metadata: {
       command: "true", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false,
     } }
-    const backend = new FakeBackend(() => ndjson(completed))
+    const backend = new FakeBackend(() => json(completed))
     expect((await new WaterboxClient(backend).bash({ sandboxId, command: "true" }, { signal })).outcome).toBe("completed")
     expect(backend.requests).toHaveLength(1)
   })
@@ -457,7 +439,7 @@ describe("composite Bash", () => {
   test("enforces exact observation and cleanup success statuses", async () => {
     let observationCancelled = false
     const observationBody = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([1])) }, cancel() { observationCancelled = true } })
-    const observationBackend = new FakeBackend((_, index) => index === 0 ? ndjson(receipt) : new Response(observationBody, { status: 201 }))
+    const observationBackend = new FakeBackend((_, index) => index === 0 ? json(receipt) : new Response(observationBody, { status: 201 }))
     expect(await new WaterboxClient(observationBackend).bash({ sandboxId, command: "true" }, { signal })).toMatchObject({ outcome: "dispatched" })
     expect(observationCancelled).toBe(true)
 
@@ -465,7 +447,7 @@ describe("composite Bash", () => {
       exitCode: 0, signal: null, timedOut: false, durationMs: 1 }
     let cleanupCancelled = false
     const cleanupBody = new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array([1])) }, cancel() { cleanupCancelled = true } })
-    const cleanupBackend = new FakeBackend((_, index) => index === 0 ? ndjson(receipt) : index === 1 ? json(completed) : new Response(cleanupBody, { status: 200 }))
+    const cleanupBackend = new FakeBackend((_, index) => index === 0 ? json(receipt) : index === 1 ? json(completed) : new Response(cleanupBody, { status: 200 }))
     expect(await new WaterboxClient(cleanupBackend).bash({ sandboxId, command: "true" }, { signal })).toMatchObject({ outcome: "completed" })
     await Bun.sleep(0)
     expect(cleanupCancelled).toBe(true)

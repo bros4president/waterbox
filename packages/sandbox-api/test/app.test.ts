@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
-import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH, type SandboxId } from "@waterbox/contracts"
+import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH, MAX_TOOL_RESULT_BYTES, type SandboxId } from "@waterbox/contracts"
 import { FakeSandboxProvider, FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { ProviderError } from "@waterbox/core/provider"
 import { createWaterboxApi, type IdentityResolver, type WaterboxCore } from "../src/index.ts"
@@ -51,9 +51,7 @@ function api(
     consumeSecureFileTransfer: method("consumeSecureFileTransfer", delivery),
     observeBashJob: method("observeBashJob", { jobId: `job_${"a".repeat(32)}`, state: "running", chunkBase64: "", nextOffset: 0, outputSize: 0 }),
     cleanupBashJob: method("cleanupBashJob", undefined),
-    executeTool: method("executeTool", (async function* () {
-      yield { type: "result", title: "read", output: "ok", metadata: { filePath: "/workspace/a", offset: 1 } }
-    })()),
+    executeTool: method("executeTool", { title: "read", output: "ok", metadata: { filePath: "/workspace/a", offset: 1 } }),
     ...overrides,
   } as unknown as WaterboxCore
   return {
@@ -478,81 +476,28 @@ describe("Waterbox API", () => {
     expect(text).not.toContain("protected-secret")
   })
 
-  test("streams NDJSON incrementally and cancellation reaches core", async () => {
+  test("returns one JSON result and forwards cancellation to core", async () => {
     let signal!: AbortSignal
-    let returns = 0
-    const events = {
-      [Symbol.asyncIterator]() {
-        let nexts = 0
-        return {
-          async next() {
-            nexts += 1
-            if (nexts === 1) return { done: false, value: { type: "stdout", data: "first" } }
-            return await new Promise<IteratorResult<unknown>>(() => {})
-          },
-          return() {
-            returns += 1
-            expect(signal.aborted).toBeTrue()
-            return new Promise<IteratorResult<unknown>>(() => {})
-          },
-        }
-      },
-    }
-    const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events as never } })
+    const result = { title: "Bash", outcome: "completed", output: "first", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } }
+    const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return result as never } })
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
-    expect(response.headers.get("content-type")).toContain("application/x-ndjson")
-    const reader = response.body!.getReader()
-    const first = await reader.read()
-    expect(new TextDecoder().decode(first.value)).toBe('{"type":"stdout","data":"first"}\n')
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(await response.json()).toEqual(result)
     expect(signal.aborted).toBeFalse()
-    const cancelling = reader.cancel("client gone")
-    expect(signal.aborted).toBeTrue()
-    expect(await Promise.race([cancelling.then(() => true), new Promise(resolve => setTimeout(() => resolve(false), 50))])).toBeTrue()
-    expect(returns).toBe(1)
   })
 
-  test("delivers provider stream failures without waiting for iterator cleanup", async () => {
-    const cases = [
-      ["failure before first event", "resolve", async (next: number) => { if (next === 1) throw new Error("provider setup secret"); return { done: true, value: undefined } }, 500],
-      ["empty iteration", "reject", async () => ({ done: true, value: undefined }), 502],
-      ["malformed output", "throw", async (next: number) => next === 1 ? { done: false, value: { type: "stdout", data: "first" } } : { done: false, value: { invalid: "provider output secret" } }, 200],
-      ["iterator failure", "never", async (next: number) => { if (next === 1) return { done: false, value: { type: "stdout", data: "first" } }; throw new Error("provider iterator secret") }, 200],
-    ] as const
-    for (const [name, cleanup, next, status] of cases) {
-      let signal!: AbortSignal
-      let returns = 0
-      let nexts = 0
-      const events = {
-        [Symbol.asyncIterator]() {
-          return {
-            async next() {
-              nexts += 1
-              return next(nexts)
-            },
-            return() {
-              returns += 1
-              expect(signal.aborted, name).toBeTrue()
-              if (cleanup === "throw") throw new Error("cleanup failed")
-              if (cleanup === "reject") return Promise.reject(new Error("cleanup failed"))
-              if (cleanup === "never") return new Promise(() => {})
-              return Promise.resolve({ done: true, value: undefined })
-            },
-          }
-        },
-      }
-      const { app } = api({ executeTool: async (...args: unknown[]) => { signal = args.at(-1) as AbortSignal; return events as never } })
-      const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"x"}' })
-      expect(response.status, name).toBe(status)
-      if (status === 200) await expect(response.text()).rejects.toBeDefined()
-      expect(nexts, name).toBe(status === 200 ? 2 : 1)
-      expect(signal.aborted).toBeTrue()
-      expect(returns).toBe(1)
-    }
+  test("rejects an oversized serialized tool result before returning 200", async () => {
+    const result = { title: "Read", output: "x".repeat(MAX_TOOL_RESULT_BYTES), metadata: { filePath: "/workspace/a", offset: 1 } }
+    const { app } = api({ executeTool: async () => result as never })
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/read`, { method: "POST", headers: jsonHeaders, body: '{"filePath":"/workspace/a"}' })
+    expect(response.status).toBe(502)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(await response.json()).toEqual({ error: { code: "provider_failure", message: "The provider operation failed", requestId: "req_test" } })
   })
 
   test("forwards a dispatched bash receipt unchanged", async () => {
     const receipt = {
-      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
+      outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
       metadata: {
         command: "sleep 20", workdir: "/workspace", timeout: 20_000,
         jobId: `job_${"a".repeat(32)}`,
@@ -560,15 +505,13 @@ describe("Waterbox API", () => {
         statusPath: `/run/waterbox/bash-jobs/job_${"a".repeat(32)}/status.json`,
       },
     } as const
-    const events = async function* () { yield receipt }
-    const { app } = api({ executeTool: async () => events() })
+    const { app } = api({ executeTool: async () => receipt })
 
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/bash`, { method: "POST", headers: jsonHeaders, body: '{"command":"sleep 20","timeout":20000}' })
 
     expect(response.status).toBe(200)
-    const body = await response.text()
-    expect(body.endsWith("\n")).toBeTrue()
-    expect(JSON.parse(body)).toEqual(receipt)
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect(await response.json()).toEqual(receipt)
   })
 
   test("authenticates, validates, and forwards canonical Bash job primitives", async () => {
@@ -593,14 +536,14 @@ describe("Waterbox API", () => {
     expect((await app.request(`/v1/internal/sandboxes/${sandbox.sandboxId}/bash-jobs/${jobId}/observe`, { method: "POST", headers: jsonHeaders, body: '{"offset":0,"maxBytes":1}' })).status).toBe(404)
   })
 
-  test("returns a normal error envelope when the provider fails before its first event", async () => {
-    const { app } = api({ executeTool: async () => ({ async *[Symbol.asyncIterator]() { throw new DomainError("ambiguous_execution", "unknown") } }) })
+  test("returns a normal error envelope when tool execution fails", async () => {
+    const { app } = api({ executeTool: async () => { throw new DomainError("ambiguous_execution", "unknown") } })
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}/tools/read`, { method: "POST", headers: jsonHeaders, body: '{"filePath":"x"}' })
     expect(response.status).toBe(502)
     expect(await response.json()).toMatchObject({ error: { code: "ambiguous_execution" } })
   })
 
-  test("generates deterministic OpenAPI 3.1 with every route, auth, errors, and NDJSON", async () => {
+  test("generates deterministic OpenAPI 3.1 with every route, auth, errors, and JSON results", async () => {
     const { app } = api()
     const first = await (await app.request("/openapi.json")).text()
     const second = await (await app.request("/openapi.json")).text()
@@ -611,7 +554,7 @@ describe("Waterbox API", () => {
       expect(document.paths[path], path).toBeDefined()
     }
     expect(document.components.securitySchemes.bearerAuth).toEqual({ type: "http", scheme: "bearer" })
-    expect(document.paths["/v1/sandboxes/{sandboxId}/tools/{toolName}"].post.responses[200].content["application/x-ndjson"]).toBeDefined()
+    expect(document.paths["/v1/sandboxes/{sandboxId}/tools/{toolName}"].post.responses[200].content["application/json"]).toBeDefined()
     expect(document.paths["/v1/sandboxes"].post.responses[401]).toBeDefined()
     expect(first).toContain('"preparing"')
     expect(first).toContain('"sandboxId"')

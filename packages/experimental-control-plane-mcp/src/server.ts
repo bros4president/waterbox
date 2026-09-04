@@ -2,15 +2,15 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import {
-  BashToolEventSchema,
   BashToolResultSchema,
-  EditToolEventSchema,
-  GlobToolEventSchema,
-  GrepToolEventSchema,
-  PatchToolEventSchema,
-  ReadToolEventSchema,
+  EditToolResultSchema,
+  GlobToolResultSchema,
+  GrepToolResultSchema,
+  MAX_TOOL_RESULT_BYTES,
+  PatchToolResultSchema,
+  ReadToolResultSchema,
   SandboxSchema,
-  WriteToolEventSchema,
+  WriteToolResultSchema,
   type Sandbox,
   type ToolName,
 } from "@waterbox/contracts"
@@ -167,11 +167,11 @@ export function createExperimentalMcpServer(options: ExperimentalMcpOptions, fet
         await persist()
         const response = await apiFetch(options, fetcher, `/v1/sandboxes/${encodeURIComponent(active.sandboxId)}/tools/${request.params.name}`, {
           method: "POST",
-          headers: { "content-type": "application/json", accept: "application/x-ndjson" },
+          headers: { "content-type": "application/json", accept: "application/json" },
           body: JSON.stringify(request.params.arguments ?? {}),
           signal: extra.signal,
         })
-        const result = request.params.name === "bash" ? await readBashResult(response, options, fetcher, active.sandboxId, extra, runtime.bashObservationIntervalMs, runtime.bashCleanupDeadlineMs) : await readToolResult(request.params.name, response)
+        const result = request.params.name === "bash" ? await readBashResult(response, options, fetcher, active.sandboxId, extra, runtime.bashObservationIntervalMs, runtime.bashCleanupDeadlineMs) : await readToolResult(request.params.name, response, extra.signal)
         counts.completed += 1
         await persist()
         return result
@@ -194,28 +194,10 @@ async function apiFetch(options: ExperimentalMcpOptions, fetcher: typeof fetch, 
 }
 
 async function readBashResult(response: Response, options: ExperimentalMcpOptions, fetcher: typeof fetch, sandboxId: string, extra: { signal: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }, intervalMs?: number, cleanupDeadlineMs?: number) {
-  if (!response.body || response.headers.get("content-type")?.split(";", 1)[0] !== "application/x-ndjson") throw new Error("Waterbox bash returned an invalid stream")
-  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader()
-  const events: Array<ReturnType<typeof BashToolEventSchema.parse>> = []
-  let pending = ""
-  while (true) {
-    const item = await reader.read()
-    if (item.done) break
-    pending += item.value
-    let newline: number
-    while ((newline = pending.indexOf("\n")) >= 0) {
-      const line = pending.slice(0, newline)
-      pending = pending.slice(newline + 1)
-      if (!line) throw new Error("Waterbox bash returned an invalid stream")
-      events.push(BashToolEventSchema.parse(JSON.parse(line)))
-    }
-  }
-  if (pending || events.filter(event => event.type === "result").length !== 1 || events.at(-1)?.type !== "result") throw new Error("Waterbox bash returned an incomplete stream")
-  const final = events.at(-1)
-  if (!final || final.type !== "result") throw new Error("Waterbox bash stream ended without a result")
-  const output = events.filter(event => event.type === "stdout" || event.type === "stderr").map(event => event.data).join("")
+  if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/json") throw new Error("Waterbox bash returned an invalid result")
+  const final = BashToolResultSchema.parse(await toolJson(response, extra.signal, "bash"))
   if (final.outcome === "dispatched") return absorbReceipt(options, fetcher, sandboxId, final, extra, intervalMs, cleanupDeadlineMs)
-  const displayedOutput = output || final.output
+  const displayedOutput = final.output
   const structuredContent = BashToolResultSchema.parse({ title: final.title, outcome: "completed", output: displayedOutput, metadata: final.metadata })
   return {
     content: [{ type: "text" as const, text: displayedOutput }],
@@ -224,7 +206,7 @@ async function readBashResult(response: Response, options: ExperimentalMcpOption
   }
 }
 
-async function absorbReceipt(options: ExperimentalMcpOptions, fetcher: typeof fetch, sandboxId: string, receipt: Extract<ReturnType<typeof BashToolEventSchema.parse>, { type: "result"; outcome: "dispatched" }>, extra: { signal: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }, intervalMs = 1_000, cleanupDeadlineMs = BASH_CLEANUP_DEADLINE_MS) {
+async function absorbReceipt(options: ExperimentalMcpOptions, fetcher: typeof fetch, sandboxId: string, receipt: Extract<ReturnType<typeof BashToolResultSchema.parse>, { outcome: "dispatched" }>, extra: { signal: AbortSignal; _meta?: { progressToken?: string | number }; sendNotification: (notification: any) => Promise<void> }, intervalMs = 1_000, cleanupDeadlineMs = BASH_CLEANUP_DEADLINE_MS) {
   let offset = 0, retained = "", retainedBytes = 0
   let outputTruncated = false
   const decoder = new TextDecoder("utf-8")
@@ -322,13 +304,36 @@ function abortableSleep(milliseconds: number, signal: AbortSignal): Promise<void
   })
 }
 
-async function readToolResult(name: Exclude<ToolName, "bash">, response: Response) {
-  if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/x-ndjson") throw new Error(`Waterbox ${name} returned an invalid stream`)
-  const body = await response.text()
-  if (!body.endsWith("\n") || body.slice(0, -1).includes("\n")) throw new Error(`Waterbox ${name} returned an incomplete stream`)
-  const value = JSON.parse(body.slice(0, -1))
-  const event = ({ read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema } as const)[name].parse(value)
-  return text({ output: event.output, metadata: event.metadata })
+async function readToolResult(name: Exclude<ToolName, "bash">, response: Response, signal: AbortSignal) {
+  const result = ({ read: ReadToolResultSchema, write: WriteToolResultSchema, edit: EditToolResultSchema, patch: PatchToolResultSchema, glob: GlobToolResultSchema, grep: GrepToolResultSchema } as const)[name].parse(await toolJson(response, signal, name))
+  return text({ output: result.output, metadata: result.metadata })
+}
+
+async function toolJson(response: Response, signal: AbortSignal, name: string): Promise<unknown> {
+  if (response.headers.get("content-type")?.split(";", 1)[0] !== "application/json") { await response.body?.cancel().catch(() => undefined); throw new Error(`Waterbox ${name} returned an invalid result`) }
+  if (!response.body) throw new Error(`Waterbox ${name} returned an invalid result`)
+  const reader = response.body.getReader(), chunks: Uint8Array[] = []; let length = 0, done = false
+  const abort = () => { void reader.cancel(signal.reason).catch(() => undefined) }
+  signal.addEventListener("abort", abort, { once: true })
+  try {
+    while (true) {
+      signal.throwIfAborted()
+      const item = await reader.read()
+      signal.throwIfAborted()
+      if (item.done) { done = true; break }
+      length += item.value.byteLength
+      if (length > MAX_TOOL_RESULT_BYTES) throw new Error(`Waterbox ${name} returned an invalid result`)
+      chunks.push(item.value)
+    }
+    const bytes = new Uint8Array(length); let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) }
+    catch { throw new Error(`Waterbox ${name} returned an invalid result`) }
+  } finally {
+    signal.removeEventListener("abort", abort)
+    if (!done) await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
 }
 
 function isToolName(value: string): value is ToolName { return ["read", "write", "edit", "patch", "glob", "grep", "bash"].includes(value) }

@@ -3,12 +3,11 @@ import { randomBytes } from "node:crypto"
 import { constants } from "node:fs"
 import { chmod, lstat, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises"
 import { relative, resolve, sep } from "node:path"
-import { BashToolArgumentsSchema, type BashToolArguments, type BashToolResult } from "@waterbox/contracts"
+import { BashToolArgumentsSchema, MAX_BASH_OUTPUT_BYTES, type BashToolArguments, type BashToolResult } from "@waterbox/contracts"
 import { RuntimeError } from "./runtime.ts"
 
 export const DEFAULT_BASH_JOBS_ROOT = "/run/waterbox/bash-jobs"
 const DEFAULT_BASH_YIELD_AFTER_MS = 15_000
-const MAX_BASH_OUTPUT_BYTES = 1_048_576
 const MAX_STATUS_BYTES = 64 * 1024
 type AsyncBashRequest = BashToolArguments & { workdir: string }
 
@@ -250,7 +249,7 @@ export async function runOneShotBash(
   input: BashToolArguments,
   signal?: AbortSignal,
   options: OneShotBashOptions = {},
-): Promise<{ type: "result" } & BashToolResult> {
+): Promise<BashToolResult> {
   const args = BashToolArgumentsSchema.parse(input)
   signal?.throwIfAborted()
   const root = await realpath(workspaceRoot)
@@ -317,7 +316,6 @@ export async function runOneShotBash(
       }
       await rm(paths.directory, { recursive: true, force: true }).catch(() => undefined)
       return {
-        type: "result",
         outcome: "completed",
         title: args.description ?? "Bash command",
         output: output.value || (status.timedOut ? "Command timed out" : "Command completed without output"),
@@ -340,7 +338,6 @@ export async function runOneShotBash(
   }
 
   return {
-    type: "result",
     outcome: "dispatched",
     title: "Bash command dispatched",
     output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",

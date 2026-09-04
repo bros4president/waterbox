@@ -21,7 +21,7 @@ import {
   type ToolName,
   type BashJobObservation,
   type ToolArgumentsByName,
-  type ToolEventByName,
+  type ToolResultByName,
 } from "@waterbox/contracts"
 import { DomainError, SandboxRecoveryError, errorRecord, mapProviderError } from "./errors.ts"
 import { ProviderError, type ProviderSandboxObservation, type ProviderSnapshotObservation } from "./provider.ts"
@@ -514,14 +514,13 @@ export class SandboxService {
     toolName: N,
     arguments_: ToolArgumentsByName[N],
     signal?: AbortSignal,
-  ): Promise<AsyncIterable<ToolEventByName[N]>> {
+  ): Promise<ToolResultByName[N]> {
     const providerSignal = signal ?? NEVER_ABORTED
     providerSignal.throwIfAborted()
     const sandbox = await this.#ensureRunning(identity, sandboxId, providerSignal)
     const provider = this.#provider(sandbox.provider)
-    let events: AsyncIterable<ToolEventByName[N]>
     try {
-      events = provider.executeTool({
+      return await provider.executeTool({
         accountId: identity.accountId,
         providerRef: sandbox.providerRef,
         toolName,
@@ -529,11 +528,10 @@ export class SandboxService {
         signal: providerSignal,
       })
     } catch (error) {
-      if (providerSignal.aborted) throw providerSignal.reason
+      if (providerSignal.aborted && !(error instanceof ProviderError && error.kind === "ambiguous_execution")) throw providerSignal.reason
       await this.#learnSandboxFromOperationalFailure(sandbox, error, providerSignal)
       throw mapProviderError(error)
     }
-    return this.#mapToolErrors(events, sandbox, providerSignal)
   }
 
   async observeBashJob(identity: Identity, sandboxId: SandboxId, jobId: string, offset: number, maxBytes: number, signal: AbortSignal = NEVER_ABORTED): Promise<BashJobObservation> {
@@ -1100,16 +1098,6 @@ export class SandboxService {
       const next = await this.#deps.sandboxes.get(current.accountId, current.sandboxId)
       if (next === undefined) return
       current = next
-    }
-  }
-
-  async *#mapToolErrors<T>(events: AsyncIterable<T>, sandbox: SandboxRecord, signal: AbortSignal): AsyncIterable<T> {
-    try {
-      for await (const event of events) yield event
-    } catch (error) {
-      if (signal.aborted && !(error instanceof ProviderError && error.kind === "ambiguous_execution")) throw signal.reason
-      await this.#learnSandboxFromOperationalFailure(sandbox, error, signal)
-      throw mapProviderError(error)
     }
   }
 

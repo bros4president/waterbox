@@ -7,7 +7,7 @@ import { createEmbeddedApiBackend, createLocalControlPlane } from "@waterbox/con
 import { FixedClock, FakeSandboxProvider, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { SqliteRepositoryStore } from "@waterbox/repository-sqlite"
 import { ProviderError, type ProviderCleanupBashJobInput, type ProviderConsumeSecureTransferInput, type ProviderExecuteInput, type ProviderObserveBashJobInput, type ProviderOperationInput } from "@waterbox/core/provider"
-import type { SecureTransferDelivered, SecureTransferInitiated, ToolEventByName, ToolName } from "@waterbox/contracts"
+import type { SecureTransferDelivered, SecureTransferInitiated, ToolName, ToolResultByName } from "@waterbox/contracts"
 import { MAX_API_ERROR_RESPONSE_BYTES, WaterboxClient, WaterboxClientError, createRemoteApiBackend, type ApiBackend } from "@waterbox/client"
 
 const accountId = "acct_client_conformance"
@@ -70,23 +70,23 @@ class ConformanceProvider extends FakeSandboxProvider {
     return observation
   }
 
-  override executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]> {
+  override async executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): Promise<ToolResultByName[N]> {
     this.executeCalls++; this.toolInputs.push(input)
     const results = {
-      read: { type: "result", title: "Read", output: "alpha", metadata: { filePath: "/workspace/a", offset: 1 } },
-      write: { type: "result", title: "Write", output: "ok", metadata: { filePath: "/workspace/a", bytes: 5 } },
-      edit: { type: "result", title: "Edit", output: "ok", metadata: { filePath: "/workspace/a", replacements: 1, bytes: 4 } },
-      patch: { type: "result", title: "Patch", output: "ok", metadata: { added: ["b"], updated: [], deleted: [], moved: [] } },
-      glob: { type: "result", title: "Glob", output: "a", metadata: { pattern: "*", path: "/workspace", count: 1, truncated: false } },
-      grep: { type: "result", title: "Grep", output: "a:1", metadata: { pattern: "alpha", path: "/workspace", matches: 1, truncated: false } },
-      bash: { type: "result", title: "Bash", output: "done", outcome: "completed", metadata: { command: "printf done", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
+      read: { title: "Read", output: "alpha", metadata: { filePath: "/workspace/a", offset: 1 } },
+      write: { title: "Write", output: "ok", metadata: { filePath: "/workspace/a", bytes: 5 } },
+      edit: { title: "Edit", output: "ok", metadata: { filePath: "/workspace/a", replacements: 1, bytes: 4 } },
+      patch: { title: "Patch", output: "ok", metadata: { added: ["b"], updated: [], deleted: [], moved: [] } },
+      glob: { title: "Glob", output: "a", metadata: { pattern: "*", path: "/workspace", count: 1, truncated: false } },
+      grep: { title: "Grep", output: "a:1", metadata: { pattern: "alpha", path: "/workspace", matches: 1, truncated: false } },
+      bash: { title: "Bash", output: "done", outcome: "completed", metadata: { command: "printf done", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } },
     } as const
     if (input.toolName === "bash" && this.bashMode !== "completed") {
       const jobId = "job_0123456789abcdef0123456789abcdef"
-      const receipt = { type: "result", title: "Bash", output: "dispatched", outcome: "dispatched", metadata: { command: "printf done", workdir: "/workspace", jobId, outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json` } }
-      return (async function* () { yield receipt as unknown as ToolEventByName[N] })()
+      const receipt = { title: "Bash", output: "dispatched", outcome: "dispatched", metadata: { command: "printf done", workdir: "/workspace", jobId, outputPath: `/run/waterbox/bash-jobs/${jobId}/output.log`, statusPath: `/run/waterbox/bash-jobs/${jobId}/status.json` } }
+      return receipt as unknown as ToolResultByName[N]
     }
-    return (async function* () { yield results[input.toolName] as unknown as ToolEventByName[N] })()
+    return results[input.toolName] as unknown as ToolResultByName[N]
   }
 
   protected override async initiateSecureTransfer(_input: ProviderOperationInput): Promise<SecureTransferInitiated> {
@@ -336,24 +336,23 @@ for (const mode of ["embedded", "network"] as const) {
       }
     })
 
-    test("handles split/multiple NDJSON and rejects empty, malformed, and post-terminal streams", async () => {
-      const terminal = JSON.stringify({ type: "result", title: "Read", output: "alpha", metadata: { filePath: "/workspace/a", offset: 1 } })
+    test("handles split JSON results and rejects malformed result bodies", async () => {
+      const result = JSON.stringify({ title: "Read", output: "alpha", metadata: { filePath: "/workspace/a", offset: 1 } })
       const cases: Array<{ body: string; ok: boolean }> = [
-        { body: `${JSON.stringify({ type: "result", title: "Read", output: "alpha", metadata: { filePath: "/workspace/a", offset: 1 } })}\n`, ok: true },
-        { body: `${JSON.stringify({ type: "result", title: "Read", output: "alpha", metadata: { filePath: "/workspace/a", offset: 1 } })}\n${terminal}\n`, ok: false },
-        { body: "", ok: false }, { body: "{malformed}\n", ok: false },
+        { body: result, ok: true },
+        { body: "", ok: false }, { body: "{malformed}", ok: false },
       ]
       for (const item of cases) {
         let cancelled = false
         const { client } = await fixture(mode, { decorate(response, request) {
           if (!request.url.endsWith("/tools/read")) return response
           const bytes = new TextEncoder().encode(item.body)
-          return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes.slice(0, 3)); controller.enqueue(bytes.slice(3)); if (item.ok || item.body === "") controller.close() }, cancel() { cancelled = true } }), { headers: { "content-type": "application/x-ndjson" } })
+          return new Response(new ReadableStream({ start(controller) { controller.enqueue(bytes.slice(0, 3)); controller.enqueue(bytes.slice(3)); controller.close() }, cancel() { cancelled = true } }), { headers: { "content-type": "application/json" } })
         } })
-        await client.createSandbox({}, { idempotencyKey: `ndjson-${cases.indexOf(item)}`, signal })
+        await client.createSandbox({}, { idempotencyKey: `json-${cases.indexOf(item)}`, signal })
         const result = client.read({ sandboxId, filePath: "/workspace/a" }, { signal })
         if (item.ok) expect((await result).output).toBe("alpha")
-        else { await expect(result).rejects.toBeInstanceOf(WaterboxClientError); expect(cancelled || item.body === "").toBeTrue() }
+        else { await expect(result).rejects.toBeInstanceOf(WaterboxClientError); expect(cancelled).toBe(false) }
         await client.close()
       }
     })

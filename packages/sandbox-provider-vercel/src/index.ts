@@ -4,6 +4,7 @@ import { ProviderError, type ProviderSandboxObservation, type SandboxProvider } 
 import {
   FULL_LINUX_RUNTIME_PROFILE,
   MAX_COMMAND_OUTPUT_BYTES,
+  MAX_COMMAND_RESPONSE_BYTES,
   WaterboxSandboxBackend,
   assertCommandInput,
   assertCommandResult,
@@ -97,7 +98,7 @@ type NativeSnapshot = { id: string; sourceSessionId: string; status: "created" |
 type NativeState = "pending" | "snapshotting" | "running" | "stopping" | "stopped" | "failed" | "aborted"
 
 const MAX_RESPONSE_BYTES = 1_048_576
-const MAX_LOG_BYTES = MAX_COMMAND_OUTPUT_BYTES * 2 + 65_536
+const MAX_LOG_BYTES = MAX_COMMAND_RESPONSE_BYTES
 const MAX_PAGES = 100
 const OWNER_TAG = "waterbox-owner"
 const ACCOUNT_TAG = "waterbox-account"
@@ -375,7 +376,7 @@ export class VercelSandboxInfrastructure implements SandboxInfrastructure {
     if (media(response) !== "application/x-ndjson") { await cancel(response); this.#emit({ type: "command-log-invalid" }); throw new Error("invalid command logs") }
     // NDJSON framing is bounded separately from decoded stream bytes; a tiny
     // caller output limit must not make one valid framed event unreadable.
-    const text = await boundedText(response, Math.min(MAX_LOG_BYTES, stdoutLimit + stderrLimit + 65_536), signal)
+    const text = await boundedText(response, Math.min(MAX_LOG_BYTES, (stdoutLimit + stderrLimit) * 2 + 65_536), signal)
     const encoder = new TextEncoder(); const stdout: Uint8Array[] = [], stderr: Uint8Array[] = []; let stdoutSize = 0, stderrSize = 0
     for (const line of text.split("\n")) {
       if (!line) continue

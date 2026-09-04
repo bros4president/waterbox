@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createDaemon } from "../src/index.ts"
 import { send } from "../src/host.ts"
-import { BashToolEventSchema, EditToolEventSchema, GlobToolEventSchema, GrepToolEventSchema, PatchToolEventSchema, ReadToolEventSchema, WriteToolEventSchema } from "@waterbox/contracts"
+import { BashToolEventSchema, EditToolResultSchema, GlobToolResultSchema, GrepToolResultSchema, PatchToolResultSchema, ReadToolResultSchema, WriteToolResultSchema } from "@waterbox/contracts"
 
 const roots: string[] = []
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))))
@@ -64,12 +64,12 @@ describe("canonical daemon HTTP contract", () => {
 
   test("invokes every canonical tool through HTTP", async () => {
     const { root, post } = await fixture()
-    WriteToolEventSchema.parse(await (await post("write", { filePath: "src/a.txt", content: "alpha\n" })).json())
-    ReadToolEventSchema.parse(await (await post("read", { filePath: "src/a.txt" })).json())
-    EditToolEventSchema.parse(await (await post("edit", { filePath: "src/a.txt", oldString: "alpha", newString: "beta" })).json())
-    PatchToolEventSchema.parse(await (await post("patch", { patchText: "*** Begin Patch\n*** Add File: extra.txt\n+extra\n*** End Patch" })).json())
-    GlobToolEventSchema.parse(await (await post("glob", { pattern: "*.txt" })).json())
-    GrepToolEventSchema.parse(await (await post("grep", { pattern: "beta" })).json())
+    WriteToolResultSchema.parse(await (await post("write", { filePath: "src/a.txt", content: "alpha\n" })).json())
+    ReadToolResultSchema.parse(await (await post("read", { filePath: "src/a.txt" })).json())
+    EditToolResultSchema.parse(await (await post("edit", { filePath: "src/a.txt", oldString: "alpha", newString: "beta" })).json())
+    PatchToolResultSchema.parse(await (await post("patch", { patchText: "*** Begin Patch\n*** Add File: extra.txt\n+extra\n*** End Patch" })).json())
+    GlobToolResultSchema.parse(await (await post("glob", { pattern: "*.txt" })).json())
+    GrepToolResultSchema.parse(await (await post("grep", { pattern: "beta" })).json())
     const bash = await post("bash", { command: "printf first; printf second >&2" })
     const events = (await bash.text()).trim().split("\n").map((line) => BashToolEventSchema.parse(JSON.parse(line)))
     expect(events.map((event) => event.type)).toEqual(["stdout", "stderr", "result"])

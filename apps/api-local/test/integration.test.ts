@@ -5,14 +5,14 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
   BashToolEventSchema,
-  EditToolEventSchema,
-  GlobToolEventSchema,
-  GrepToolEventSchema,
-  PatchToolEventSchema,
-  ReadToolEventSchema,
-  WriteToolEventSchema,
+  EditToolResultSchema,
+  GlobToolResultSchema,
+  GrepToolResultSchema,
+  PatchToolResultSchema,
+  ReadToolResultSchema,
+  WriteToolResultSchema,
   type ToolName,
-  type ToolEventByName,
+  type ToolResultByName,
 } from "@waterbox/contracts"
 import type {
   ProviderCreateSandboxInput,
@@ -38,7 +38,7 @@ const accountId = "acct_local_test"
 const internalUrl = "https://protected.invalid/daemon?_token=provider-secret"
 const runtimeBytes = new TextEncoder().encode('#!/usr/bin/env node\nconst WORKSPACE_ROOT="/workspace",worker="__internal-bash-worker",node="/usr/local/bin/node",cli="/usr/local/lib/waterbox-cli.js";void[WORKSPACE_ROOT,worker,node,cli]\n')
 const runtimeArtifact = { bytes: runtimeBytes, sha256: createHash("sha256").update(runtimeBytes).digest("hex"), cliProtocolVersion: 2 as const, artifactVersion: "0.1.0" }
-const eventSchemas = { read: ReadToolEventSchema, write: WriteToolEventSchema, edit: EditToolEventSchema, patch: PatchToolEventSchema, glob: GlobToolEventSchema, grep: GrepToolEventSchema, bash: BashToolEventSchema }
+const resultSchemas = { read: ReadToolResultSchema, write: WriteToolResultSchema, edit: EditToolResultSchema, patch: PatchToolResultSchema, glob: GlobToolResultSchema, grep: GrepToolResultSchema, bash: BashToolEventSchema }
 const cleanup: Array<() => Promise<void>> = []
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!() })
 
@@ -63,7 +63,7 @@ class DaemonBackedProvider implements SandboxProvider {
   async createSnapshot(input: ProviderCreateSnapshotInput) { this.snapshotStates.set(input.snapshotId, "ready"); return { state: "ready" as const, providerRef: { id: input.snapshotId, source: refId(input.sandboxRef) } } }
   async inspectSnapshot(input: ProviderSnapshotOperationInput) { return { state: this.snapshotStates.get(input.snapshotId) ?? "ready", providerRef: input.providerRef } }
   async deleteSnapshot(input: ProviderSnapshotOperationInput) { this.snapshotStates.set(input.snapshotId, "deleted"); return { state: "deleted" as const, providerRef: input.providerRef } }
-  async *executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): AsyncIterable<ToolEventByName[N]> {
+  async executeTool<N extends ToolName>(input: ProviderExecuteInput<N>): Promise<ToolResultByName[N]> {
     this.lastToolSignal = input.signal
     if (input.toolName === "bash" && "command" in input.arguments && input.arguments.command === "waterbox-test-wait-for-cancel") {
       await new Promise<never>((_resolve, reject) => {
@@ -77,11 +77,11 @@ class DaemonBackedProvider implements SandboxProvider {
     })
     if (!response.ok) throw new Error("Fake daemon operation failed")
     if (input.toolName !== "bash") {
-      yield eventSchemas[input.toolName].parse(await response.json()) as ToolEventByName[N]
-      return
+      return resultSchemas[input.toolName].parse(await response.json()) as ToolResultByName[N]
     }
     const reader = response.body!.pipeThrough(new TextDecoderStream()).getReader()
     let pending = ""
+    let result: ToolResultByName[N] | undefined
     try {
       while (true) {
         const item = await reader.read()
@@ -90,10 +90,15 @@ class DaemonBackedProvider implements SandboxProvider {
         let newline: number
         while ((newline = pending.indexOf("\n")) >= 0) {
           const line = pending.slice(0, newline); pending = pending.slice(newline + 1)
-          if (line) yield BashToolEventSchema.parse(JSON.parse(line)) as ToolEventByName[N]
+          if (line) {
+            const event = BashToolEventSchema.parse(JSON.parse(line))
+            if (event.type === "result") { const { type: _, ...value } = event; result = value as unknown as ToolResultByName[N] }
+          }
         }
       }
     } finally { reader.releaseLock() }
+    if (result === undefined) throw new Error("Fake daemon operation did not return a result")
+    return result
   }
 }
 
@@ -281,7 +286,7 @@ describe("local API composition", () => {
     expect((await json(context.baseUrl, "/v1/snapshots")).items).toHaveLength(1)
     expect((await json(context.baseUrl, `/v1/snapshots/${snapshotId}`)).snapshotId).toBe(snapshotId)
     expect((await json(context.baseUrl, "/v1/sandboxes", post({ sourceSnapshotId: snapshotId }))).sandboxId).toBe(secondSandboxId)
-    expect((await json(context.baseUrl, `/v1/sandboxes/${secondSandboxId}/tools/read`, post({ filePath: "a.txt" }))).type).toBe("result")
+    expect((await json(context.baseUrl, `/v1/sandboxes/${secondSandboxId}/tools/read`, post({ filePath: "a.txt" }))).output).toContain("beta")
     expect((await json(context.baseUrl, `/v1/snapshots/${snapshotId}`, { method: "DELETE" })).state).toBe("deleted")
     expect((await json(context.baseUrl, `/v1/sandboxes/${sandboxId}`, { method: "DELETE" })).state).toBe("terminated")
     const publicText = JSON.stringify([created, await json(context.baseUrl, "/v1/sandboxes"), await json(context.baseUrl, "/v1/snapshots")])
@@ -292,15 +297,12 @@ describe("local API composition", () => {
     expect(context.logs.join("\n")).not.toContain("provider-secret")
   })
 
-  test("bash streams genuinely incrementally through the listener", async () => {
+  test("bash returns one JSON result through the listener", async () => {
     const context = await fixture([sandboxId])
     await json(context.baseUrl, "/v1/sandboxes", post({}))
     const response = await request(context.baseUrl, `/v1/sandboxes/${sandboxId}/tools/bash`, post({ command: "printf first; sleep 0.25; printf second" }))
-    const reader = response.body!.getReader()
-    const first = await reader.read()
-    expect(new TextDecoder().decode(first.value)).toContain("first")
-    const second = await reader.read()
-    expect(new TextDecoder().decode(second.value)).toContain("second")
+    expect(response.headers.get("content-type")).toContain("application/json")
+    expect((await response.json()).output).toBe("firstsecond")
   })
 
   test("pre-first-chunk client disconnect aborts provider and remote bash", async () => {

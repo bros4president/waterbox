@@ -37,13 +37,14 @@ describe("control-plane Box smoke safety", () => {
     await expect(definite.createSandbox({}, "stable")).rejects.toThrow("(400)"); expect(calls).toBe(1)
   })
 
-  test("consumes NDJSON incrementally before delayed final events", async () => {
-    const clock = { value: 0 }
-    let pulls = 0
-    const body = new ReadableStream<Uint8Array>({ async pull(controller) { if (pulls++ === 0) { clock.value = 1; controller.enqueue(new TextEncoder().encode('{"type":"stdout","data":"first"}\n')) } else { await Bun.sleep(10); clock.value = 5; controller.enqueue(new TextEncoder().encode('{"type":"result","outcome":"completed","title":"bash","output":"","metadata":{"command":"x","workdir":"/workspace","exitCode":0,"signal":null,"timedOut":false,"aborted":false,"durationMs":4,"outputTruncated":false}}\n')); controller.close() } } })
-    const api = new SmokeApi(config, dependencies(async () => new Response(body, { status: 200 }), clock))
-    const result = await api.tool(sandbox.sandboxId, "bash", { command: "x" }, true)
-    expect(result.incremental).toBeTrue(); expect(result.events).toHaveLength(2)
+  test("consumes one bounded JSON tool result", async () => {
+    const api = new SmokeApi(config, dependencies(async () => Response.json({ outcome: "completed", title: "bash", output: "firstsecond", metadata: { command: "x", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 4, outputTruncated: false } })))
+    await expect(api.tool(sandbox.sandboxId, "bash", { command: "x" })).resolves.toMatchObject({ outcome: "completed", output: "firstsecond" })
+  })
+
+  test("rejects a valid result shape for the wrong requested tool", async () => {
+    const api = new SmokeApi(config, dependencies(async () => Response.json({ title: "write", output: "ok", metadata: { filePath: "/workspace/a", bytes: 2 } })))
+    await expect(api.tool(sandbox.sandboxId, "read", { filePath: "/workspace/a" })).rejects.toBeDefined()
   })
 
   test("bounds deletion reconciliation and follows account-scoped list cursors", async () => {
@@ -98,9 +99,17 @@ describe("control-plane Box smoke safety", () => {
       const sandboxId = parts[2]
       if (parts[1] === "sandboxes" && parts[3] === "tools") {
         sandboxes.set(sandboxId!, "running")
-        const bash = parts[4] === "bash"
-        const stream = new ReadableStream<Uint8Array>({ async start(controller) { if (bash) { clock.value++; controller.enqueue(new TextEncoder().encode('{"type":"stdout","data":"first"}\n')); await Bun.sleep(2); clock.value += 2 } controller.enqueue(new TextEncoder().encode('{"type":"result"}\n')); controller.close() } })
-        return new Response(stream)
+        const name = parts[4]!
+        const results: Record<string, unknown> = {
+          read: { title: "read", output: "beta", metadata: { filePath: "/home/user/workspace/smoke.txt", type: "text", offset: 1, lines: 1, totalLines: 1, truncated: false } },
+          write: { title: "write", output: "ok", metadata: { filePath: "/home/user/workspace/smoke.txt", bytes: 6 } },
+          edit: { title: "edit", output: "ok", metadata: { filePath: "/home/user/workspace/smoke.txt", replacements: 1, bytes: 5 } },
+          patch: { title: "patch", output: "ok", metadata: { added: ["/home/user/workspace/patched.txt"], updated: [], deleted: [], moved: [] } },
+          glob: { title: "glob", output: "/home/user/workspace/smoke.txt", metadata: { pattern: "*.txt", path: "/home/user/workspace", count: 1, truncated: false } },
+          grep: { title: "grep", output: "/home/user/workspace/smoke.txt:1:beta", metadata: { pattern: "beta", path: "/home/user/workspace", matches: 1, truncated: false } },
+          bash: { outcome: "completed", title: "bash", output: "firstsecond", metadata: { command: "printf first; sleep 1; printf second", workdir: "/home/user/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1_000, outputTruncated: false } },
+        }
+        return Response.json(results[name])
       }
       if (parts[1] === "sandboxes" && parts[3] === "stop") { sandboxes.set(sandboxId!, "stopped"); return Response.json({ ...sandbox, sandboxId, state: "stopped" }) }
       if (parts[1] === "sandboxes" && parts[3] === "snapshots" && method === "POST") { const body = JSON.parse(String(init?.body)); snapshots.set(snapshot.snapshotId, { state: "ready", name: body.name }); return Response.json({ ...snapshot, name: body.name }, { status: 201 }) }

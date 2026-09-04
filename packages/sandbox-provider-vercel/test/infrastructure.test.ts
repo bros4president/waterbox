@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import type { Identity, SandboxId } from "@waterbox/contracts"
+import { MAX_BASH_OUTPUT_BYTES, MAX_TOOL_RESULT_BYTES, type Identity, type SandboxId } from "@waterbox/contracts"
 import { SandboxService } from "@waterbox/core"
 import { FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
-import { WaterboxSandboxBackend, type SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
+import { MAX_COMMAND_OUTPUT_BYTES, WaterboxSandboxBackend, type SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 import { createHash } from "node:crypto"
 import { gunzipSync } from "node:zlib"
 import { VERCEL_RUNTIME_PROFILE, VercelSandboxInfrastructure, VercelSandboxProvider, type VercelProviderClock } from "../src/index.ts"
@@ -33,6 +33,35 @@ function account() { return "9af211329b2fc82e5efe9060" }
 function name() { return "waterbox-sbx-calm-river-a1-e3ec51d770cb" }
 
 describe("Vercel primitive REST adapter", () => {
+  test("preserves dispatch ambiguity when caller cancellation races command creation", async () => {
+    const controller = new AbortController()
+    const { value, requests } = fixture(request => {
+      if (request.method === "GET") return created(name())
+      controller.abort(new DOMException("caller left", "AbortError"))
+      throw new DOMException("response lost", "AbortError")
+    })
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    await expect(value.runCommand({ accountId: "account", providerRef, script: "true", timeoutMs: 1_000, signal: controller.signal })).rejects.toMatchObject({ kind: "ambiguous_execution" })
+    expect(requests.filter(request => request.method === "POST")).toHaveLength(1)
+  })
+
+  test("accepts Vercel NDJSON enclosing a maximum escaped Waterbox CLI result", async () => {
+    const output = "\0".repeat(MAX_BASH_OUTPUT_BYTES)
+    const cliResult = JSON.stringify({ title: "Bash command", outcome: "completed", output, metadata: { command: "printf", workdir: "/workspace", exitCode: 0, signal: null, timedOut: false, aborted: false, durationMs: 1, outputTruncated: false } })
+    expect(Buffer.byteLength(cliResult)).toBeLessThanOrEqual(MAX_TOOL_RESULT_BYTES)
+    const { value } = fixture(request => {
+      const path = new URL(request.url).pathname
+      if (request.method === "GET" && path === `/v2/sandboxes/${name()}`) return created(name())
+      if (request.method === "POST" && path.endsWith("/cmd")) return Response.json({ command: { id: "command-framed", sessionId: "session-1", exitCode: null } })
+      if (request.method === "GET" && path.endsWith("/cmd/command-framed")) return Response.json({ command: { id: "command-framed", sessionId: "session-1", exitCode: 0 } })
+      if (request.method === "GET" && path.endsWith("/logs")) return new Response(`${JSON.stringify({ stream: "stdout", data: cliResult })}\n`, { headers: { "content-type": "application/x-ndjson" } })
+      throw new Error(`unexpected ${request.method} ${path}`)
+    })
+    const providerRef = { kind: "vercel-sandbox-v1", name: name(), owner: owner(), account: account() } as const
+    const result = await value.runCommand({ accountId: "account", providerRef, script: "true", timeoutMs: 1_000, maxStdoutBytes: MAX_COMMAND_OUTPUT_BYTES, maxStderrBytes: MAX_COMMAND_OUTPUT_BYTES, signal: signal() })
+    expect(Buffer.from(result.stdout).toString()).toBe(cliResult)
+    expect(result.stderr).toHaveLength(0)
+  })
   test("rejects configuration without automatic stop", () => {
     const { automaticStopMs: _, ...missingAutomaticStop } = config
     expect(() => new VercelSandboxInfrastructure(missingAutomaticStop as any, { clock: new Clock() })).toThrow("configuration")
@@ -212,8 +241,8 @@ describe("Vercel primitive REST adapter", () => {
           if (script.includes("waterbox-bootstrap")) commandOutput.set(commandId, "waterbox-bootstrap-ok\n")
           else if (script.includes(" run ")) {
             userCommandDispatches++
-            const event = { type: "result", title: "complete", output: "ok", metadata: { filePath: "marker.txt", type: "text", offset: 1, lines: 1, totalLines: 1 } }
-            commandOutput.set(commandId, `${JSON.stringify(event)}\n`)
+            const result = { title: "complete", output: "ok", metadata: { filePath: "marker.txt", type: "text", offset: 1, lines: 1, totalLines: 1 } }
+            commandOutput.set(commandId, `${JSON.stringify(result)}\n`)
           } else commandOutput.set(commandId, "")
           return Response.json({ command: { id: commandId, sessionId: "session-2", exitCode: null } })
         }
@@ -239,9 +268,7 @@ describe("Vercel primitive REST adapter", () => {
     expect(inspectionRequests).toHaveLength(3)
     expect(inspectionRequests.every(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "false")).toBe(true)
 
-    const events = []
-    for await (const event of await service.executeTool(identity, sandboxId, "read", { filePath: "marker.txt" })) events.push(event)
-    expect(events).toHaveLength(1)
+    await expect(service.executeTool(identity, sandboxId, "read", { filePath: "marker.txt" })).resolves.toEqual({ title: "complete", output: "ok", metadata: { filePath: "marker.txt", type: "text", offset: 1, lines: 1, totalLines: 1 } })
     expect((await sandboxes.get(identity.accountId, sandboxId))?.state).toBe("running")
     expect(requests.filter(request => request.method === "GET" && new URL(request.url).searchParams.get("resume") === "true")).toHaveLength(1)
     expect(userCommandDispatches).toBe(1)

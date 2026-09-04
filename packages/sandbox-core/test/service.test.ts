@@ -73,12 +73,6 @@ async function expectDomainError(promise: Promise<unknown>, code: DomainError["c
   throw new Error(`Expected ${code}`)
 }
 
-async function collect<T>(events: AsyncIterable<T>): Promise<T[]> {
-  const result: T[] = []
-  for await (const event of events) result.push(event)
-  return result
-}
-
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void
   const promise = new Promise<void>((resolvePromise) => {
@@ -826,7 +820,7 @@ describe("lifecycle and optional groups", () => {
     const reconstructedId = "sbx_reconstructed-resume-a1" as SandboxId
     await reconstructed.sandboxes.createIfAbsent(sandboxRecord(alice.accountId, reconstructedId, "resuming"))
     reconstructed.provider.sandboxStates.set(reconstructedId, "running")
-    await collect(await reconstructed.service.executeTool(alice, reconstructedId, "read", { filePath: "marker" }))
+    await reconstructed.service.executeTool(alice, reconstructedId, "read", { filePath: "marker" })
 
     expect(reconstructed.provider.inspectSandboxCalls).toBe(1)
     expect(reconstructed.provider.resumeCalls).toBe(0)
@@ -840,7 +834,7 @@ describe("lifecycle and optional groups", () => {
     const sandboxId = "sbx_durable-preparing-a1" as SandboxId
     await sandboxes.createIfAbsent(sandboxRecord(alice.accountId, sandboxId, "preparing"))
 
-    await collect(await service.executeTool(alice, sandboxId, "read", { filePath: "marker" }))
+    await service.executeTool(alice, sandboxId, "read", { filePath: "marker" })
 
     expect(provider.resumeCalls).toBe(0)
     expect(provider.prepareCalls).toBe(1)
@@ -1250,14 +1244,14 @@ describe("execution and reconciliation", () => {
     provider.sandboxStates.set(sandbox.sandboxId, "stopped")
     provider.executeError = new ProviderError("failure", "provider rejected the command")
 
-    await expectDomainError(collect(await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" })), "provider_failure")
+    await expectDomainError(service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" }), "provider_failure")
     expect(provider.executeCalls).toBe(1)
     expect(provider.resumeCalls).toBe(0)
     expect(provider.inspectSandboxCalls).toBe(1)
     expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("stopped")
 
     provider.executeError = undefined
-    expect(await collect(await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" }))).toHaveLength(1)
+    await expect(service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "note.txt" })).resolves.toBeDefined()
     expect(provider.resumeCalls).toBe(1)
     expect(provider.executeCalls).toBe(2)
   })
@@ -1269,7 +1263,7 @@ describe("execution and reconciliation", () => {
     provider.sandboxStates.set(sandbox.sandboxId, "terminated")
     provider.executeError = new ProviderError("ambiguous_execution", "write response lost")
 
-    await expectDomainError(collect(await service.executeTool(alice, sandbox.sandboxId, "write", { filePath: "note.txt", content: "text" })), "ambiguous_execution")
+    await expectDomainError(service.executeTool(alice, sandbox.sandboxId, "write", { filePath: "note.txt", content: "text" }), "ambiguous_execution")
     expect(provider.executeCalls).toBe(1)
     expect(provider.inspectSandboxCalls).toBe(1)
     expect((await sandboxes.get(alice.accountId, sandbox.sandboxId))?.state).toBe("terminated")
@@ -1600,7 +1594,7 @@ describe("execution and reconciliation", () => {
     ] as const
 
     for (const [toolName, arguments_] of requests) {
-      await collect(await service.executeTool(alice, sandbox.sandboxId, toolName, arguments_ as never, signal))
+      await service.executeTool(alice, sandbox.sandboxId, toolName, arguments_ as never, signal)
     }
 
     expect(provider.toolInputs.map(({ accountId, providerRef, toolName, arguments: arguments_, signal: inputSignal }) => ({
@@ -1629,11 +1623,10 @@ describe("execution and reconciliation", () => {
     expect(provider.executeCalls).toBe(0)
 
     const duringStream = new AbortController()
-    const events = await service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/a" }, duringStream.signal)
     const streamReason = new DOMException("cancel stream", "AbortError")
     duringStream.abort(streamReason)
-    await expect(collect(events)).rejects.toBe(streamReason)
-    expect(provider.executeCalls).toBe(1)
+    await expect(service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/a" }, duringStream.signal)).rejects.toBe(streamReason)
+    expect(provider.executeCalls).toBe(0)
   })
 
   test("concurrent execution resumes a stopped sandbox exactly once", async () => {
@@ -1651,12 +1644,7 @@ describe("execution and reconciliation", () => {
     const second = service.executeTool(alice, sandbox.sandboxId, "read", { filePath: "/workspace/b" })
 
     gate.resolve()
-    const [firstEvents, secondEvents] = await Promise.all([
-      first.then(collect),
-      second.then(collect),
-    ])
-    expect(firstEvents).toHaveLength(1)
-    expect(secondEvents).toHaveLength(1)
+    await Promise.all([first, second])
     expect(provider.resumeCalls).toBe(1)
     expect(provider.executeCalls).toBe(2)
   })
@@ -1714,15 +1702,13 @@ describe("execution and reconciliation", () => {
     provider.executeError = new ProviderError("ambiguous_execution", "Execution outcome is unknown")
     const { service } = harness({ provider })
     const sandbox = await service.createSandbox(alice, {})
-    const events = await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "touch /workspace/a" })
-
-    await expectDomainError(collect(events), "ambiguous_execution")
+    await expectDomainError(service.executeTool(alice, sandbox.sandboxId, "bash", { command: "touch /workspace/a" }), "ambiguous_execution")
     expect(provider.executeCalls).toBe(1)
   })
 
   test("forwards a dispatched bash receipt unchanged", async () => {
     const receipt = {
-      type: "result", outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
+      outcome: "dispatched", title: "Bash command dispatched", output: "Command dispatched. statusPath reports execution state, and outputPath receives output continuously. Repeated output reads can duplicate tokens and pollute context.",
       metadata: {
         command: "sleep 20", workdir: "/workspace", timeout: 20_000,
         jobId: `job_${"a".repeat(32)}`,
@@ -1731,11 +1717,11 @@ describe("execution and reconciliation", () => {
       },
     } as const
     const provider = new FakeSandboxProvider()
-    provider.executeTool = (() => (async function* () { yield receipt })()) as FakeSandboxProvider["executeTool"]
+    provider.executeTool = async () => receipt as never
     const { service } = harness({ provider })
     const sandbox = await service.createSandbox(alice, {})
 
-    expect(await collect(await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "sleep 20", timeout: 20_000 }))).toEqual([receipt])
+    expect(await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "sleep 20", timeout: 20_000 })).toEqual(receipt)
   })
 
   test("ownership-checks Bash job samples and cleanup before using the optional provider capability", async () => {
@@ -1766,14 +1752,13 @@ describe("execution and reconciliation", () => {
   test("preserves ambiguous tool execution when cancellation races with dispatch", async () => {
     const provider = new FakeSandboxProvider()
     const controller = new AbortController()
-    provider.executeTool = ((input: Parameters<FakeSandboxProvider["executeTool"]>[0]) => (async function* () {
+    provider.executeTool = async (input: Parameters<FakeSandboxProvider["executeTool"]>[0]) => {
       controller.abort(new DOMException("caller left", "AbortError"))
       throw new ProviderError("ambiguous_execution", "response lost")
-    })()) as FakeSandboxProvider["executeTool"]
+    }
     const { service } = harness({ provider })
     const sandbox = await service.createSandbox(alice, {})
-    const events = await service.executeTool(alice, sandbox.sandboxId, "bash", { command: "touch /workspace/a" }, controller.signal)
-    await expectDomainError(collect(events), "ambiguous_execution")
+    await expectDomainError(service.executeTool(alice, sandbox.sandboxId, "bash", { command: "touch /workspace/a" }, controller.signal), "ambiguous_execution")
   })
 
   test("preparing probe blocks readiness but persists provider failure and termination", async () => {
@@ -1830,7 +1815,7 @@ describe("execution and reconciliation", () => {
     expect(provider.executeCalls).toBe(0)
     gate.resolve()
     expect((await reconciling).state).toBe("running")
-    expect(await collect(await execution)).toHaveLength(1)
+    await expect(execution).resolves.toBeDefined()
     expect(provider.createCalls).toBe(1)
     expect(provider.inspectSandboxCalls).toBe(1)
     expect(provider.prepareCalls).toBe(2)
