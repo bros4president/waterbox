@@ -45,7 +45,7 @@ export async function createStartupClient(environment: Record<string, string | u
   try {
     return await createMcpClient(await parseMcpConfig(environment, undefined, onboarding), diagnostic)
   } catch (error) {
-    if (!(error instanceof McpConfigurationError) && !(error instanceof Error && error.name === "UnsupportedMcpProviderError")) throw error
+    if (!(error instanceof McpConfigurationError)) throw error
     return unavailableClient(error)
   }
 }
@@ -59,6 +59,6 @@ function unavailableClient(error: Error): WaterboxClient {
 }
 
 export function startupMessage(error: unknown): string {
-  if (error instanceof Error && ["IncompatibleRepositorySchemaError", "McpConfigurationError", "UnsupportedMcpProviderError"].includes(error.name)) return error.message
+  if (error instanceof Error && ["IncompatibleRepositorySchemaError", "McpConfigurationError"].includes(error.name)) return error.message
   return "Waterbox MCP failed to start"
 }

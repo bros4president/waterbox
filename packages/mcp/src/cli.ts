@@ -3,7 +3,7 @@ import { McpConfigurationError, parseMcpConfig } from "./config.ts"
 
 export interface CliDependencies { storage?: ConfigStorage; credentials?: CredentialStore; prompts?: SetupPrompts; environment?: Record<string, string | undefined>; interactive?: boolean; write?: (line: string) => void; error?: (line: string) => void }
 const standardPrompts: SetupPrompts = {
-  async selectProvider() { const { select } = await import("@inquirer/prompts"); return select({ message: "Provider", choices: [{ name: "Box", value: "box" }, { name: "Vercel", value: "vercel" }] }) },
+  async selectProvider() { const { select } = await import("@inquirer/prompts"); return select({ message: "Provider", choices: [{ name: "Waterbox", value: "waterbox" }, { name: "Box", value: "box" }, { name: "Vercel", value: "vercel" }] }) },
   async input(message, initial) { const { input } = await import("@inquirer/prompts"); return input({ message, default: initial }) },
   async secret(message) { const { password } = await import("@inquirer/prompts"); return password({ message, mask: "*" }) },
   async confirm(message) { const { confirm } = await import("@inquirer/prompts"); return confirm({ message, default: false }) },
@@ -30,12 +30,11 @@ export async function runCli(arguments_: string[], dependencies: CliDependencies
       return 0
     }
     const parsed = await parseMcpConfig(environment, undefined, { storage, credentials })
-    if (parsed.provider.type !== "local") throw new Error("Waterbox Cloud is not supported. Run npx waterbox@next setup for Box or Vercel.")
-    const provider = parsed.provider.configuration.provider.kind
+    const provider = parsed.provider.type === "waterbox" ? "waterbox" : parsed.provider.configuration.provider.kind
     const source = environment.WATERBOX_PROVIDER === undefined ? "keyring" : "environment"
     const state = source === "keyring" ? await credentialState(provider, credentials) : "available"
     write(`Waterbox status: provider ${provider}; configuration ${source}; credential ${state}.`)
     return 0
   } catch (caught) { error(caught instanceof OnboardingError || caught instanceof McpConfigurationError ? caught.message : "Waterbox command failed"); return 1 }
 }
-function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }
+function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_API_KEY", "WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }

@@ -11,6 +11,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createStartupClient, startupMessage } from "../src/main.ts"
+import { createHostedMcpClient } from "../src/composition.ts"
 import { createWaterboxMcpServer } from "../src/server.ts"
 import { readLocalFile } from "../src/secure-transfer.ts"
 
@@ -158,6 +159,41 @@ describe("Waterbox MCP client renderer", () => {
       expect(created).toMatchObject({ content: [{ text: expect.stringContaining(sandbox.sandboxId) }] })
       expect(provider.createCalls).toBe(1)
     } finally { await connection.close() }
+  })
+
+  test("pins hosted calls to Waterbox and injects bearer authorization", async () => {
+    const requests: Request[] = []
+    const client = createHostedMcpClient({ provider: { type: "waterbox", apiKey: "hosted-secret" } }, async request => {
+      requests.push(request)
+      return new Response(JSON.stringify({ items: [] }), { headers: { "content-type": "application/json" } })
+    })
+    try { await client.listSnapshots({}, { signal: new AbortController().signal }) }
+    finally { await client.close() }
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.url).toBe("https://api.waterbox.ai/v1/snapshots")
+    expect(requests[0]!.method).toBe("GET")
+    expect(requests[0]!.headers.get("authorization")).toBe("Bearer hosted-secret")
+    expect(requests[0]!.redirect).toBe("manual")
+  })
+
+  test("does not follow hosted redirects or expose redirect responses through MCP", async () => {
+    for (const status of [301, 302, 307, 308]) {
+      const requests: Request[] = []
+      const commands = createHostedMcpClient({ provider: { type: "waterbox", apiKey: "hosted-secret" } }, async request => {
+        requests.push(request)
+        return new Response(JSON.stringify({ error: { code: "provider_failure", message: "redirect provider prose", requestId: "req_redirect" } }), { status, headers: { "content-type": "application/json", location: "https://attacker.example/redirect" } })
+      })
+      const connection = await connected(commands)
+      try {
+        const response = await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: `redirect-${status}` } })
+        expect(response).toMatchObject({ isError: true, content: [{ text: "The Waterbox API returned an invalid response" }] })
+        expect(JSON.stringify(response)).not.toContain("redirect provider prose")
+      } finally { await connection.close() }
+      expect(requests).toHaveLength(1)
+      expect(requests[0]!.url).toBe("https://api.waterbox.ai/v1/sandboxes")
+      expect(requests[0]!.redirect).toBe("manual")
+      expect(requests[0]!.headers.get("authorization")).toBe("Bearer hosted-secret")
+    }
   })
 
   test("rejects removed delete_sandbox calls as unknown tools", async () => {

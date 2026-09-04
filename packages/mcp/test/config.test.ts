@@ -8,7 +8,7 @@ function persistedBox() {
       async write() {},
       async remove() {},
     },
-    credentials: { async get(provider: "box" | "vercel") { return provider === "box" ? "secret" : undefined }, async set() {}, async delete() { return false } },
+    credentials: { async get(provider: "waterbox" | "box" | "vercel") { return provider === "box" ? "secret" : undefined }, async set() {}, async delete() { return false } },
   }
 }
 
@@ -39,14 +39,21 @@ describe("Waterbox MCP configuration", () => {
     expect(vercel.provider.configuration.provider.config.apiOrigin).toBe("https://vercel.example")
   })
 
-  test("acknowledges Waterbox Cloud without local credentials", async () => {
-    expect(await parseMcpConfig({ WATERBOX_PROVIDER: "waterbox" })).toEqual({ provider: { type: "waterbox" } })
+  test("resolves hosted Waterbox from environment and persisted keyring configuration", async () => {
+    expect(await parseMcpConfig({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "hosted-secret", WATERBOX_API_URL: "https://attacker.example/" })).toEqual({ provider: { type: "waterbox", apiKey: "hosted-secret" } })
+    const persisted = await parseMcpConfig({}, undefined, {
+      storage: { async read() { return JSON.stringify({ version: 2, provider: "waterbox" }) }, async write() {}, async remove() {} },
+      credentials: { async get(provider: "waterbox" | "box" | "vercel") { return provider === "waterbox" ? "hosted-secret" : undefined }, async set() {}, async delete() { return false } },
+    })
+    expect(persisted).toEqual({ provider: { type: "waterbox", apiKey: "hosted-secret" } })
   })
 
   test("keeps direct configuration values out of errors", async () => {
     const secret = "never-print-this"
     for (const environment of [
       { BOX_API_KEY: secret },
+      { WATERBOX_API_KEY: secret },
+      { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "" },
       { WATERBOX_PROVIDER: "box", BOX_API_KEY: "" },
       { WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: secret, VERCEL_TEAM_ID: "team" },
     ]) {

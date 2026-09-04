@@ -1,10 +1,10 @@
-import { LocalProviderConfigurationError, parseLocalProviderConfiguration, type LocalConfiguredMcpBackend } from "@waterbox/control-plane-local"
+import { LocalProviderConfigurationError, parseLocalProviderConfiguration, providerCredential, type LocalConfiguredMcpBackend } from "@waterbox/control-plane-local"
 import { configStorage, nativeCredentialStore, OnboardingError, resolvedEnvironment, type ConfigStorage, type CredentialStore } from "./onboarding.ts"
 
 export interface LocalMcpConfig {
   provider: { type: "local"; configuration: LocalConfiguredMcpBackend }
 }
-export interface WaterboxCloudMcpConfig { provider: { type: "waterbox" } }
+export interface WaterboxCloudMcpConfig { provider: { type: "waterbox"; apiKey: string } }
 export type WaterboxMcpConfig = LocalMcpConfig | WaterboxCloudMcpConfig
 
 export class McpConfigurationError extends Error {
@@ -23,9 +23,12 @@ export async function parseMcpConfig(
   homeDirectory?: string,
   dependencies: { storage?: ConfigStorage; credentials?: CredentialStore } = {},
 ): Promise<WaterboxMcpConfig> {
-  if (environment.WATERBOX_PROVIDER === "waterbox") return { provider: { type: "waterbox" } }
   try {
     const resolved = await resolvedEnvironment(environment, dependencies.storage ?? configStorage(homeDirectory), dependencies.credentials ?? nativeCredentialStore())
+    if (resolved.provider === "waterbox") {
+      try { return { provider: { type: "waterbox", apiKey: providerCredential(resolved.environment.WATERBOX_API_KEY) } } }
+      catch { throw new OnboardingError("Waterbox API key is missing or invalid. Set WATERBOX_PROVIDER=waterbox and WATERBOX_API_KEY using your MCP client's secret mechanism, then restart the MCP client.") }
+    }
     return { provider: { type: "local", configuration: parseLocalProviderConfiguration(resolved.environment, homeDirectory) } }
   } catch (error) {
     if (error instanceof LocalProviderConfigurationError || error instanceof OnboardingError) throw new McpConfigurationError(error.message)

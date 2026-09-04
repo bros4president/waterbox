@@ -2,8 +2,8 @@
 
 `waterbox` is the supported local stdio MCP for isolated, stateful coding
 sandboxes. It requires Node.js 24.15.0 or newer, opens no listener, and supports
-explicitly configured Box and Vercel Sandbox accounts. There is no hosted
-Waterbox mode and no JavaScript library API.
+hosted Waterbox plus explicitly configured direct Box and Vercel Sandbox accounts.
+It is not the hosted Waterbox service and has no JavaScript library API.
 
 ## Install And Configure
 
@@ -25,9 +25,10 @@ npx waterbox@next logout
 
 Interactive setup stores only the provider credential in the native keyring.
 Non-secret settings are written atomically to `~/.waterbox/config.json` using
-the exact official endpoints `https://ascii.dev/api/box/v1` and
-`https://api.vercel.com/`. Status never prints credentials. Logout removes
-local settings and both keyring entries but does not alter remote resources or
+the exact official direct-provider endpoints `https://ascii.dev/api/box/v1` and
+`https://api.vercel.com/`; hosted Waterbox is pinned to `https://api.waterbox.ai/`.
+Status never prints credentials. Logout removes local settings and all three
+keyring entries but does not alter remote resources or
 the SQLite resource registry.
 
 For headless systems without a usable keyring, place a complete provider
@@ -35,6 +36,7 @@ configuration in the MCP client's environment/secret facility. Do not put
 secrets in command arguments:
 
 ```text
+Waterbox: WATERBOX_PROVIDER=waterbox, WATERBOX_API_KEY=<client-managed secret>
 Box:    WATERBOX_PROVIDER=box, BOX_API_KEY=<client-managed secret>,
         WATERBOX_AUTO_STOP=40m
 Vercel: WATERBOX_PROVIDER=vercel, VERCEL_TOKEN=<client-managed secret>,
@@ -42,7 +44,8 @@ Vercel: WATERBOX_PROVIDER=vercel, VERCEL_TOKEN=<client-managed secret>,
         WATERBOX_AUTO_STOP=40m
 ```
 
-Custom Box/Vercel endpoints are supported only when the complete provider
+Hosted Waterbox always targets `https://api.waterbox.ai/`. Custom Box/Vercel
+endpoints are supported only when the complete provider
 selection and credentials come from process environment. Environment and
 persisted sources are never mixed. `.env` is never loaded implicitly.
 
@@ -53,7 +56,8 @@ tools before filesystem, SQLite, artifact, or provider I/O.
 
 | Variable | Required | Default |
 | --- | --- | --- |
-| `WATERBOX_PROVIDER` | Environment setup: `box` or `vercel` | none |
+| `WATERBOX_PROVIDER` | Environment setup: `waterbox`, `box`, or `vercel` | none |
+| `WATERBOX_API_KEY` | Hosted Waterbox environment setup | none |
 | `BOX_API_KEY` | Box environment setup | none |
 | `BOX_API_BASE_URL` | Environment-only override | `https://ascii.dev/api/box/v1` |
 | `BOX_POLL_INTERVAL_MS` | No | `1000` |
@@ -76,8 +80,9 @@ Waterbox exposes `create_sandbox`, `probe_sandbox`, `stop_sandbox`,
 `bash`. Resource IDs are explicit; there is no selected sandbox or
 `list_sandboxes` tool.
 
-Waterbox owns only records in its local SQLite database and does not infer
-ownership from provider inventory. Sandboxes persist after the MCP exits.
+Direct Box/Vercel mode owns only records in its local SQLite database and does
+not infer ownership from provider inventory. Hosted Waterbox records are owned
+by the hosted service. Sandboxes persist after the MCP exits.
 Changing provider scope does not migrate or clean old resources, which may
 continue to incur charges. Fresh and snapshot-sourced sandboxes receive the
 current packaged Node CLI without a shared system snapshot, Bun, or daemon.
