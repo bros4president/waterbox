@@ -35,9 +35,11 @@ configuration in the MCP client's environment/secret facility. Do not put
 secrets in command arguments:
 
 ```text
-Box:    WATERBOX_PROVIDER=box, BOX_API_KEY=<client-managed secret>
+Box:    WATERBOX_PROVIDER=box, BOX_API_KEY=<client-managed secret>,
+        WATERBOX_AUTO_STOP=40m
 Vercel: WATERBOX_PROVIDER=vercel, VERCEL_TOKEN=<client-managed secret>,
-        VERCEL_TEAM_ID=<team identifier>, VERCEL_PROJECT_ID=<project identifier>
+        VERCEL_TEAM_ID=<team identifier>, VERCEL_PROJECT_ID=<project identifier>,
+        WATERBOX_AUTO_STOP=40m
 ```
 
 Custom Box/Vercel endpoints are supported only when the complete provider
@@ -63,7 +65,7 @@ tools before filesystem, SQLite, artifact, or provider I/O.
 | `VERCEL_POLL_INTERVAL_MS` | No | `1000` |
 | `VERCEL_POLL_TIMEOUT_MS` | No | `120000` |
 | `VERCEL_REQUEST_TIMEOUT_MS` | No | `30000` |
-| `WATERBOX_AUTO_STOP` | No; whole minutes/hours such as `30m` or `2h` | provider default |
+| `WATERBOX_AUTO_STOP` | Box and Vercel environment setup; whole minutes/hours such as `40m` or `6h` | none |
 | `WATERBOX_SQLITE_PATH` | No | `~/.waterbox/direct.sqlite` |
 
 ## Lifecycle And Tools

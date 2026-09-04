@@ -39,18 +39,21 @@ client's environment or secret facility. Select exactly one provider:
 ```text
 WATERBOX_PROVIDER=box
 BOX_API_KEY=<client-managed secret>
+WATERBOX_AUTO_STOP=40m
 
 WATERBOX_PROVIDER=vercel
 VERCEL_TOKEN=<client-managed secret>
 VERCEL_TEAM_ID=<team identifier>
 VERCEL_PROJECT_ID=<project identifier>
+WATERBOX_AUTO_STOP=40m
 ```
 
-Environment-only configuration may additionally set a custom
-`BOX_API_BASE_URL` or `VERCEL_API_ORIGIN`. Persisted keyring credentials can
-never be redirected to custom endpoints. Waterbox does not load `.env` files
-implicitly. Never put credentials in chat, MCP tool arguments, shell history,
-or committed configuration.
+`WATERBOX_AUTO_STOP` is required for both direct providers and accepts whole
+minutes or hours, such as `40m` or `6h`. Environment-only configuration may
+additionally set a custom `BOX_API_BASE_URL` or `VERCEL_API_ORIGIN`. Persisted
+keyring credentials can never be redirected to custom endpoints. Waterbox does
+not load `.env` files implicitly. Never put credentials in chat, MCP tool
+arguments, shell history, or committed configuration.
 
 Installation works before provider configuration. The MCP still initializes,
 lists its complete tool surface, and returns provider-neutral setup guidance
