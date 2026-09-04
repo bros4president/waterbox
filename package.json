@@ -47,6 +47,7 @@
     "@waterbox/contracts": "workspace:*",
     "@waterbox/control-plane-local": "workspace:*",
     "@waterbox/core": "workspace:*",
+    "@waterbox/provider-runtime": "workspace:*",
     "@opencode-ai/cli": "0.0.0-dev-18434",
     "@types/bun": "latest",
     "@types/node": "^24.3.0",

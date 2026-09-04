@@ -1,9 +1,9 @@
 # waterbox
 
 `waterbox` is the supported local stdio MCP for isolated, stateful coding
-sandboxes. It requires Node.js 24.15.0 or newer, opens no listener, and supports
-explicitly configured Box and Vercel Sandbox accounts. There is no hosted
-Waterbox mode and no JavaScript library API.
+sandboxes. It requires Node.js 24.15.0 or newer and opens no listener. It can
+use the hosted Waterbox API or explicitly configured Box and Vercel Sandbox
+accounts. There is no JavaScript library API.
 
 ## Install And Configure
 
@@ -35,6 +35,8 @@ configuration in the MCP client's environment/secret facility. Do not put
 secrets in command arguments:
 
 ```text
+Waterbox Cloud: WATERBOX_PROVIDER=waterbox, WATERBOX_API_URL=<root API URL>,
+                WATERBOX_API_KEY=<client-managed secret>
 Box:    WATERBOX_PROVIDER=box, BOX_API_KEY=<client-managed secret>
 Vercel: WATERBOX_PROVIDER=vercel, VERCEL_TOKEN=<client-managed secret>,
         VERCEL_TEAM_ID=<team identifier>, VERCEL_PROJECT_ID=<project identifier>
@@ -51,7 +53,9 @@ tools before filesystem, SQLite, artifact, or provider I/O.
 
 | Variable | Required | Default |
 | --- | --- | --- |
-| `WATERBOX_PROVIDER` | Environment setup: `box` or `vercel` | none |
+| `WATERBOX_PROVIDER` | Environment setup: `waterbox`, `box`, or `vercel` | none |
+| `WATERBOX_API_URL` | Waterbox Cloud; absolute root HTTP(S) URL | none |
+| `WATERBOX_API_KEY` | Waterbox Cloud environment setup | none |
 | `BOX_API_KEY` | Box environment setup | none |
 | `BOX_API_BASE_URL` | Environment-only override | `https://ascii.dev/api/box/v1` |
 | `BOX_POLL_INTERVAL_MS` | No | `1000` |
@@ -74,11 +78,13 @@ Waterbox exposes `create_sandbox`, `probe_sandbox`, `stop_sandbox`,
 `bash`. Resource IDs are explicit; there is no selected sandbox or
 `list_sandboxes` tool.
 
-Waterbox owns only records in its local SQLite database and does not infer
-ownership from provider inventory. Sandboxes persist after the MCP exits.
-Changing provider scope does not migrate or clean old resources, which may
-continue to incur charges. Fresh and snapshot-sourced sandboxes receive the
-current packaged Node CLI without a shared system snapshot, Bun, or daemon.
+In direct Box/Vercel mode, Waterbox owns only records in its local SQLite
+database and does not infer ownership from provider inventory. Hosted mode
+keeps resource records in the configured Waterbox API. Sandboxes persist after
+the MCP exits. Changing provider scope does not migrate or clean old resources,
+which may continue to incur charges. Fresh and snapshot-sourced direct
+sandboxes receive the current packaged Node CLI without a shared system
+snapshot, Bun, or daemon.
 
 Secure transfer keeps file contents out of MCP arguments and model context in
 transit, but the destination is plaintext and provider/sandbox-readable.

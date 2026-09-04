@@ -20,7 +20,7 @@ export const OFFICIAL_BOX_API_BASE_URL = "https://ascii.dev/api/box/v1"
 export const OFFICIAL_VERCEL_API_ORIGIN = "https://api.vercel.com/"
 const accounts: Record<Provider, string> = { box: "box-api-key", vercel: "vercel-token" }
 const MAX_CONFIG_BYTES = 64 * 1024
-export const setupGuidance = "Waterbox MCP is not configured. Run npx waterbox@next setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Box: BOX_API_KEY; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID). Do not provide credentials in chat or tool arguments."
+export const setupGuidance = "Waterbox MCP is not configured. Run npx waterbox@next setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Waterbox Cloud: WATERBOX_API_URL, WATERBOX_API_KEY; Box: BOX_API_KEY; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID). Do not provide credentials in chat or tool arguments."
 
 export class OnboardingError extends Error {
   constructor(message = setupGuidance) { super(message); this.name = "McpConfigurationError" }
@@ -144,7 +144,7 @@ export async function logout(storage: ConfigStorage, credentials: CredentialStor
   try { await storage.remove() } catch { throw new OnboardingError("Waterbox credentials were removed, but configuration could not be removed.") }
 }
 
-function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }
+function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_API_URL", "WATERBOX_API_KEY", "WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }
 export function credentialVariable(provider: Provider): string { return provider === "box" ? "BOX_API_KEY" : "VERCEL_TOKEN, VERCEL_TEAM_ID, and VERCEL_PROJECT_ID" }
 function nonEmpty(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 16_384 }
 const automaticStopSchema = z.number().int().positive().safe().refine(value => value % 60_000 === 0)

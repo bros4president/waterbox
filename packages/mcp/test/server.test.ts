@@ -11,6 +11,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createStartupClient, startupMessage } from "../src/main.ts"
+import { createWaterboxCloudMcpClient } from "../src/composition.ts"
 import { createWaterboxMcpServer } from "../src/server.ts"
 import { readLocalFile } from "../src/secure-transfer.ts"
 
@@ -127,6 +128,20 @@ describe("Waterbox MCP client renderer", () => {
     const storage = { async read() { return undefined }, async write() {}, async remove() {} }, credentials = { async get() { return undefined }, async set() {}, async delete() { return false } }
     try { for (const environment of [{}, { WATERBOX_PROVIDER: "waterbox" }, { WATERBOX_PROVIDER: "box" }]) { const commands = await createStartupClient({ ...environment, WATERBOX_SQLITE_PATH: sqlitePath }, undefined, { storage, credentials }); const connection = await connected(commands); try { const response = await connection.client.callTool({ name: "send_file_securely", arguments: { sandboxId: sandbox.sandboxId, sourcePath: join(directory, "missing"), targetPath: "/root/secret" } }); expect(response).toMatchObject({ isError: true, content: [{ text: expect.stringContaining("WATERBOX_PROVIDER") }] }); expect(existsSync(sqlitePath)).toBeFalse() } finally { await connection.close() } } }
     finally { await rm(directory, { recursive: true, force: true }) }
+  })
+
+  test("routes Waterbox Cloud through its root API URL with bearer authentication", async () => {
+    let seen: Request | undefined
+    const commands = createWaterboxCloudMcpClient({ provider: { type: "waterbox", apiUrl: "https://waterbox.example/", apiKey: "cloud-secret" } }, async request => {
+      seen = request
+      return new Response(JSON.stringify(sandbox), { status: 200, headers: { "content-type": "application/json" } })
+    })
+    try {
+      expect((await commands.probeSandbox({ sandboxId: sandbox.sandboxId }, { signal: new AbortController().signal })).sandboxId).toBe(sandbox.sandboxId)
+      expect(seen?.url).toBe(`https://waterbox.example/v1/sandboxes/${sandbox.sandboxId}/probe`)
+      expect(seen?.method).toBe("POST")
+      expect(seen?.headers.get("authorization")).toBe("Bearer cloud-secret")
+    } finally { await commands.close() }
   })
 
   test("runs MCP through the real client, authenticated embedded API, core, SQLite, and provider", async () => {

@@ -30,7 +30,7 @@ export async function runCli(arguments_: string[], dependencies: CliDependencies
       return 0
     }
     const parsed = await parseMcpConfig(environment, undefined, { storage, credentials })
-    if (parsed.provider.type !== "local") throw new Error("Waterbox Cloud is not supported. Run npx waterbox@next setup for Box or Vercel.")
+    if (parsed.provider.type === "waterbox") { write("Waterbox status: provider waterbox; configuration environment; credential available."); return 0 }
     const provider = parsed.provider.configuration.provider.kind
     const source = environment.WATERBOX_PROVIDER === undefined ? "keyring" : "environment"
     const state = source === "keyring" ? await credentialState(provider, credentials) : "available"
@@ -38,4 +38,4 @@ export async function runCli(arguments_: string[], dependencies: CliDependencies
     return 0
   } catch (caught) { error(caught instanceof OnboardingError || caught instanceof McpConfigurationError ? caught.message : "Waterbox command failed"); return 1 }
 }
-function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }
+function providerVariablesPresent(environment: Record<string, string | undefined>): boolean { return ["WATERBOX_API_URL", "WATERBOX_API_KEY", "WATERBOX_AUTO_STOP", "BOX_API_KEY", "BOX_API_BASE_URL", "BOX_POLL_INTERVAL_MS", "BOX_POLL_TIMEOUT_MS", "VERCEL_TOKEN", "VERCEL_API_ORIGIN", "VERCEL_TEAM_ID", "VERCEL_PROJECT_ID", "VERCEL_POLL_INTERVAL_MS", "VERCEL_POLL_TIMEOUT_MS", "VERCEL_REQUEST_TIMEOUT_MS"].some(key => environment[key] !== undefined) }

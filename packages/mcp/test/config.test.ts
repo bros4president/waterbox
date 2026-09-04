@@ -39,16 +39,23 @@ describe("Waterbox MCP configuration", () => {
     expect(vercel.provider.configuration.provider.config.apiOrigin).toBe("https://vercel.example")
   })
 
-  test("acknowledges Waterbox Cloud without local credentials", async () => {
-    expect(await parseMcpConfig({ WATERBOX_PROVIDER: "waterbox" })).toEqual({ provider: { type: "waterbox" } })
+  test("parses complete Waterbox Cloud configuration", async () => {
+    expect(await parseMcpConfig({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_URL: "https://waterbox.example/", WATERBOX_API_KEY: "secret" })).toEqual({
+      provider: { type: "waterbox", apiUrl: "https://waterbox.example/", apiKey: "secret" },
+    })
   })
 
-  test("keeps direct configuration values out of errors", async () => {
+  test("keeps provider configuration values out of errors", async () => {
     const secret = "never-print-this"
     for (const environment of [
       { BOX_API_KEY: secret },
       { WATERBOX_PROVIDER: "box", BOX_API_KEY: "" },
       { WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: secret, VERCEL_TEAM_ID: "team" },
+      { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: secret },
+      { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_URL: "ftp://waterbox.example/", WATERBOX_API_KEY: secret },
+      { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_URL: "https://waterbox.example/path", WATERBOX_API_KEY: secret },
+      { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_URL: "https://user@waterbox.example/", WATERBOX_API_KEY: secret },
+      { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_URL: "https://waterbox.example/", WATERBOX_API_KEY: `bad ${secret}` },
     ]) {
       try { await parseMcpConfig(environment); throw new Error("Expected invalid configuration") }
       catch (error) { expect(error).toBeInstanceOf(McpConfigurationError); expect(String(error)).not.toContain(secret) }

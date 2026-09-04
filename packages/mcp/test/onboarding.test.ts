@@ -81,6 +81,7 @@ describe("native-keyring onboarding", () => {
 
   test("rejects provider variables without a selection and malformed persisted config without leaking secrets", async () => {
     await expect(resolvedEnvironment({ BOX_API_KEY: "secret" }, fakeStorage(), fakeCredentials())).rejects.toThrow("WATERBOX_PROVIDER")
+    await expect(resolvedEnvironment({ WATERBOX_API_KEY: "secret" }, fakeStorage(), fakeCredentials())).rejects.toThrow("WATERBOX_PROVIDER")
     await expect(resolvedEnvironment({}, fakeStorage('{"version":1,"provider":"box","box":{"apiKey":"secret"}}'), fakeCredentials())).rejects.toThrow("malformed")
     await expect(resolvedEnvironment({}, fakeStorage('{"version":1,"provider":"box","box":{"apiBaseUrl":"https://ascii.dev/api/box/v1","pollIntervalMs":1000,"pollTimeoutMs":120000,"token":"secret"}}'), fakeCredentials())).rejects.toThrow("malformed")
     await expect(loadPersisted({ async read() { throw new Error("private path") }, async write() {}, async remove() {} })).rejects.toThrow("configuration is unavailable")
@@ -279,6 +280,8 @@ describe("native-keyring onboarding", () => {
     expect(output.at(-1)).toContain("inaccessible"); expect(`${output}\n${errors}`).not.toContain("never-print")
     expect(await runCli(["status"], { storage, credentials: available, environment: { WATERBOX_PROVIDER: "box", BOX_API_KEY: "environment-secret" }, write: line => output.push(line), error: line => errors.push(line) })).toBe(0)
     expect(output.at(-1)).toContain("configuration environment"); expect(output.at(-1)).not.toContain("environment-secret")
+    expect(await runCli(["status"], { storage, credentials: available, environment: { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_URL: "https://waterbox.example/", WATERBOX_API_KEY: "cloud-secret" }, write: line => output.push(line), error: line => errors.push(line) })).toBe(0)
+    expect(output.at(-1)).toBe("Waterbox status: provider waterbox; configuration environment; credential available."); expect(output.at(-1)).not.toContain("cloud-secret")
     inaccessible.inaccessible = true
     expect(await runCli(["logout"], { storage, credentials: inaccessible, environment: {}, write: line => output.push(line), error: line => errors.push(line) })).toBe(1)
     expect(storage.value).toBeDefined()
