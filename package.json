@@ -43,6 +43,7 @@
     "@opencode-ai/plugin": "0.0.0-beta-17823"
   },
   "devDependencies": {
+    "@waterbox/cli": "workspace:*",
     "@waterbox/client": "workspace:*",
     "@waterbox/contracts": "workspace:*",
     "@waterbox/control-plane-local": "workspace:*",
