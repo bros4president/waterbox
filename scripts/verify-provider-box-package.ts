@@ -33,7 +33,7 @@ async function verify(): Promise<void> {
     if (/from ["']@waterbox\/(?:provider-runtime|cli|runtime)/.test(host)) throw new Error("Provider host bundle retains a private Waterbox runtime import")
     await writeFile(join(consumer, "runtime.mjs"), `
 import { BoxSandboxProvider, createBoxSandboxProvider, deriveBoxProviderConfigurationId } from "@waterbox/provider-box"
-const config = { apiBaseUrl: "https://box.example/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 2 } }
+const config = { apiBaseUrl: "https://box.example/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 2 }, automaticStopMs: 2400000 }
 const provider = new BoxSandboxProvider(config)
 if (provider.name !== "box" || !(createBoxSandboxProvider(config) instanceof BoxSandboxProvider) || !deriveBoxProviderConfigurationId(config).startsWith("pcfg_")) throw new Error("provider public runtime failed")
 `)
@@ -41,7 +41,7 @@ if (provider.name !== "box" || !(createBoxSandboxProvider(config) instanceof Box
     await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", "typescript@^5.9.2", "@types/node@^24.3.0"], { cwd: consumer })
     await writeFile(join(consumer, "consumer.ts"), `
 import { BoxSandboxProvider, createBoxSandboxProvider, deriveBoxProviderConfigurationId, type BoxProviderConfig } from "@waterbox/provider-box"
-const config: BoxProviderConfig = { apiBaseUrl: "https://box.example/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 2 } }
+const config: BoxProviderConfig = { apiBaseUrl: "https://box.example/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 2 }, automaticStopMs: 2400000 }
 void [new BoxSandboxProvider(config), createBoxSandboxProvider(config), deriveBoxProviderConfigurationId(config)]
 `)
     await writeFile(join(consumer, "tsconfig.json"), '{"compilerOptions":{"module":"NodeNext","moduleResolution":"NodeNext","noEmit":true,"strict":true,"target":"ES2022"},"include":["consumer.ts"]}\n')

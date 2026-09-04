@@ -23,7 +23,7 @@ function infrastructure(handler: (request: Request) => Response | Promise<Respon
     requests.push(request)
     return handler(request)
   }
-  const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch })
+  const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch })
   return { value, requests, fetch }
 }
 
@@ -31,6 +31,11 @@ const box = (state = "ready") => Response.json({ ok: true, type: "box.info", box
 const command = (stdout: string, options: Record<string, unknown> = {}) => Response.json({ ok: true, type: "command.finished", success: true, exitCode: 0, stdout, stderr: "", timedOut: false, ...options })
 
 describe("Box primitive contracts", () => {
+  test("rejects configuration without automatic stop", () => {
+    const { automaticStopMs: _, ...missingAutomaticStop } = { apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }
+    expect(() => new BoxSandboxInfrastructure(missingAutomaticStop as any, { clock: new Clock() })).toThrow("configuration")
+  })
+
   test("creates a durable Box reference with native idempotency and exact readiness polling", async () => {
     let polls = 0
     const { value, requests } = infrastructure(request => {
@@ -38,11 +43,11 @@ describe("Box primitive contracts", () => {
       return box(++polls === 1 ? "provisioning" : "ready")
     })
     await expect(value.create({ accountId: "account", sandboxId: "sbx_calm-cactus-7k3m" as never, idempotencyKey: "create-once", signal: signal() })).resolves.toEqual({ state: "running", providerRef: sandboxRef })
-    expect((await requests[0]!.json())).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" } })
+    expect((await requests[0]!.json())).toEqual({ noEnv: true, env: { WATERBOX_SANDBOX_ID: "sbx_calm-cactus-7k3m" }, ttlSeconds: 5_400 })
     expect(requests[0]!.headers.get("idempotency-key")).toBe("create-once")
   })
 
-  test("sends ttlSeconds only for a configured automatic stop", async () => {
+  test("always sends ttlSeconds", async () => {
     const requests: Request[] = []
     const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, {
       clock: new Clock(),
@@ -292,13 +297,13 @@ describe("Box primitive contracts", () => {
 
   test("bounds requests independently and preserves read versus dispatched-write outcomes", async () => {
     const fetch = (_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true }))
-    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 5 } }, { clock: new Clock(), fetch })
+    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 5 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch })
     await expect(value.inspect({ accountId: "account", providerRef: sandboxRef, signal: signal() })).rejects.toMatchObject({ kind: "failure" })
     await expect(value.writeFile({ accountId: "account", providerRef: sandboxRef, path: "/tmp/a", contents: new Uint8Array(), signal: signal() })).rejects.toMatchObject({ kind: "ambiguous_execution" })
   })
 
   test("allows a command its requested timeout plus the polling transport allowance", async () => {
-    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 5 } }, { clock: new Clock(), fetch: async () => { await Bun.sleep(10); return command("ok") } })
+    const value = new BoxSandboxInfrastructure({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 5 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch: async () => { await Bun.sleep(10); return command("ok") } })
     await expect(value.runCommand({ accountId: "account", providerRef: sandboxRef, script: "true", timeoutMs: 20, signal: signal() })).resolves.toMatchObject({ exitCode: 0 })
   })
 
@@ -364,7 +369,7 @@ describe("Box primitive contracts", () => {
       posts++
       throw new Error("snapshot mutation must not dispatch")
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository()
     const snapshots = new InMemorySnapshotRepository()
     const idempotency = new InMemoryIdempotencyRepository()
@@ -407,7 +412,7 @@ describe("assembled Box compatibility", () => {
       if (request.method === "GET" && path.endsWith(`/deletion-operations/${operationId}`)) return Response.json({ ok: true, type: "deletion.operation", operation: { id: operationId, kind: "box", targetId: sandboxRef.boxId, status: "completed" } })
       throw new Error(`unexpected ${request.method} ${path}`)
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
@@ -435,7 +440,7 @@ describe("assembled Box compatibility", () => {
       }
       throw new Error(`unexpected ${request.method} ${path}`)
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
@@ -462,7 +467,7 @@ describe("assembled Box compatibility", () => {
       }
       throw new Error("unexpected Box request")
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
@@ -485,7 +490,7 @@ describe("assembled Box compatibility", () => {
       }
       throw new Error(`unexpected ${request.method} ${path}`)
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const sandboxes = new InMemorySandboxRepository(), snapshots = new InMemorySnapshotRepository(), idempotency = new InMemoryIdempotencyRepository()
     const identity: Identity = { accountId: "account" }
     const sandboxId = "sbx_calm-cactus-7k3m" as SandboxId
@@ -511,7 +516,7 @@ describe("assembled Box compatibility", () => {
       if (body.command.includes("waterbox-bootstrap")) return command(++verifies === 1 ? "waterbox-bootstrap-incomplete\n" : "waterbox-bootstrap-ok\n")
       throw new Error("unexpected command")
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     await expect(provider.prepareSandbox({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "running", providerRef: sandboxRef })
     expect(provider.name).toBe("box")
     expect(provider.stopResume).toBeDefined()
@@ -552,7 +557,7 @@ describe("assembled Box compatibility", () => {
       }
       throw new Error("unexpected command")
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     await expect(provider.prepareSandbox({ accountId: "account", providerRef: sandboxRef, signal: signal() })).resolves.toEqual({ state: "running", providerRef: sandboxRef })
     expect(verifies).toBe(2)
   })
@@ -598,7 +603,7 @@ describe("assembled Box compatibility", () => {
       ]
       return command(JSON.stringify(events[toolIndex++]) + "\n")
     })
-    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 } }, { clock: new Clock(), fetch, artifact })
+    const provider = new BoxSandboxProvider({ apiBaseUrl: "https://box.test/v1", apiKey: "test-key", polling: { intervalMs: 1, timeoutMs: 20 }, automaticStopMs: 5_400_000 }, { clock: new Clock(), fetch, artifact })
     const inputs = [["read", { filePath: "a" }], ["write", { filePath: "a", content: "" }], ["edit", { filePath: "a", oldString: "a", newString: "b" }], ["patch", { patchText: "x" }], ["glob", { pattern: "*" }], ["grep", { pattern: "x" }], ["bash", { command: "true" }]] as const
     for (const [toolName, arguments_] of inputs) { for await (const _event of provider.executeTool({ accountId: "account", providerRef: sandboxRef, toolName, arguments: arguments_, signal: signal() } as never)) {} }
     const ciphertext = Buffer.from("cipher").toString("base64")

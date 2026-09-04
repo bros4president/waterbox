@@ -8,40 +8,44 @@ import { dispatch } from "../src/dispatch.ts"
 import { automaticStopGuidance, configStorage, credentialState, loadPersisted, resolvedEnvironment, setup, type ConfigStorage, type CredentialStore, type SetupPrompts } from "../src/onboarding.ts"
 import { deriveProviderConfigurationId, parseLocalProviderConfiguration } from "@waterbox/control-plane-local"
 
+const automaticStopProse = "How often should a sandbox be automatically stopped?\n\nImportant: a stopped sandbox is automatically resumed by the next coding operation. This is not a limit on total sandbox runtime or spending.\n\nThis is a safety mechanism that limits wasted compute if the agent does not stop a sandbox when finished. Agents are instructed to stop unused sandboxes, but this is not enforced.\n\nA short duration, such as 40m, minimizes wasted compute but may interrupt long-running commands. For long workflows, consider 6h or more. Provider limits apply, so check your plan's maximum execution time."
+
 function fakeStorage(initial?: string): ConfigStorage & { value?: string; writes: number; failWrite: boolean; removes: number } { return { value: initial, writes: 0, failWrite: false, removes: 0, async read() { return this.value }, async write(value) { this.writes += 1; if (this.failWrite) throw new Error("write failed"); this.value = value }, async remove() { this.removes += 1; this.value = undefined } } }
 function fakeCredentials(values: Partial<Record<"box" | "vercel", string>> = {}): CredentialStore & { inaccessible: boolean; fail?: "set" | "delete-box" | "delete-vercel"; values: Partial<Record<"box" | "vercel", string>> } { return { values, inaccessible: false, async get(provider) { if (this.inaccessible) throw new Error("locked"); return this.values[provider] }, async set(provider, secret) { if (this.inaccessible || this.fail === "set") throw new Error("locked"); this.values[provider] = secret }, async delete(provider) { if (this.inaccessible || this.fail === `delete-${provider}`) throw new Error("locked"); const present = this.values[provider] !== undefined; delete this.values[provider]; return present } } }
 const boxPrompts: SetupPrompts = { async selectProvider() { return "box" }, async input(_message, initial) { return initial }, async secret() { return "box-secret" }, async confirm() { return true } }
-const boxSettings = { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const }
-const vercelSettings = { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, requestTimeoutMs: 30000 as const }
-function boxBinding(apiKey: string, apiBaseUrl = boxSettings.apiBaseUrl) { return deriveProviderConfigurationId({ kind: "box", config: { apiBaseUrl, apiKey, polling: { intervalMs: 1000, timeoutMs: 120000 } } }) }
-function vercelBinding(settings = vercelSettings) { return deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: settings.apiOrigin, token: "credential-excluded", teamId: settings.teamId, projectId: settings.projectId, polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 } } }) }
+const boxSettings = { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, automaticStopMs: 2_400_000 }
+const vercelSettings = { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000 as const, pollTimeoutMs: 120000 as const, requestTimeoutMs: 30000 as const, automaticStopMs: 2_400_000 }
+function boxBinding(apiKey: string, apiBaseUrl = boxSettings.apiBaseUrl) { return deriveProviderConfigurationId({ kind: "box", config: { apiBaseUrl, apiKey, polling: { intervalMs: 1000, timeoutMs: 120000 }, automaticStopMs: 2_400_000 } }) }
+function vercelBinding(settings = vercelSettings) { return deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: settings.apiOrigin, token: "credential-excluded", teamId: settings.teamId, projectId: settings.projectId, polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 }, automaticStopMs: 2_400_000 } }) }
 function persistedV2Box(apiKey: string, settings = boxSettings) { return JSON.stringify({ version: 2, provider: "box", providerConfigurationId: boxBinding(apiKey, settings.apiBaseUrl), box: settings }) }
 function persistedV2Vercel(settings = vercelSettings) { return JSON.stringify({ version: 2, provider: "vercel", providerConfigurationId: vercelBinding(settings), vercel: settings }) }
 async function loadBoxConfig(storage: ConfigStorage) { const config = await loadPersisted(storage); if (config?.provider !== "box") throw new Error("Expected persisted Box configuration"); return config }
 
 describe("native-keyring onboarding", () => {
   test("resolves persisted Box and Vercel settings only when provider is absent", async () => {
-    const box = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    const box = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
     expect((await resolvedEnvironment({}, box, fakeCredentials({ box: "secret" }))).environment).toMatchObject({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret" })
-    const vercel = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+    const vercel = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: vercelSettings }))
     expect((await resolvedEnvironment({}, vercel, fakeCredentials({ vercel: "secret" }))).environment).toMatchObject({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team" })
     const explicit = await resolvedEnvironment({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "environment-secret" }, vercel, fakeCredentials({ vercel: "persisted-secret" }))
     expect(explicit.environment).not.toHaveProperty("VERCEL_TOKEN")
   })
 
-  test("persists and hydrates optional automatic stop without changing resource scope", async () => {
+  test("persists and hydrates automatic stop without changing resource scope", async () => {
     const messages: string[] = []
+    let automaticStopInitial = ""
     const prompts: SetupPrompts = {
       async selectProvider() { return "box" },
-      async input(message, initial) { messages.push(message); return message.startsWith("Automatic stop") ? "90m" : initial },
+      async input(message, initial) { messages.push(message); if (message === automaticStopGuidance) { automaticStopInitial = initial; return "90m" }; return initial },
       async secret() { return "box-secret" },
       async confirm() { throw new Error("automatic stop must not change binding") },
     }
-    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
     await setup(storage, fakeCredentials({ box: "box-secret" }), prompts)
     expect((await loadBoxConfig(storage)).box.automaticStopMs).toBe(5_400_000)
     expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment.WATERBOX_AUTO_STOP).toBe("90m")
-    expect(messages).toContain(`Automatic stop duration (optional, for example 30m or 2h)\n${automaticStopGuidance}`)
+    expect(messages).toContain(automaticStopProse)
+    expect(automaticStopInitial).toBe("40m")
   })
 
   test("persists version 2 scope metadata while runtime derives the active binding from exact credentials", async () => {
@@ -61,8 +65,8 @@ describe("native-keyring onboarding", () => {
       const hydrated = await resolvedEnvironment({}, storage, credentials)
       const fromKeyring = parseLocalProviderConfiguration(hydrated.environment, "/users/test")
       const fromEnvironment = provider === "box"
-        ? parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "box-secret", BOX_API_BASE_URL: boxSettings.apiBaseUrl }, "/users/test")
-        : parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "vercel-secret", VERCEL_API_ORIGIN: vercelSettings.apiOrigin, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")
+        ? parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "box-secret", BOX_API_BASE_URL: boxSettings.apiBaseUrl, WATERBOX_AUTO_STOP: "40m" }, "/users/test")
+        : parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "vercel-secret", VERCEL_API_ORIGIN: vercelSettings.apiOrigin, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
       expect(fromKeyring.provider.providerConfigurationId).toBe(fromEnvironment.provider.providerConfigurationId)
       expect(fromKeyring.provider.providerConfigurationId).toBe(persisted.providerConfigurationId)
     }
@@ -72,11 +76,36 @@ describe("native-keyring onboarding", () => {
     expect(parseLocalProviderConfiguration(hydrated.environment, "/users/test").provider.providerConfigurationId).toBe(boxBinding("actual-key"))
   })
 
-  test("blank automatic-stop setup persists no provider override", async () => {
+  test("new setup pre-fills and persists a 40m automatic stop", async () => {
     const storage = fakeStorage()
-    await setup(storage, fakeCredentials(), boxPrompts)
-    expect((await loadBoxConfig(storage)).box).not.toHaveProperty("automaticStopMs")
-    expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment).not.toHaveProperty("WATERBOX_AUTO_STOP")
+    let automaticStopInitial = ""
+    await setup(storage, fakeCredentials(), { ...boxPrompts, async input(message, initial) { if (message === automaticStopGuidance) automaticStopInitial = initial; return initial } })
+    expect(automaticStopInitial).toBe("40m")
+    expect((await loadBoxConfig(storage)).box.automaticStopMs).toBe(2_400_000)
+    expect((await resolvedEnvironment({}, storage, fakeCredentials({ box: "box-secret" }))).environment.WATERBOX_AUTO_STOP).toBe("40m")
+  })
+
+  test("rejects blank automatic stop without mutating credentials or configuration", async () => {
+    const storage = fakeStorage(), credentials = fakeCredentials()
+    const prompts: SetupPrompts = { ...boxPrompts, async input(message) { return message === automaticStopGuidance ? "" : "" } }
+    await expect(setup(storage, credentials, prompts)).rejects.toThrow("No configuration was saved")
+    expect(storage.writes).toBe(0)
+    expect(credentials.values).toEqual({})
+  })
+
+  test("rejects blank automatic stop on a same-provider rerun without mutation", async () => {
+    const raw = JSON.stringify({ version: 2, provider: "box", providerConfigurationId: boxBinding("existing-secret"), box: boxSettings })
+    const storage = fakeStorage(raw), credentials = fakeCredentials({ box: "existing-secret" })
+    const prompts: SetupPrompts = { ...boxPrompts, async input(message) { return message === automaticStopGuidance ? "" : "" } }
+    await expect(setup(storage, credentials, prompts)).rejects.toThrow("No configuration was saved")
+    expect(storage.value).toBe(raw)
+    expect(credentials.values).toEqual({ box: "existing-secret" })
+  })
+
+  test("rejects persisted configuration without automatic stop before credential access", async () => {
+    let reads = 0
+    await expect(resolvedEnvironment({}, fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } })), { async get() { reads += 1; return "secret" }, async set() {}, async delete() { return false } })).rejects.toThrow("malformed")
+    expect(reads).toBe(0)
   })
 
   test("rejects provider variables without a selection and malformed persisted config without leaking secrets", async () => {
@@ -87,7 +116,7 @@ describe("native-keyring onboarding", () => {
   })
 
   test("setup persists only settings after keyring read-back and retains inactive provider credentials", async () => {
-    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: vercelSettings }))
     const credentials = fakeCredentials({ vercel: "old" })
     await setup(storage, credentials, boxPrompts)
     expect(storage.value).not.toContain("box-secret")
@@ -101,9 +130,9 @@ describe("native-keyring onboarding", () => {
     await setup(fakeStorage(), fakeCredentials(), firstTime)
     expect(confirmations).toBe(0)
 
-    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: vercelSettings }))
     const prompts: SetupPrompts = {
-      async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "rotated-token" },
+      async selectProvider() { return "vercel" }, async input(message, initial) { return message === automaticStopGuidance ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "rotated-token" },
       async confirm() { confirmations += 1; return true },
     }
     await setup(storage, fakeCredentials({ vercel: "old-token" }), prompts)
@@ -111,11 +140,11 @@ describe("native-keyring onboarding", () => {
   })
 
   test("scope changes warn before mutation and a declined confirmation preserves all local state", async () => {
-    const raw = JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } })
+    const raw = JSON.stringify({ version: 1, provider: "box", box: boxSettings })
     const storage = fakeStorage(raw), credentials = fakeCredentials({ box: "old-box", vercel: "old-vercel" })
     const messages: string[] = []
     const prompts: SetupPrompts = {
-      async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "new-vercel" },
+      async selectProvider() { return "vercel" }, async input(message, initial) { return message === automaticStopGuidance ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "new-vercel" },
       async confirm(message) { messages.push(message); return false },
     }
     await expect(setup(storage, credentials, prompts)).rejects.toThrow("canceled")
@@ -125,15 +154,15 @@ describe("native-keyring onboarding", () => {
   })
 
   test("Box key and Vercel team or project changes require scope-change confirmation", async () => {
-    const boxStorage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    const boxStorage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
     const rejected: SetupPrompts = { ...boxPrompts, async secret() { return "rotated-box-key" }, async confirm() { return false } }
     await expect(setup(boxStorage, fakeCredentials({ box: "old-box" }), rejected)).rejects.toThrow("canceled")
 
     for (const changed of ["team", "project"] as const) {
-      const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: { apiOrigin: "https://api.vercel.com/", teamId: "team", projectId: "project", pollIntervalMs: 1000, pollTimeoutMs: 120000, requestTimeoutMs: 30000 } }))
+      const storage = fakeStorage(JSON.stringify({ version: 1, provider: "vercel", vercel: vercelSettings }))
       let confirmed = 0
       const prompts: SetupPrompts = {
-        async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes(changed) ? `other-${changed}` : message.includes("team") ? "team" : "project" }, async secret() { return "same-token" },
+        async selectProvider() { return "vercel" }, async input(message, initial) { return message === automaticStopGuidance ? initial : message.includes("origin") ? initial : message.includes(changed) ? `other-${changed}` : message.includes("team") ? "team" : "project" }, async secret() { return "same-token" },
         async confirm() { confirmed += 1; return false },
       }
       await expect(setup(storage, fakeCredentials({ vercel: "same-token" }), prompts)).rejects.toThrow("canceled")
@@ -203,7 +232,7 @@ describe("native-keyring onboarding", () => {
     const storage = fakeStorage(persistedV2Box("box-secret"))
     await setup(storage, fakeCredentials(), {
       ...boxPrompts,
-      async input(message, initial) { return message.startsWith("Automatic stop") ? "45m" : initial },
+      async input(message, initial) { return message === automaticStopGuidance ? "45m" : initial },
       async confirm() { confirmations += 1; return true },
     })
     expect(confirmations).toBe(0)
@@ -266,7 +295,7 @@ describe("native-keyring onboarding", () => {
   })
 
   test("status reports persisted available, missing, and inaccessible credentials without redacting its state", async () => {
-    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
     const output: string[] = []; const errors: string[] = []
     const available = fakeCredentials({ box: "never-print" })
     expect(await runCli(["status"], { storage, credentials: available, environment: {}, write: line => output.push(line), error: line => errors.push(line) })).toBe(0)
@@ -277,7 +306,7 @@ describe("native-keyring onboarding", () => {
     expect(await credentialState("box", inaccessible)).toBe("inaccessible")
     expect(await runCli(["status"], { storage, credentials: inaccessible, environment: {}, write: line => output.push(line), error: line => errors.push(line) })).toBe(1)
     expect(output.at(-1)).toContain("inaccessible"); expect(`${output}\n${errors}`).not.toContain("never-print")
-    expect(await runCli(["status"], { storage, credentials: available, environment: { WATERBOX_PROVIDER: "box", BOX_API_KEY: "environment-secret" }, write: line => output.push(line), error: line => errors.push(line) })).toBe(0)
+    expect(await runCli(["status"], { storage, credentials: available, environment: { WATERBOX_PROVIDER: "box", BOX_API_KEY: "environment-secret", WATERBOX_AUTO_STOP: "40m" }, write: line => output.push(line), error: line => errors.push(line) })).toBe(0)
     expect(output.at(-1)).toContain("configuration environment"); expect(output.at(-1)).not.toContain("environment-secret")
     inaccessible.inaccessible = true
     expect(await runCli(["logout"], { storage, credentials: inaccessible, environment: {}, write: line => output.push(line), error: line => errors.push(line) })).toBe(1)
@@ -286,7 +315,7 @@ describe("native-keyring onboarding", () => {
 
   test("logout describes its strictly local effect", async () => {
     const output: string[] = []
-    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }))
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings }))
     expect(await runCli(["logout"], { storage, credentials: fakeCredentials({ box: "box", vercel: "vercel" }), environment: {}, write: line => output.push(line), error() {} })).toBe(0)
     expect(output).toEqual(["Waterbox local configuration and stored credentials removed. Remote resources and local SQLite records were not deleted."])
   })
@@ -313,7 +342,7 @@ describe("native-keyring onboarding", () => {
       expect(keyringCalls).toBe(0)
       expect(storage.writes).toBe(0)
       expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: secret }, "/users/test")).toThrow("BOX_API_KEY")
-      expect(() => deriveProviderConfigurationId({ kind: "box", config: { apiBaseUrl: boxSettings.apiBaseUrl, apiKey: secret, polling: { intervalMs: 1000, timeoutMs: 120000 } } })).toThrow("credential")
+      expect(() => deriveProviderConfigurationId({ kind: "box", config: { apiBaseUrl: boxSettings.apiBaseUrl, apiKey: secret, polling: { intervalMs: 1000, timeoutMs: 120000 }, automaticStopMs: 2_400_000 } })).toThrow("credential")
     }
 
     const raw = persistedV2Box("valid-key"), secret = " stored-key-with-space "
@@ -359,7 +388,7 @@ describe("native-keyring onboarding", () => {
   })
 
   test("setup rolls back same-provider credentials when config persistence fails", async () => {
-    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } })); storage.failWrite = true
+    const storage = fakeStorage(JSON.stringify({ version: 1, provider: "box", box: boxSettings })); storage.failWrite = true
     const credentials = fakeCredentials({ box: "old" })
     await expect(setup(storage, credentials, boxPrompts)).rejects.toThrow("confirmed")
     expect(credentials.values).toEqual({ box: "old" }); expect(storage.value).toContain('"provider":"box"')
@@ -393,7 +422,7 @@ describe("native-keyring onboarding", () => {
   })
 
   test("setup rolls back both providers when a switch cannot persist", async () => {
-    const prompts: SetupPrompts = { async selectProvider() { return "vercel" }, async input(message, initial) { return message.startsWith("Automatic stop") ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "new" }, async confirm() { return true } }
+    const prompts: SetupPrompts = { async selectProvider() { return "vercel" }, async input(message, initial) { return message === automaticStopGuidance ? initial : message.includes("origin") ? initial : message.includes("team") ? "team" : "project" }, async secret() { return "new" }, async confirm() { return true } }
     const storage = fakeStorage(); storage.failWrite = true
     const credentials = fakeCredentials({ box: "old-box", vercel: "old-vercel" })
     await expect(setup(storage, credentials, prompts)).rejects.toThrow("confirmed")

@@ -4,7 +4,7 @@ import { McpConfigurationError, parseMcpConfig } from "../src/config.ts"
 function persistedBox() {
   return {
     storage: {
-      async read() { return JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000 } }) },
+      async read() { return JSON.stringify({ version: 1, provider: "box", box: { apiBaseUrl: "https://ascii.dev/api/box/v1", pollIntervalMs: 1000, pollTimeoutMs: 120000, automaticStopMs: 2_400_000 } }) },
       async write() {},
       async remove() {},
     },
@@ -14,25 +14,25 @@ function persistedBox() {
 
 describe("Waterbox MCP configuration", () => {
   test("passes explicit direct selection through opaque local composition", async () => {
-    const config = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret" }, "/users/test")
+    const config = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
     expect(config).toMatchObject({ provider: { type: "local", configuration: { sqlitePath: "/users/test/.waterbox/direct.sqlite" } } })
   })
 
   test("passes the alternate explicit direct selection through the same opaque configuration", async () => {
-    const config = await parseMcpConfig({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")
+    const config = await parseMcpConfig({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
     expect(config).toMatchObject({ provider: { type: "local", configuration: { sqlitePath: "/users/test/.waterbox/direct.sqlite" } } })
   })
 
   test("derives the same binding through persisted setup and environment-only composition", async () => {
-    const fromEnvironment = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", BOX_API_BASE_URL: "https://ascii.dev/api/box/v1/" }, "/users/test")
+    const fromEnvironment = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", BOX_API_BASE_URL: "https://ascii.dev/api/box/v1/", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
     const fromPersistedSetup = await parseMcpConfig({}, "/users/test", persistedBox())
     if (fromEnvironment.provider.type !== "local" || fromPersistedSetup.provider.type !== "local") throw new Error("Expected local configuration")
     expect(fromEnvironment.provider.configuration.provider.providerConfigurationId).toBe(fromPersistedSetup.provider.configuration.provider.providerConfigurationId)
   })
 
   test("retains custom endpoints for complete environment-only configuration", async () => {
-    const box = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", BOX_API_BASE_URL: "https://box.example/api" }, "/users/test")
-    const vercel = await parseMcpConfig({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", VERCEL_API_ORIGIN: "https://vercel.example/" }, "/users/test")
+    const box = await parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", BOX_API_BASE_URL: "https://box.example/api", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
+    const vercel = await parseMcpConfig({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "secret", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", VERCEL_API_ORIGIN: "https://vercel.example/", WATERBOX_AUTO_STOP: "40m" }, "/users/test")
     if (box.provider.type !== "local" || vercel.provider.type !== "local") throw new Error("Expected local configuration")
     if (box.provider.configuration.provider.kind !== "box" || vercel.provider.configuration.provider.kind !== "vercel") throw new Error("Expected selected providers")
     expect(box.provider.configuration.provider.config.apiBaseUrl).toBe("https://box.example/api")
@@ -53,5 +53,6 @@ describe("Waterbox MCP configuration", () => {
       try { await parseMcpConfig(environment); throw new Error("Expected invalid configuration") }
       catch (error) { expect(error).toBeInstanceOf(McpConfigurationError); expect(String(error)).not.toContain(secret) }
     }
+    for (const automaticStop of [undefined, ""]) await expect(parseMcpConfig({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "secret", ...(automaticStop === undefined ? {} : { WATERBOX_AUTO_STOP: automaticStop }) })).rejects.toThrow("WATERBOX_AUTO_STOP")
   })
 })

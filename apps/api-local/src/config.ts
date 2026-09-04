@@ -1,4 +1,5 @@
 import { AccountIdSchema } from "@waterbox/contracts"
+import { parseAutomaticStopDuration } from "@waterbox/control-plane-local"
 import { z } from "zod"
 
 const nonSecret = z.string().trim().min(1).max(512)
@@ -15,6 +16,7 @@ const EnvironmentSchema = z.object({
   BOX_API_KEY: secret,
   BOX_POLL_INTERVAL_MS: positiveInteger.default(1_000),
   BOX_POLL_TIMEOUT_MS: positiveInteger.default(120_000),
+  WATERBOX_AUTO_STOP: z.string(),
 }).strict()
 
 export interface LocalApiConfig {
@@ -27,6 +29,7 @@ export interface LocalApiConfig {
     apiBaseUrl: string
     apiKey: string
     polling: { intervalMs: number; timeoutMs: number }
+    automaticStopMs: number
   }
 }
 
@@ -43,6 +46,9 @@ export function parseLocalApiConfig(environment: Record<string, string | undefin
   if (!parsed.success || parsed.data.BOX_POLL_TIMEOUT_MS < parsed.data.BOX_POLL_INTERVAL_MS) {
     throw new LocalConfigurationError()
   }
+  let automaticStopMs: number
+  try { automaticStopMs = parseAutomaticStopDuration(parsed.data.WATERBOX_AUTO_STOP) }
+  catch { throw new LocalConfigurationError() }
   return {
     host: parsed.data.WATERBOX_API_HOST,
     port: parsed.data.WATERBOX_API_PORT,
@@ -53,6 +59,7 @@ export function parseLocalApiConfig(environment: Record<string, string | undefin
       apiBaseUrl: parsed.data.BOX_API_BASE_URL,
       apiKey: parsed.data.BOX_API_KEY,
       polling: { intervalMs: parsed.data.BOX_POLL_INTERVAL_MS, timeoutMs: parsed.data.BOX_POLL_TIMEOUT_MS },
+      automaticStopMs,
     },
   }
 }

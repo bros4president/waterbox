@@ -25,7 +25,7 @@ import {
 } from "@waterbox/provider-runtime"
 
 export interface BoxProviderClock { now(): Date; sleep(milliseconds: number, signal: AbortSignal): Promise<void> }
-export interface BoxProviderConfig { apiBaseUrl: string; apiKey: string; polling: { intervalMs: number; timeoutMs: number }; automaticStopMs?: number }
+export interface BoxProviderConfig { apiBaseUrl: string; apiKey: string; polling: { intervalMs: number; timeoutMs: number }; automaticStopMs: number }
 export type { SandboxRuntimeArtifact } from "@waterbox/provider-runtime"
 export type BoxProviderFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 export type BoxProviderDiagnostic = RuntimeDiagnostic | { type: "tool-http-error"; status: number }
@@ -123,11 +123,11 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   readonly #diagnostic?: (event: BoxProviderDiagnostic) => void
 
   constructor(config: BoxProviderConfig, dependencies: BoxInfrastructureDependencies) {
-    if (!exact(config, ["apiBaseUrl", "apiKey", "polling"], ["automaticStopMs"]) || !exact(config.polling, ["intervalMs", "timeoutMs"]) || !nonempty(config.apiKey) || !Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs < 1 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || config.automaticStopMs !== undefined && !automaticStopMilliseconds(config.automaticStopMs)) throw new TypeError("Box provider configuration is invalid")
+    if (!exact(config, ["apiBaseUrl", "apiKey", "polling", "automaticStopMs"]) || !exact(config.polling, ["intervalMs", "timeoutMs"]) || !nonempty(config.apiKey) || !Number.isInteger(config.polling.intervalMs) || config.polling.intervalMs < 1 || !Number.isInteger(config.polling.timeoutMs) || config.polling.timeoutMs < config.polling.intervalMs || !automaticStopMilliseconds(config.automaticStopMs)) throw new TypeError("Box provider configuration is invalid")
     if (!exact(dependencies, ["clock"], ["fetch", "diagnostic"]) || !dependencies.clock || typeof dependencies.clock.now !== "function" || typeof dependencies.clock.sleep !== "function" || (dependencies.fetch !== undefined && typeof dependencies.fetch !== "function") || (dependencies.diagnostic !== undefined && typeof dependencies.diagnostic !== "function")) throw new TypeError("Box provider dependencies are invalid")
     const now = dependencies.clock.now()
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) throw new TypeError("Box provider dependencies are invalid")
-    this.#config = { apiBaseUrl: url(config.apiBaseUrl), apiKey: config.apiKey, polling: { ...config.polling }, ...(config.automaticStopMs === undefined ? {} : { automaticStopMs: config.automaticStopMs }) }
+    this.#config = { apiBaseUrl: url(config.apiBaseUrl), apiKey: config.apiKey, polling: { ...config.polling }, automaticStopMs: config.automaticStopMs }
     this.#fetch = dependencies.fetch ?? fetch
     this.#clock = dependencies.clock
     this.#diagnostic = dependencies.diagnostic
@@ -136,7 +136,7 @@ export class BoxSandboxInfrastructure implements SandboxInfrastructure {
   async create(input: InfrastructureCreateInput): Promise<InfrastructureSandboxObservation> {
     assertCreateInput(input); input.signal.throwIfAborted()
     const source = input.sourceSnapshotRef === undefined ? {} : { from: snapshotRef(input.sourceSnapshotRef).name }
-    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId }, ...(this.#config.automaticStopMs === undefined ? {} : { ttlSeconds: this.#config.automaticStopMs / 1_000 }) }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
+    const ready = await this.#dispatchedLifecycleMutation(input.signal, async () => this.#waitReady(createdBox(await this.#json("POST", "/boxes", input.signal, { body: { ...source, noEnv: true, env: { WATERBOX_SANDBOX_ID: input.sandboxId }, ttlSeconds: this.#config.automaticStopMs / 1_000 }, idempotencyKey: input.idempotencyKey, statuses: [202], dispatchedMutation: true })), input.signal))
     return observation(mapSandboxState(ready.state), { kind: "box-sandbox-v2", boxId: ready.id })
   }
 

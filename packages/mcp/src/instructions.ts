@@ -1,0 +1,1 @@
+export const instructions = "These Waterbox instructions are a work in progress.\n\nWhen the current task is complete and any material outcomes the user expects outside the sandbox have been exported or otherwise preserved, stop the sandbox to avoid unnecessary compute costs. Do not stop it merely because a conversational turn has ended while work remains active."

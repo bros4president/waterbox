@@ -27,7 +27,7 @@ function config(sqlitePath: string, provider = new FakeSandboxProvider()): Local
 }
 
 function boxConfig(sqlitePath: string): LocalControlPlaneConfig {
-  const providerConfig = { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 } }
+  const providerConfig = { apiBaseUrl: "https://box.invalid/v1", apiKey: "test-placeholder", polling: { intervalMs: 1, timeoutMs: 2 }, automaticStopMs: 2_400_000 }
   return {
     sqlitePath,
     accountId,
@@ -41,7 +41,7 @@ function boxConfig(sqlitePath: string): LocalControlPlaneConfig {
 }
 
 function vercelConfig(sqlitePath: string): LocalControlPlaneConfig {
-  const providerConfig = { apiOrigin: "https://vercel.invalid", token: "test-placeholder", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } }
+  const providerConfig = { apiOrigin: "https://vercel.invalid", token: "test-placeholder", teamId: "team", projectId: "project", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 }, automaticStopMs: 2_400_000 }
   return {
     sqlitePath,
     accountId,
@@ -72,10 +72,10 @@ describe("local control-plane composition", () => {
   test("derives canonical provider bindings from identity scope only", () => {
     const vercel = {
       kind: "vercel" as const,
-      config: { apiOrigin: "https://api.vercel.com/", token: "first-token", teamId: " team ", projectId: " project ", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 } },
+      config: { apiOrigin: "https://api.vercel.com/", token: "first-token", teamId: " team ", projectId: " project ", polling: { intervalMs: 1, timeoutMs: 2, requestTimeoutMs: 1 }, automaticStopMs: 2_400_000 },
     }
     const reorderedVercel = {
-      config: { polling: { requestTimeoutMs: 99, timeoutMs: 100, intervalMs: 3 }, projectId: "project", token: "rotated-token", apiOrigin: "https://api.vercel.com", teamId: "team" },
+      config: { polling: { requestTimeoutMs: 99, timeoutMs: 100, intervalMs: 3 }, projectId: "project", token: "rotated-token", apiOrigin: "https://api.vercel.com", teamId: "team", automaticStopMs: 2_400_000 },
       kind: "vercel" as const,
     }
     const vercelId = deriveProviderConfigurationId(vercel)
@@ -85,8 +85,8 @@ describe("local control-plane composition", () => {
     expect(vercelId).not.toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, apiOrigin: "https://vercel.invalid" } }))
     expect(vercelId).toBe(deriveProviderConfigurationId({ ...vercel, config: { ...vercel.config, automaticStopMs: 86_400_000 } }))
 
-    const box = { kind: "box" as const, config: { apiBaseUrl: "https://ascii.dev/api/box/v1/", apiKey: "box-key", polling: { intervalMs: 1, timeoutMs: 2 } } }
-    const reorderedBox = { config: { polling: { timeoutMs: 100, intervalMs: 3 }, apiKey: "box-key", apiBaseUrl: "https://ascii.dev/api/box/v1" }, kind: "box" as const }
+    const box = { kind: "box" as const, config: { apiBaseUrl: "https://ascii.dev/api/box/v1/", apiKey: "box-key", polling: { intervalMs: 1, timeoutMs: 2 }, automaticStopMs: 2_400_000 } }
+    const reorderedBox = { config: { polling: { timeoutMs: 100, intervalMs: 3 }, apiKey: "box-key", apiBaseUrl: "https://ascii.dev/api/box/v1", automaticStopMs: 2_400_000 }, kind: "box" as const }
     const boxId = deriveProviderConfigurationId(box)
     expect(boxId).toBe(deriveProviderConfigurationId(reorderedBox))
     expect(boxId).not.toContain("box-key")
@@ -100,9 +100,7 @@ describe("local control-plane composition", () => {
     expect(parseAutomaticStopDuration("90m")).toBe(5_400_000)
     expect(parseAutomaticStopDuration("2h")).toBe(7_200_000)
     expect(parseAutomaticStopDuration("24h")).toBe(86_400_000)
-    expect(parseAutomaticStopDuration(undefined)).toBeUndefined()
-    expect(parseAutomaticStopDuration("", { allowBlank: true })).toBeUndefined()
-    for (const value of ["", " ", "0m", "-1m", "1.5h", "1h30m", "30s", "1d", "30M", "9007199254740992m"]) expect(() => parseAutomaticStopDuration(value)).toThrow("WATERBOX_AUTO_STOP")
+    for (const value of [undefined, "", " ", "0m", "-1m", "1.5h", "1h30m", "30s", "1d", "30M", "9007199254740992m"]) expect(() => parseAutomaticStopDuration(value)).toThrow("WATERBOX_AUTO_STOP")
     expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "key", WATERBOX_AUTO_STOP: "30m" }, "/users/test").provider.config).toMatchObject({ automaticStopMs: 1_800_000 })
     expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "box", BOX_API_KEY: "key", WATERBOX_AUTO_STOP: "1.5h" }, "/users/test")).toThrow("WATERBOX_AUTO_STOP")
   })
@@ -187,12 +185,12 @@ describe("local control-plane composition", () => {
   })
 
   test("owns direct environment parsing below composition and keeps values out of errors", () => {
-    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "token", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toMatchObject({ sqlitePath: "/users/test/.waterbox/direct.sqlite", provider: { kind: "vercel", config: { token: "token" } } })
+    expect(parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: "token", VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project", WATERBOX_AUTO_STOP: "40m" }, "/users/test")).toMatchObject({ sqlitePath: "/users/test/.waterbox/direct.sqlite", provider: { kind: "vercel", config: { token: "token" } } })
     const secret = "do-not-render"
     try { parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: secret, VERCEL_TEAM_ID: "team" }) } catch (error) { expect(String(error)).not.toContain(secret) }
     for (const whitespaceSecret of [" token", "token ", "\ttoken", "token\n"]) {
       expect(() => parseLocalProviderConfiguration({ WATERBOX_PROVIDER: "vercel", VERCEL_TOKEN: whitespaceSecret, VERCEL_TEAM_ID: "team", VERCEL_PROJECT_ID: "project" }, "/users/test")).toThrow("VERCEL_TOKEN")
-      expect(() => deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: "https://api.vercel.com", token: whitespaceSecret, teamId: "team", projectId: "project", polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 } } })).toThrow("credential")
+      expect(() => deriveProviderConfigurationId({ kind: "vercel", config: { apiOrigin: "https://api.vercel.com", token: whitespaceSecret, teamId: "team", projectId: "project", polling: { intervalMs: 1000, timeoutMs: 120000, requestTimeoutMs: 30000 }, automaticStopMs: 2_400_000 } })).toThrow("credential")
     }
   })
 

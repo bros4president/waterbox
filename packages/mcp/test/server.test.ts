@@ -36,9 +36,10 @@ describe("Waterbox MCP client renderer", () => {
     const connection = await connected(commands)
     try {
       const listedTools = (await connection.client.listTools()).tools
+      expect(connection.client.getInstructions()).toBe("These Waterbox instructions are a work in progress.\n\nWhen the current task is complete and any material outcomes the user expects outside the sandbox have been exported or otherwise preserved, stop the sandbox to avoid unnecessary compute costs. Do not stop it merely because a conversational turn has ended while work remains active.")
       expect(listedTools.map(tool => tool.name)).toEqual(["create_sandbox", "probe_sandbox", "stop_sandbox", "delete_sandbox", "list_snapshots", "create_snapshot", "delete_snapshot", "send_file_securely", "read", "write", "edit", "patch", "glob", "grep", "bash"])
       expect(listedTools.find(tool => tool.name === "create_snapshot")?.description).toBe("Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.")
-      expect(listedTools.find(tool => tool.name === "stop_sandbox")?.description).toBe("Ends current compute while preserving resumable sandbox state, subject to provider behavior.")
+      expect(listedTools.find(tool => tool.name === "stop_sandbox")?.description).toBe("Stops compute while preserving resumable state. Coding operations automatically resume it. Use after the current task is complete and expected material outcomes are exported or otherwise preserved; resuming adds latency, so do not stop merely at every conversational turn.")
       expect(listedTools.find(tool => tool.name === "delete_sandbox")?.description).toContain("Permanently")
       expect(listedTools.map(tool => tool.name)).not.toContain("resume_sandbox")
       expect(listedTools.map(tool => tool.name)).not.toContain("list_sandboxes")
