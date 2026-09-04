@@ -69,7 +69,7 @@ tools before filesystem, SQLite, artifact, or provider I/O.
 ## Lifecycle And Tools
 
 Waterbox exposes `create_sandbox`, `probe_sandbox`, `stop_sandbox`,
-`delete_sandbox`, `list_snapshots`, `create_snapshot`, `delete_snapshot`,
+`list_snapshots`, `create_snapshot`, `delete_snapshot`,
 `send_file_securely`, `read`, `write`, `edit`, `patch`, `glob`, `grep`, and
 `bash`. Resource IDs are explicit; there is no selected sandbox or
 `list_sandboxes` tool.

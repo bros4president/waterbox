@@ -76,8 +76,8 @@ snapshot, daemon, or Bun runtime is used.
 
 ## Tools
 
-Lifecycle tools are `create_sandbox`, `probe_sandbox`, `stop_sandbox`, and
-`delete_sandbox`. Snapshot tools are `list_snapshots`, `create_snapshot`, and
+Lifecycle tools are `create_sandbox`, `probe_sandbox`, and `stop_sandbox`.
+Snapshot tools are `list_snapshots`, `create_snapshot`, and
 `delete_snapshot`. Coding tools are `read`, `write`, `edit`, `patch`, `glob`,
 `grep`, and `bash`; each requires a sandbox ID. `send_file_securely` encrypts a
 bounded local file in transit to a sandbox without placing its contents in

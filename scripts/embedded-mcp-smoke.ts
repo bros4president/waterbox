@@ -1,16 +1,18 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
-import { SandboxIdSchema, SandboxSchema, SnapshotIdSchema, SnapshotPageSchema, SnapshotSchema, type SandboxId, type SnapshotId } from "../packages/sandbox-contracts/src/index.ts"
+import { SandboxIdSchema, SandboxSchema, SnapshotIdSchema, SnapshotPageSchema, SnapshotSchema, type Sandbox, type SandboxId, type SnapshotId } from "../packages/sandbox-contracts/src/index.ts"
 import { parseAutomaticStopDuration } from "../packages/control-plane-local/src/index.ts"
+import { createStartupClient } from "../packages/mcp/src/main.ts"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 const AUTHORIZATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_BOX_RESOURCES"
-const TOOL_NAMES = "create_sandbox,probe_sandbox,stop_sandbox,delete_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash"
+const TOOL_NAMES = "create_sandbox,probe_sandbox,stop_sandbox,list_snapshots,create_snapshot,delete_snapshot,send_file_securely,read,write,edit,patch,glob,grep,bash"
 const HEALTH = JSON.stringify({ ok: true, protocolVersion: 2, tools: ["read", "write", "edit", "patch", "glob", "grep", "bash"] })
 const VERSION = JSON.stringify({ protocolVersion: 2 })
 const SNAPSHOT_POLL_ATTEMPTS = 180
+const CLEANUP_TIMEOUT_MS = 30_000
 
 export interface BoxBaseline { ids: Set<string>; activeBoxes: number }
 export interface BaselineReconciliation { visibleSetRestored: boolean; activeCountRestored: boolean; timedOut: boolean }
@@ -41,6 +43,11 @@ export interface ProductFlowOptions {
   log?: (line: string) => void
   secrets?: string[]
   runtime?: McpRuntimeLayout
+  cleanup: SmokeCleanup
+}
+
+export interface SmokeCleanup {
+  deleteSandbox(sandboxId: SandboxId): Promise<Sandbox>
 }
 
 const BOX_RUNTIME_LAYOUT: McpRuntimeLayout = {
@@ -200,9 +207,9 @@ export async function runEmbeddedMcpProductFlow(client: EmbeddedSmokeClient, opt
     failure = error
   } finally {
     const cleanupFailures: string[] = []
-    if (restoredSandboxId) await deleteTrackedSandbox(client, restoredSandboxId, report).catch(() => cleanupFailures.push("restored sandbox"))
+    if (restoredSandboxId) await deleteTrackedSandbox(options.cleanup, restoredSandboxId, report).catch(() => cleanupFailures.push("restored sandbox"))
     if (snapshotId) await deleteTrackedSnapshot(client, snapshotId, report).catch(() => cleanupFailures.push("snapshot"))
-    if (sandboxId) await deleteTrackedSandbox(client, sandboxId, report).catch(() => cleanupFailures.push("source sandbox"))
+    if (sandboxId) await deleteTrackedSandbox(options.cleanup, sandboxId, report).catch(() => cleanupFailures.push("source sandbox"))
     if (cleanupFailures.length) failure = failure === undefined ? new Error("Embedded MCP tracked cleanup requires manual review") : new Error(`${failure instanceof Error ? failure.message : "Embedded MCP smoke failed"}; tracked cleanup requires manual review`)
   }
   if (failure !== undefined) throw new Error(redact(failure instanceof Error ? failure.message : "Embedded MCP smoke failed", [...(options.secrets ?? []), sandboxId ?? "", snapshotId ?? "", restoredSandboxId ?? "", marker ?? ""]))
@@ -245,7 +252,7 @@ function trackedSnapshot(result: unknown, track?: (id: SnapshotId) => void) {
 function trackRecoverySandbox(result: unknown, track: (id: SandboxId) => void): void {
   let message: string
   try { message = resultText(result) } catch { return }
-  const matches = [...message.matchAll(/(?:^|\s)Recovery sandbox: (sbx_[a-z]+-[a-z]+-[a-z0-9]+)\.(?=\s|$)/g)]
+  const matches = [...message.matchAll(/(?:^|\s)Sandbox creation was not confirmed, but that sandbox may still exist with ID (sbx_[a-z]+-[a-z]+-[a-z0-9]+)\. Before creating another sandbox, inspect it with `probe_sandbox`\.$/g)]
   if (matches.length !== 1) return
   const candidate = SandboxIdSchema.safeParse(matches[0]![1])
   if (candidate.success) track(candidate.data)
@@ -275,13 +282,13 @@ async function findTrackedSnapshot(client: EmbeddedSmokeClient, snapshotId: stri
   throw new Error("Embedded MCP snapshot readiness listing exceeded its safety bound")
 }
 
-async function deleteTrackedSandbox(client: EmbeddedSmokeClient, sandboxId: string, report: (stage: string, facts: Record<string, boolean | number>) => void): Promise<void> {
-  const deleted = SandboxSchema.parse(JSON.parse(resultText(await callTool(client, { name: "delete_sandbox", arguments: { sandboxId } }, 180_000))))
+async function deleteTrackedSandbox(cleanup: SmokeCleanup, sandboxId: SandboxId, report: (stage: string, facts: Record<string, boolean | number>) => void): Promise<void> {
+  const deleted = SandboxSchema.parse(await cleanup.deleteSandbox(sandboxId))
   if (deleted.sandboxId !== sandboxId || deleted.state !== "terminated") throw new Error("uncorrelated delete result")
   report("cleanup", { sandboxDeleted: true })
 }
 
-async function deleteTrackedSnapshot(client: EmbeddedSmokeClient, snapshotId: string, report: (stage: string, facts: Record<string, boolean | number>) => void): Promise<void> {
+async function deleteTrackedSnapshot(client: EmbeddedSmokeClient, snapshotId: SnapshotId, report: (stage: string, facts: Record<string, boolean | number>) => void): Promise<void> {
   const deleted = SnapshotSchema.parse(JSON.parse(resultText(await callTool(client, { name: "delete_snapshot", arguments: { snapshotId } }, 180_000))))
   if (deleted.snapshotId !== snapshotId || deleted.state !== "deleted") throw new Error("uncorrelated delete result")
   report("cleanup", { snapshotDeleted: true })
@@ -289,8 +296,8 @@ async function deleteTrackedSnapshot(client: EmbeddedSmokeClient, snapshotId: st
 
 export async function runEmbeddedMcpSmoke(environment: Record<string, string | undefined> = process.env) {
   assertEmbeddedSmokeAuthorized(environment)
+  if (environment.WATERBOX_AUTO_STOP === undefined) throw new Error("The Embedded MCP smoke requires WATERBOX_AUTO_STOP")
   const automaticStopMs = parseAutomaticStopDuration(environment.WATERBOX_AUTO_STOP)
-  if (automaticStopMs === undefined) throw new Error("The Embedded MCP smoke requires WATERBOX_AUTO_STOP")
   const boxApiKey = environment.BOX_API_KEY
   if (!boxApiKey) throw new Error("The Embedded MCP smoke requires Box credentials")
   const boxApiBaseUrl = (environment.BOX_API_BASE_URL ?? "https://ascii.dev/api/box/v1").replace(/\/$/, "")
@@ -304,14 +311,17 @@ export async function runEmbeddedMcpSmoke(environment: Record<string, string | u
   await Bun.write(localSecretPath, new Uint8Array([0, 1, 2, 3, 255]))
   const transport = new StdioClientTransport({ command: "node", args: [resolve(import.meta.dir, "../packages/mcp/dist/waterbox.js")], env: stringEnvironment({ ...environment, WATERBOX_PROVIDER: "box", WATERBOX_SQLITE_PATH: join(directory, "embedded.sqlite"), BOX_API_BASE_URL: boxApiBaseUrl, BOX_API_KEY: boxApiKey, WATERBOX_MCP_DIAGNOSTICS: "1" }), stderr: "inherit" })
   const client = new Client({ name: "waterbox-embedded-smoke", version: "1" })
+  let cleanup: Awaited<ReturnType<typeof createStartupClient>> | undefined
   let failure: unknown
   try {
     await client.connect(transport)
-    await runEmbeddedMcpProductFlow(client as EmbeddedSmokeClient, { localSecretPath, automaticStopMs, secrets: [boxApiKey], log: console.log })
+    cleanup = await createStartupClient({ ...environment, WATERBOX_PROVIDER: "box", WATERBOX_SQLITE_PATH: join(directory, "embedded.sqlite"), BOX_API_BASE_URL: boxApiBaseUrl, BOX_API_KEY: boxApiKey })
+    await runEmbeddedMcpProductFlow(client as EmbeddedSmokeClient, { localSecretPath, automaticStopMs, cleanup: internalCleanup(cleanup), secrets: [boxApiKey], log: console.log })
   } catch (error) {
     failure = error
   } finally {
     await client.close().catch(() => {})
+    await cleanup?.close().catch(() => {})
     await rm(directory, { recursive: true, force: true }).catch(() => {})
     try {
       const result = await reconcileBoxBaseline(boxApiBaseUrl, boxApiKey, baseline, reconciliation)
@@ -323,6 +333,12 @@ export async function runEmbeddedMcpSmoke(environment: Record<string, string | u
   }
   if (failure !== undefined) throw new Error(redact(failure instanceof Error ? failure.message : "Embedded MCP smoke failed", [boxApiKey]))
   return { ok: true as const, flow: "embedded-mcp-smoke" }
+}
+
+function internalCleanup(client: Awaited<ReturnType<typeof createStartupClient>>): SmokeCleanup {
+  return {
+    deleteSandbox(sandboxId) { return client.deleteSandbox({ sandboxId }, { signal: AbortSignal.timeout(CLEANUP_TIMEOUT_MS) }) },
+  }
 }
 
 async function verifySecureTransfer(client: EmbeddedSmokeClient, target: { sandboxId: string }, localSecretPath: string, runtime: McpRuntimeLayout, sleep: (milliseconds: number) => Promise<void>): Promise<void> {

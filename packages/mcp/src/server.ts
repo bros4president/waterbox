@@ -19,12 +19,11 @@ const CreateSnapshotInputSchema = CreateSnapshotRequestSchema.extend({ sandboxId
 const SnapshotInputSchema = z.object({ snapshotId: SnapshotIdSchema }).strict()
 const SendFileInputSchema = z.object({ sandboxId: SandboxIdSchema, sourcePath: z.string().min(1).max(4_096), targetPath: FilePathSchema }).strict()
 const tools: Tool[] = [
-  tool("create_sandbox", "Creates a Waterbox sandbox. Reuse idempotencyKey to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
+  tool("create_sandbox", "Creates a sandbox for coding work, optionally seeded from a reusable snapshot. First use `list_snapshots` to find relevant snapshots. Unless the user has already specified a choice, present the best-fitting options and ask whether to use one or start fresh. Reuse `idempotencyKey` to retry the same creation safely; use a new key to create another sandbox.", CreateSandboxInputSchema),
   tool("probe_sandbox", "Queries the provider for live sandbox status and reconciles the observed state into Waterbox.", SandboxInputSchema),
   tool("stop_sandbox", "Stops compute while preserving resumable filesystem state, subject to provider behavior. No separate resume step is needed. If more coding work is required, the next coding tool call resumes the sandbox before performing the requested operation. Recommended usage: use it as a cleanup step to avoid spending more compute after the task's material outcomes are complete and available outside the sandbox, for example in a pull request or another exported deliverable. Because resuming adds latency, do not stop merely because a conversational turn has ended.", SandboxInputSchema),
-  tool("delete_sandbox", "Permanently deletes a user-owned Waterbox sandbox.", SandboxInputSchema),
   tool("list_snapshots", "Lists user-owned Waterbox snapshots with cursor pagination.", CursorPaginationRequestSchema),
-  tool("create_snapshot", "Creates a user-owned snapshot from a running Waterbox sandbox. It never implicitly resumes a sandbox.", CreateSnapshotInputSchema),
+  tool("create_snapshot", "Creates a reusable setup snapshot from a running sandbox. Give it a clear name and description so future agents can discover its purpose. This is a setup tool: use snapshots to preserve reusable environments, not for routine pauses or as definitive storage for completed work.", CreateSnapshotInputSchema),
   tool("delete_snapshot", "Permanently deletes a user-owned Waterbox snapshot.", SnapshotInputSchema),
   tool("send_file_securely", "Encrypts and transfers an existing local file to a sandbox without placing its contents in model context or tool arguments. The destination file is decrypted and readable inside the sandbox; avoid reading sensitive destination contents back into model context. The source file is not modified or deleted.", SendFileInputSchema),
   tool("read", "Reads any file or lists any directory in the specified Waterbox sandbox. Relative paths start in the sandbox workspace.", ARGUMENT_SCHEMAS.read),
@@ -48,7 +47,6 @@ export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: (
       if (request.params.name === "create_sandbox") { const { idempotencyKey, ...input } = CreateSandboxInputSchema.parse(request.params.arguments ?? {}); return text(SandboxSchema.parse(await client.createSandbox(input, { ...context, idempotencyKey }))) }
       if (request.params.name === "probe_sandbox") return text(SandboxSchema.parse(await client.probeSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "stop_sandbox") return text(SandboxSchema.parse(await client.stopSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
-      if (request.params.name === "delete_sandbox") return text(SandboxSchema.parse(await client.deleteSandbox(SandboxInputSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "list_snapshots") return text(SnapshotPageSchema.parse(await client.listSnapshots(CursorPaginationRequestSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "create_snapshot") return text(SnapshotSchema.parse(await client.createSnapshot(CreateSnapshotInputSchema.parse(request.params.arguments ?? {}), context)))
       if (request.params.name === "delete_snapshot") return text(SnapshotSchema.parse(await client.deleteSnapshot(SnapshotInputSchema.parse(request.params.arguments ?? {}), context)))
@@ -71,7 +69,7 @@ function text(value: unknown) { return { content: [{ type: "text" as const, text
 function safeMessage(error: unknown): string {
   if (error instanceof WaterboxClientError || (error instanceof Error && error.name === "WaterboxClientError")) {
     const clientError = error as WaterboxClientError
-    const recovery = clientError.recoverySandboxId === undefined ? "" : ` Recovery sandbox: ${clientError.recoverySandboxId}. Retry creation only with the same idempotency key, or use probe_sandbox or delete_sandbox with this sandbox ID.`
+    const recovery = clientError.recoverySandboxId === undefined ? "" : ` Sandbox creation was not confirmed, but that sandbox may still exist with ID ${clientError.recoverySandboxId}. Before creating another sandbox, inspect it with \`probe_sandbox\`.`
     return `${clientError.message}${recovery}`
   }
   return error instanceof PublicMcpError || error instanceof McpConfigurationError || (error instanceof Error && error.name === "UnsupportedMcpProviderError") ? error.message : "Waterbox MCP request failed"
