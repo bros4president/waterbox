@@ -40,6 +40,20 @@ describe("native-keyring onboarding", () => {
     expect((await resolvedEnvironment({}, storage, credentials)).environment).toEqual({ WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "hosted-secret" })
   })
 
+  test("treats native-keyring null values as missing credentials", async () => {
+    const values: Partial<Record<Provider, string | null>> = { waterbox: null, box: null, vercel: null }
+    const credentials: CredentialStore = {
+      async get(provider) { return values[provider] },
+      async set(provider, secret) { values[provider] = secret },
+      async delete(provider) { const present = values[provider] != null; values[provider] = null; return present },
+    }
+    expect(await credentialState("waterbox", credentials)).toBe("missing")
+    await setup(fakeStorage(), credentials, {
+      async selectProvider() { return "waterbox" }, async input() { throw new Error("hosted setup has no local settings") }, async secret() { return "hosted-secret" }, async confirm() { throw new Error("first setup must not warn") },
+    })
+    expect(values.waterbox).toBe("hosted-secret")
+  })
+
   test("hosted credential replacement and provider switches require confirmation when identity cannot be proven", async () => {
     const raw = JSON.stringify({ version: 2, provider: "waterbox" })
     for (const provider of ["waterbox", "box"] as const) {

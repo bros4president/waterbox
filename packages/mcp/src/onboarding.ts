@@ -7,7 +7,7 @@ import { automaticStopEnvironmentValue, deriveProviderConfigurationId, parseAuto
 
 export type Provider = "waterbox" | "box" | "vercel"
 export type CredentialState = "available" | "missing" | "inaccessible"
-export interface CredentialStore { get(provider: Provider): Promise<string | undefined>; set(provider: Provider, secret: string): Promise<void>; delete(provider: Provider): Promise<boolean> }
+export interface CredentialStore { get(provider: Provider): Promise<string | null | undefined>; set(provider: Provider, secret: string): Promise<void>; delete(provider: Provider): Promise<boolean> }
 export interface ConfigStorage { read(): Promise<string | undefined>; write(value: string): Promise<void>; remove(): Promise<void> }
 export interface BoxSettings { apiBaseUrl: string; pollIntervalMs: 1000; pollTimeoutMs: 120000; automaticStopMs: number }
 export interface VercelSettings { apiOrigin: string; teamId: string; projectId: string; pollIntervalMs: 1000; pollTimeoutMs: 120000; requestTimeoutMs: 30000; automaticStopMs: number }
@@ -50,7 +50,7 @@ export function configStorage(home = homedir()): ConfigStorage {
 
 export function nativeCredentialStore(): CredentialStore {
   return {
-    async get(provider) { const { AsyncEntry } = await import("@napi-rs/keyring"); const value = await new AsyncEntry(KEYRING_SERVICE, accounts[provider]).getPassword(); return value === undefined ? undefined : providerCredential(value) },
+    async get(provider) { const { AsyncEntry } = await import("@napi-rs/keyring"); const value = await new AsyncEntry(KEYRING_SERVICE, accounts[provider]).getPassword(); return value == null ? undefined : providerCredential(value) },
     async set(provider, secret) { const accepted = providerCredential(secret); const { AsyncEntry } = await import("@napi-rs/keyring"); await new AsyncEntry(KEYRING_SERVICE, accounts[provider]).setPassword(accepted) },
     async delete(provider) { const { AsyncEntry } = await import("@napi-rs/keyring"); return new AsyncEntry(KEYRING_SERVICE, accounts[provider]).deleteCredential() },
   }
@@ -81,7 +81,7 @@ export async function resolvedEnvironment(environment: Record<string, string | u
   const config = await loadPersisted(storage)
   if (!config) throw new OnboardingError()
   let storedSecret: string | undefined
-  try { storedSecret = await credentials.get(config.provider) } catch { throw new OnboardingError(`Waterbox credential storage is unavailable. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
+  try { storedSecret = await credentials.get(config.provider) ?? undefined } catch { throw new OnboardingError(`Waterbox credential storage is unavailable. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
   if (storedSecret === undefined) throw new OnboardingError(`Waterbox credential is missing. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`)
   let secret: string
   try { secret = providerCredential(storedSecret) } catch { throw new OnboardingError(`Waterbox stored credential is invalid. Run npx waterbox@next setup or set WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}, then restart the MCP client.`) }
@@ -142,7 +142,7 @@ export async function setup(storage: ConfigStorage, credentials: CredentialStore
   return provider
 }
 
-export async function credentialState(provider: Provider, credentials: CredentialStore): Promise<CredentialState> { try { const value = await credentials.get(provider); if (value === undefined) return "missing"; providerCredential(value); return "available" } catch { return "inaccessible" } }
+export async function credentialState(provider: Provider, credentials: CredentialStore): Promise<CredentialState> { try { const value = await credentials.get(provider); if (value == null) return "missing"; providerCredential(value); return "available" } catch { return "inaccessible" } }
 export async function logout(storage: ConfigStorage, credentials: CredentialStore): Promise<void> {
   let raw: string | undefined, prior: Record<Provider, string | undefined>
   try { raw = await storage.read(); prior = await credentialSnapshot(credentials) }
