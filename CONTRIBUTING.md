@@ -18,9 +18,11 @@ Set `NODE_24_15_BIN` to exactly Node v24.15.0 and `NODE_24_CURRENT_BIN` to a
 current Node 24 binary when running artifact certification locally. Missing
 binaries are reported and do not count as evidence. CI supplies both versions.
 
-Publishing is restricted to the protected `npm` GitHub environment and a
-controlled `v0.1.0-alpha.2` tag. The workflow uses npm trusted publishing/OIDC
-and provenance, checks tag/package versions, verifies one exact tarball, and
-publishes that file under the `latest` dist-tag. It has no `NPM_TOKEN`. Do not
-publish from a dirty checkout or run provider smokes without separate
+Publishing is restricted to the protected `npm` GitHub environment. The
+`packages-v0.1.0-alpha.2` tag publishes the four scoped packages in dependency
+order under the `next` dist-tag. The workflow uses npm trusted publishing/OIDC
+and provenance, checks exact package versions and dependencies, retains the
+certified tarballs, and safely resumes a partial publication only when registry
+bytes match. It never republishes the bundled `waterbox@0.1.0-alpha.2` package.
+Do not publish from a dirty checkout or run provider smokes without separate
 isolated-account authorization.

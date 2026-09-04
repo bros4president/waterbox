@@ -7,7 +7,7 @@ import { promisify } from "node:util"
 const run = promisify(execFile)
 const root = resolve(import.meta.dirname, "..")
 const packageRoot = join(root, "packages/sandbox-provider-box")
-const version = "0.1.0-alpha.1"
+const version = "0.1.0-alpha.2"
 const expectedFiles = new Set(["LICENSE", "README.md", "THIRD_PARTY_NOTICES.md", "dist/index.d.ts", "dist/index.js", "dist/waterbox-cli.js", "package.json"])
 
 async function verify(): Promise<void> {
@@ -16,6 +16,13 @@ async function verify(): Promise<void> {
     const packDirectory = join(temporary, "pack")
     const consumer = join(temporary, "consumer")
     await Promise.all([mkdir(packDirectory), mkdir(consumer)])
+    const dependencyTarballs: string[] = []
+    for (const directory of ["packages/sandbox-contracts", "packages/sandbox-core"]) {
+      const { stdout } = await run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", packDirectory, join(root, directory)], { cwd: temporary })
+      const dependencies = JSON.parse(stdout) as Array<{ filename: string }>
+      if (dependencies.length !== 1 || !dependencies[0]) throw new Error(`npm pack did not produce exactly one artifact for ${directory}`)
+      dependencyTarballs.push(join(packDirectory, dependencies[0].filename))
+    }
     const { stdout } = await run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", packDirectory, packageRoot], { cwd: temporary })
     const packed = JSON.parse(stdout) as Array<{ filename: string; files: Array<{ path: string }> }>
     if (packed.length !== 1 || !packed[0]) throw new Error("npm pack did not produce exactly one provider artifact")
@@ -25,7 +32,7 @@ async function verify(): Promise<void> {
     const tarball = join(packDirectory, artifact.filename)
     if (!artifact.filename.endsWith(".tgz") || !(await readdir(packDirectory)).includes(basename(tarball))) throw new Error("npm pack reported an invalid provider artifact")
     await writeFile(join(consumer, "package.json"), '{"name":"provider-box-consumer","private":true,"type":"module"}\n')
-    await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", tarball], { cwd: consumer })
+    await run("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false", ...dependencyTarballs, tarball], { cwd: consumer })
     const installed = join(consumer, "node_modules/@waterbox/provider-box")
     const manifest = JSON.parse(await readFile(join(installed, "package.json"), "utf8")) as Record<string, unknown>
     if (manifest.name !== "@waterbox/provider-box" || manifest.version !== version || manifest.engines === undefined || JSON.stringify(manifest.dependencies) !== JSON.stringify({ "@waterbox/contracts": version, "@waterbox/core": version })) throw new Error("Provider manifest identity or public dependency boundary is invalid")

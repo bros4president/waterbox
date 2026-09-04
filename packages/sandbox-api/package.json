@@ -1,6 +1,6 @@
 {
   "name": "@waterbox/api",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Provider-neutral Fetch and OpenAPI transport for the Waterbox control plane.",
   "type": "module",
   "license": "MIT",
@@ -32,8 +32,8 @@
   },
   "dependencies": {
     "@hono/zod-openapi": "^1.1.5",
-    "@waterbox/contracts": "0.1.0-alpha.1",
-    "@waterbox/core": "0.1.0-alpha.1",
+    "@waterbox/contracts": "0.1.0-alpha.2",
+    "@waterbox/core": "0.1.0-alpha.2",
     "hono": "^4.9.6",
     "zod": "^4.1.5"
   },

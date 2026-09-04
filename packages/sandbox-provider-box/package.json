@@ -1,6 +1,6 @@
 {
   "name": "@waterbox/provider-box",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Box sandbox provider for Waterbox, with an embedded Node 24 sandbox runtime.",
   "type": "module",
   "license": "MIT",
@@ -33,8 +33,8 @@
     "prepack": "node ../../scripts/build-waterbox.mjs provider-box"
   },
   "dependencies": {
-    "@waterbox/contracts": "0.1.0-alpha.1",
-    "@waterbox/core": "0.1.0-alpha.1"
+    "@waterbox/contracts": "0.1.0-alpha.2",
+    "@waterbox/core": "0.1.0-alpha.2"
   },
   "publishConfig": {
     "access": "public",

@@ -1,8 +1,8 @@
-name: Publish waterbox
+name: Publish Waterbox packages
 
 on:
   push:
-    tags: [v0.1.0-alpha.2]
+    tags: [packages-v0.1.0-alpha.2]
 
 permissions:
   contents: read
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   publish:
-    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/v0.1.0-alpha.2'
+    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/packages-v0.1.0-alpha.2'
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -35,33 +35,114 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - name: Verify clean tag and version
         run: |
-          test "$(git tag --points-at HEAD)" = "v0.1.0-alpha.2"
+          test "$(git tag --points-at HEAD)" = "packages-v0.1.0-alpha.2"
           test -z "$(git status --porcelain)"
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
-          node -e 'const p=require("./packages/mcp/package.json"); if (p.name !== "waterbox" || p.version !== process.env.GITHUB_REF_NAME.slice(1)) process.exit(1)'
+          node <<'NODE'
+          const version = "0.1.0-alpha.2";
+          const manifests = [
+            require("./packages/sandbox-contracts/package.json"),
+            require("./packages/sandbox-core/package.json"),
+            require("./packages/sandbox-api/package.json"),
+            require("./packages/sandbox-provider-box/package.json"),
+          ];
+          if (manifests.some(manifest => manifest.version !== version)) process.exit(1);
+          for (const manifest of manifests) {
+            for (const [name, dependency] of Object.entries(manifest.dependencies ?? {})) {
+              if (name.startsWith("@waterbox/") && dependency !== version) process.exit(1);
+            }
+          }
+          const mcp = require("./packages/mcp/package.json");
+          if (mcp.name !== "waterbox" || mcp.version !== version) process.exit(1);
+          NODE
       - run: bun install --frozen-lockfile
-      - name: Build and certify exact artifact
+      - name: Build and certify release inputs
         env:
           WATERBOX_RELEASE_ARTIFACT_DIR: ${{ runner.temp }}/waterbox-release
         run: bun run check:release
+      - name: Pack exact scoped artifacts
+        run: |
+          release_dir="${RUNNER_TEMP}/waterbox-release"
+          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-contracts
+          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-core
+          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-api
+          npm pack --ignore-scripts --pack-destination "$release_dir" packages/sandbox-provider-box
+          cd "$release_dir"
+          sha256sum \
+            waterbox-contracts-0.1.0-alpha.2.tgz \
+            waterbox-core-0.1.0-alpha.2.tgz \
+            waterbox-api-0.1.0-alpha.2.tgz \
+            waterbox-provider-box-0.1.0-alpha.2.tgz \
+            > waterbox-packages-0.1.0-alpha.2.sha256
       - name: Recheck clean tracked inputs
         run: test -z "$(git status --porcelain)"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: waterbox-0.1.0-alpha.2-release-evidence
+          name: waterbox-packages-0.1.0-alpha.2-release-evidence
           path: ${{ runner.temp }}/waterbox-release/*
           if-no-files-found: error
           retention-days: 90
-      - name: Publish or verify retained tarball
+      - name: Publish or verify retained tarballs
         run: |
+          set -euo pipefail
           npm install --global npm@11.19.1
-          cd "${RUNNER_TEMP}/waterbox-release"
-          sha256sum --check waterbox-0.1.0-alpha.2.sha256
-          if npm view waterbox@0.1.0-alpha.2 version >/dev/null 2>&1; then
-            mkdir "${RUNNER_TEMP}/waterbox-registry"
-            npm pack waterbox@0.1.0-alpha.2 --pack-destination "${RUNNER_TEMP}/waterbox-registry" --silent
-            cmp waterbox-0.1.0-alpha.2.tgz "${RUNNER_TEMP}/waterbox-registry/waterbox-0.1.0-alpha.2.tgz"
-          else
-            npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.2.tgz" --provenance --access public --tag latest
-          fi
+          release_dir="${RUNNER_TEMP}/waterbox-release"
+          registry_dir="${RUNNER_TEMP}/waterbox-registry"
+          mkdir "$registry_dir"
+          cd "$release_dir"
+          sha256sum --check waterbox-packages-0.1.0-alpha.2.sha256
+
+          packages=(
+            "@waterbox/contracts|waterbox-contracts-0.1.0-alpha.2.tgz"
+            "@waterbox/core|waterbox-core-0.1.0-alpha.2.tgz"
+            "@waterbox/api|waterbox-api-0.1.0-alpha.2.tgz"
+            "@waterbox/provider-box|waterbox-provider-box-0.1.0-alpha.2.tgz"
+          )
+
+          package_exists() {
+            local package="$1" output
+            if output=$(npm view "${package}@0.1.0-alpha.2" version 2>&1); then
+              test "$output" = "0.1.0-alpha.2"
+              return 0
+            fi
+            if grep -q "E404" <<<"$output"; then return 1; fi
+            printf '%s\n' "$output" >&2
+            return 2
+          }
+
+          verify_registry_bytes() {
+            local package="$1" tarball="$2"
+            rm -f "${registry_dir}/${tarball}"
+            npm pack "${package}@0.1.0-alpha.2" --pack-destination "$registry_dir" --silent
+            cmp "${release_dir}/${tarball}" "${registry_dir}/${tarball}"
+          }
+
+          for entry in "${packages[@]}"; do
+            IFS='|' read -r package tarball <<<"$entry"
+            if package_exists "$package"; then
+              verify_registry_bytes "$package" "$tarball"
+            else
+              status=$?
+              test "$status" = 1
+            fi
+          done
+
+          for entry in "${packages[@]}"; do
+            IFS='|' read -r package tarball <<<"$entry"
+            if package_exists "$package"; then
+              verify_registry_bytes "$package" "$tarball"
+            else
+              status=$?
+              test "$status" = 1
+              npm publish "${release_dir}/${tarball}" --provenance --access public --tag next
+            fi
+          done
+
+          for entry in "${packages[@]}"; do
+            IFS='|' read -r package tarball <<<"$entry"
+            test "$(npm view "${package}@0.1.0-alpha.2" version)" = "0.1.0-alpha.2"
+            test "$(npm view "${package}@next" version)" = "0.1.0-alpha.2"
+            test "$(npm view "${package}@latest" version)" = "0.1.0-alpha.1"
+            verify_registry_bytes "$package" "$tarball"
+          done
           test "$(npm view waterbox@latest version)" = "0.1.0-alpha.2"
