@@ -52,7 +52,7 @@ describe("Waterbox MCP client renderer", () => {
       const result = await connection.client.callTool({ name: "read", arguments: { sandboxId: sandbox.sandboxId, filePath: "/workspace/a.txt" } })
       expect(result).toMatchObject({ content: [{ text: expect.stringContaining('"output":"A\\n"') }] })
       expect(reads).toBe(1)
-      expect(await connection.client.callTool({ name: "read", arguments: { filePath: "/workspace/a.txt" } })).toMatchObject({ isError: true, content: [{ text: "Invalid arguments for Waterbox read" }] })
+      expect(await connection.client.callTool({ name: "read", arguments: { filePath: "/workspace/a.txt" } })).toMatchObject({ isError: true, content: [{ text: "Invalid arguments for read" }] })
       expect(reads).toBe(1)
     } finally { await connection.close() }
   })
@@ -66,12 +66,12 @@ describe("Waterbox MCP client renderer", () => {
     try {
       expect(await connection.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).toMatchObject({ content: [{ text: expect.stringContaining('"state":"stopped"') }] })
       expect(stops).toBe(1)
-      expect(await connection.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: "not-a-sandbox" } })).toMatchObject({ isError: true, content: [{ text: "Waterbox MCP request failed" }] })
+      expect(await connection.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: "not-a-sandbox" } })).toMatchObject({ isError: true, content: [{ text: "Invalid arguments for stop_sandbox" }] })
       expect(stops).toBe(1)
     } finally { await connection.close() }
 
     const failing = await connected(stubClient({ async stopSandbox() { throw new WaterboxClientError("Stopping failed", { status: 502, code: "provider_failure" }) } }))
-    try { expect(await failing.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).toMatchObject({ isError: true, content: [{ text: "Stopping failed" }] }) }
+    try { expect(await failing.client.callTool({ name: "stop_sandbox", arguments: { sandboxId: sandbox.sandboxId } })).toMatchObject({ isError: true, content: [{ text: "Waterbox MCP request failed" }] }) }
     finally { await failing.close() }
   })
 
@@ -117,10 +117,25 @@ describe("Waterbox MCP client renderer", () => {
     finally { await connection.close() }
   })
 
-  test("renders safe recovery guidance from validated client errors", async () => {
-    const commands = stubClient({ async createSandbox() { throw new WaterboxClientError("Sandbox preparation failed", { status: 503, code: "provider_failure", recoverySandboxId: sandbox.sandboxId }) } })
+  test("preserves validated API recovery messages and rejects externally constructed client errors", async () => {
+    const message = `Sandbox ${sandbox.sandboxId} may require recovery. Inspect it with probe_sandbox before retrying the operation.`
+    const commands = new WaterboxClient(createRemoteApiBackend("http://waterbox.test/", async () => new Response(JSON.stringify({ error: { code: "provider_failure", message, requestId: "req_test", sandboxId: sandbox.sandboxId } }), { status: 502, headers: { "content-type": "application/json" } })))
     const connection = await connected(commands)
-    try { const response = await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "recover-create" } }); const rendered = JSON.stringify(response); expect(rendered).toContain(`Sandbox creation was not confirmed, but that sandbox may still exist with ID ${sandbox.sandboxId}. Before creating another sandbox, inspect it with \`probe_sandbox\`.`); expect(rendered).not.toContain("requestId"); expect(rendered).not.toContain("delete_sandbox"); expect(response).toMatchObject({ isError: true }) }
+    try {
+      expect(await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "recover-create" } })).toMatchObject({ isError: true, content: [{ text: message }] })
+    }
+    finally { await connection.close() }
+    const spoofed = await connected(stubClient({ async createSandbox() { throw new WaterboxClientError("provider secret", { recoverySandboxId: sandbox.sandboxId }) } }))
+    try { expect(await spoofed.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "spoof" } })).toMatchObject({ isError: true, content: [{ text: "Waterbox MCP request failed" }] }) }
+    finally { await spoofed.close() }
+  })
+
+  test("uses the captured validated client message after mutation", async () => {
+    const approved = "The sandbox operation failed safely"
+    const source = new WaterboxClient(createRemoteApiBackend("http://waterbox.test/", async () => new Response(JSON.stringify({ error: { code: "provider_failure", message: approved, requestId: "req_test" } }), { status: 502, headers: { "content-type": "application/json" } })))
+    const commands = stubClient({ async createSandbox() { const error = await source.createSandbox({}, { idempotencyKey: "mutate", signal: new AbortController().signal }).catch(value => value); (error as Error).message = "mutated client secret"; throw error } })
+    const connection = await connected(commands)
+    try { expect(await connection.client.callTool({ name: "create_sandbox", arguments: { idempotencyKey: "mutate" } })).toMatchObject({ isError: true, content: [{ text: approved }] }) }
     finally { await connection.close() }
   })
 

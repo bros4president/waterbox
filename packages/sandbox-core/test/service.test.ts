@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { Identity, SandboxId, SnapshotId } from "@waterbox/contracts"
-import { DomainError, SandboxRecoveryError, SandboxService, type SandboxServiceConfig, type SandboxServiceDependencies } from "@waterbox/core"
+import { DomainError, domainErrorDetails, SandboxService, type SandboxServiceConfig, type SandboxServiceDependencies } from "@waterbox/core"
 import type { ListRepositoryInput, RepositoryPage, SandboxRepository } from "@waterbox/core/ports"
 import {
   ProviderError,
@@ -331,7 +331,7 @@ describe("durable create idempotency", () => {
     expect((await creation).state).toBe("running")
   })
 
-  test("does not claim provider-reference durability when checkpoint persistence fails", async () => {
+  test("keeps secret-bearing checkpoint persistence failures private and unattributed", async () => {
     const base = new InMemorySandboxRepository()
     const sandboxes = new FailingSandboxCasRepository(base)
     const provider = new FakeSandboxProvider()
@@ -346,7 +346,8 @@ describe("durable create idempotency", () => {
       ids: new SequenceIdGenerator(["sbx_calm-cactus-a1"]),
     })
 
-    await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "checkpoint-failure" }), "provider_failure")
+    const error = await expectDomainError(service.createSandbox(alice, {}, { idempotencyKey: "checkpoint-failure" }), "internal_error")
+    expect(error.message).not.toContain("repository-secret")
 
     expect(provider.createCalls).toBe(1)
     expect(provider.prepareCalls).toBe(0)
@@ -540,21 +541,21 @@ describe("durable create idempotency", () => {
       "provider_failure",
     )
 
-    expect(error).toBeInstanceOf(SandboxRecoveryError)
-    expect((error as SandboxRecoveryError).sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(domainErrorDetails(error)?.sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(error.message).toBe("Sandbox sbx_calm-cactus-a1 has a recorded preparation failure. Inspect it with probe_sandbox; retrying the same creation key returns this failure.")
     expect(error.message).not.toContain("provider secret")
     expect(await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({
       state: "failed",
       providerRef: { privateSandboxId: "sbx_calm-cactus-a1" },
-      lastError: { code: "provider_failure", message: "The provider operation failed" },
+      lastError: { code: "provider_failure", message: "The provider could not prepare sandbox" },
     })
     expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "prepare-failure" }))?.state).toBe("failed")
     const replay = await expectDomainError(
       service.createSandbox(alice, {}, { idempotencyKey: "prepare-failure" }),
       "provider_failure",
     )
-    expect(replay).toBeInstanceOf(SandboxRecoveryError)
-    expect((replay as SandboxRecoveryError).sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(domainErrorDetails(replay)?.sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(replay.message).toBe("Sandbox sbx_calm-cactus-a1 has a recorded preparation failure. Inspect it with probe_sandbox; retrying the same creation key returns this failure.")
     expect(provider.prepareCalls).toBe(1)
     expect((await service.probeSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("failed")
     expect((await service.deleteSandbox(alice, "sbx_calm-cactus-a1")).state).toBe("terminated")
@@ -580,13 +581,26 @@ describe("durable create idempotency", () => {
       service.createSandbox(alice, {}, { idempotencyKey: "running-commit" }),
       "conflict",
     )
-    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect(domainErrorDetails(error)?.sandboxId).toBe("sbx_calm-cactus-a1")
     expect(await base.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({ state: "preparing", lastError: undefined })
     expect((await idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "running-commit" }))?.state).toBe("in_progress")
 
     expect((await service.createSandbox(alice, {}, { idempotencyKey: "running-commit" })).state).toBe("running")
     expect(provider.createCalls).toBe(1)
     expect(provider.prepareCalls).toBe(2)
+  })
+
+  test("unkeyed durable preparation failure does not claim an idempotency replay", async () => {
+    const provider = new FakeSandboxProvider()
+    provider.prepareError = new ProviderError("failure", "private preparation failure")
+    const { service } = harness({ provider })
+
+    const error = await expectDomainError(service.createSandbox(alice, {}), "provider_failure")
+
+    expect(domainErrorDetails(error)).toMatchObject({
+      sandboxId: "sbx_calm-cactus-a1",
+      message: "Sandbox sbx_calm-cactus-a1 has a recorded preparation failure. Inspect it with probe_sandbox before deciding on the next action.",
+    })
   })
 
   test("failure persistence exhaustion reports recovery without leaving failed missing its error", async () => {
@@ -609,7 +623,7 @@ describe("durable create idempotency", () => {
       service.createSandbox(alice, {}, { idempotencyKey: "failure-persistence" }),
       "conflict",
     )
-    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect(domainErrorDetails(error)?.sandboxId).toBe("sbx_calm-cactus-a1")
     expect(await base.get(alice.accountId, "sbx_calm-cactus-a1")).toMatchObject({ state: "preparing", lastError: undefined })
 
     sandboxes.rejectFailures = false
@@ -626,7 +640,8 @@ describe("durable create idempotency", () => {
       ambiguous.service.createSandbox(alice, {}, { idempotencyKey: "ambiguous" }),
       "ambiguous_execution",
     )
-    expect(error).toBeInstanceOf(SandboxRecoveryError)
+    expect(domainErrorDetails(error)?.sandboxId).toBe("sbx_calm-cactus-a1")
+    expect(error.message).toBe("Sandbox sbx_calm-cactus-a1 may require recovery. Inspect it with probe_sandbox before retrying the operation.")
     expect((await ambiguous.sandboxes.get(alice.accountId, "sbx_calm-cactus-a1"))?.state).toBe("preparing")
     expect((await ambiguous.idempotency.get({ accountId: alice.accountId, scope: "sandbox:create", key: "ambiguous" }))?.state).toBe("in_progress")
     ambiguousProvider.prepareError = undefined
@@ -722,7 +737,7 @@ describe("lifecycle and optional groups", () => {
     expect(sandbox?.providerRef).toEqual({ privateSandboxId: "sbx_calm-cactus-a1" })
     expect(sandbox?.lastError).toEqual({
       code: "provider_failure",
-      message: "The provider returned an invalid sandbox state",
+      message: "The provider operation failed",
     })
     expect(reservation?.state).toBe("failed")
     expect(reservation?.lastError).toEqual(sandbox?.lastError)
@@ -1779,7 +1794,7 @@ describe("execution and reconciliation", () => {
     provider.sandboxStates.set(sandboxId, "failed")
     expect(await service.probeSandbox(alice, sandboxId, sandboxSignal)).toMatchObject({
       state: "failed",
-      lastError: { code: "provider_failure", message: "The provider reports that sandbox preparation failed" },
+      lastError: { code: "provider_failure", message: "The provider reported that sandbox preparation failed" },
     })
     provider.sandboxStates.set(terminatedId, "terminated")
     expect((await service.probeSandbox(alice, terminatedId, sandboxSignal)).state).toBe("terminated")
@@ -1848,10 +1863,10 @@ describe("records and compare-and-swap", () => {
       service.createSandbox(alice, {}, { idempotencyKey: "secret-failure" }),
       "provider_failure",
     )
-    expect(thrown.message).toBe("The provider operation failed")
+    expect(thrown.message).toBe("The provider could not create sandbox")
     expect(thrown.message).not.toContain(secret)
-    expect(serializeError(thrown)).not.toContain(secret)
-    expect(thrown.cause).toBeUndefined()
+    // Causes remain private diagnostic data; public persistence below must not copy them.
+    expect(thrown.cause).toBe(provider.createError)
 
     const persisted = await sandboxes.get(alice.accountId, "sbx_calm-cactus-a1")
     const reservation = await idempotency.get({
@@ -1863,7 +1878,7 @@ describe("records and compare-and-swap", () => {
     expect(JSON.stringify(persisted?.lastError)).not.toContain(secret)
     expect(JSON.stringify(reservation?.lastError)).not.toContain(secret)
     expect(JSON.stringify(publicSandbox)).not.toContain(secret)
-    expect(publicSandbox.lastError).toEqual({ code: "provider_failure", message: "The provider operation failed" })
+    expect(publicSandbox.lastError).toEqual({ code: "provider_failure", message: "The provider could not create sandbox" })
   })
 
   test("provider-thrown domain errors are sanitized without a reachable cause", async () => {
@@ -1874,9 +1889,9 @@ describe("records and compare-and-swap", () => {
     const { service } = harness({ provider })
 
     const thrown = await expectDomainError(service.createSandbox(alice, {}), "provider_failure")
-    expect(thrown.message).toBe("The provider operation failed")
-    expect(thrown.cause).toBeUndefined()
-    expect(serializeError(thrown)).not.toContain(secret)
+    expect(thrown.message).toBe("The provider could not create sandbox")
+    expect(thrown.cause).toBeInstanceOf(DomainError)
+    expect((thrown.cause as Error).cause).toBeDefined()
     const publicSandbox = await service.getSandbox(alice, "sbx_calm-cactus-a1")
     expect(JSON.stringify(publicSandbox)).not.toContain(secret)
   })
@@ -2023,7 +2038,7 @@ class FailingSandboxCasRepository implements SandboxRepository {
   createIfAbsent(record: SandboxRecord): Promise<boolean> { return this.base.createIfAbsent(record) }
   get(accountId: string, sandboxId: SandboxId): Promise<SandboxRecord | undefined> { return this.base.get(accountId, sandboxId) }
   list(input: ListRepositoryInput): Promise<RepositoryPage<SandboxRecord>> { return this.base.list(input) }
-  async compareAndSwap(): Promise<boolean> { throw new Error("injected sandbox persistence failure") }
+  async compareAndSwap(): Promise<boolean> { throw new Error("repository-secret injected sandbox persistence failure") }
 }
 
 class ExhaustingSourceCasRepository implements SandboxRepository {

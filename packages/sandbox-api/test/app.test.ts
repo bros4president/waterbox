@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test"
-import { DomainError, SandboxRecoveryError, SandboxService } from "@waterbox/core"
+import { DomainError, SandboxService } from "@waterbox/core"
 import { MAX_SECURE_CIPHERTEXT_BASE64_LENGTH, MAX_TOOL_RESULT_BYTES, type SandboxId } from "@waterbox/contracts"
 import { FakeSandboxProvider, FixedClock, InMemoryIdempotencyRepository, InMemorySandboxCreationRepository, InMemorySandboxRepository, InMemorySnapshotRepository, SequenceIdGenerator } from "@waterbox/core/test-support"
 import { ProviderError } from "@waterbox/core/provider"
+import { errorRecord, publicDomainError, recoveryError } from "../../sandbox-core/dist/public-error-internal.js"
 import { createWaterboxApi, type IdentityResolver, type WaterboxCore } from "../src/index.ts"
 
 const sandbox = {
@@ -286,7 +287,7 @@ describe("Waterbox API", () => {
       const text = await response.text()
       expect(text).not.toContain(secret)
       expect(text).not.toContain("privateSandboxId")
-      expect(JSON.parse(text)).toEqual({ error: { code: "provider_failure", message: "The provider operation failed", requestId: "req_test", sandboxId: ids[index] } })
+      expect(JSON.parse(text)).toEqual({ error: { code: "provider_failure", message: `Sandbox ${ids[index]} has a recorded preparation failure. Inspect it with probe_sandbox before deciding on the next action.`, requestId: "req_test", sandboxId: ids[index] } })
     }
     expect(provider.prepareCalls).toBe(2)
   })
@@ -429,6 +430,27 @@ describe("Waterbox API", () => {
     expect(JSON.parse(text)).toEqual({ error: { code: "not_found", message: "The resource was not found", requestId: "req_test" } })
   })
 
+  test("uses captured public details after a trusted error is mutated", async () => {
+    const error = recoveryError(publicDomainError("provider_failure", "Approved message"), sandbox.sandboxId, "uncertain")
+    Object.assign(error, { code: "not_found", message: "mutated secret", sandboxId: "sbx_mutated-secret-a1" })
+    const { app } = api({ getSandbox: async () => { throw error } })
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth })
+    expect(await response.json()).toEqual({ error: { code: "provider_failure", message: `Sandbox ${sandbox.sandboxId} may require recovery. Inspect it with probe_sandbox before retrying the operation.`, requestId: "req_test", sandboxId: sandbox.sandboxId } })
+
+    const persisted = publicDomainError("provider_failure", "Approved persistence message")
+    Object.assign(persisted, { code: "not_found", message: "mutated persistence secret" })
+    expect(errorRecord(persisted)).toEqual({ code: "provider_failure", message: "Approved persistence message" })
+  })
+
+  test("fails closed for an ordinary DomainError with an invalid runtime code", async () => {
+    const error = new DomainError("not_found", "private detail")
+    Object.assign(error, { code: "not_an_error_code" })
+    const { app } = api({ getSandbox: async () => { throw error } })
+    const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth })
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({ error: { code: "internal_error", message: "An internal error occurred", requestId: "req_test" } })
+  })
+
   test("renders provider configuration mismatch as a safe conflict", async () => {
     const secret = "old-provider-configuration-private"
     const { app } = api({ getSandbox: async () => { throw new DomainError("provider_configuration_mismatch", secret) } })
@@ -445,25 +467,6 @@ describe("Waterbox API", () => {
     const response = await app.request(`/v1/sandboxes/${sandbox.sandboxId}`, { headers: auth })
     expect(response.status).toBe(500)
     expect(await response.text()).not.toContain(secret)
-  })
-
-  test("includes only the public sandbox recovery ID for post-checkpoint failures", async () => {
-    const secret = "private provider detail"
-    const recovery = new SandboxRecoveryError(new DomainError("provider_failure", secret), sandbox.sandboxId)
-    const { app } = api({ createSandbox: async () => { throw recovery } })
-
-    const response = await app.request("/v1/sandboxes", { method: "POST", headers: jsonHeaders, body: "{}" })
-    expect(response.status).toBe(502)
-    const text = await response.text()
-    expect(text).not.toContain(secret)
-    expect(JSON.parse(text)).toEqual({
-      error: {
-        code: "provider_failure",
-        message: "The provider operation failed",
-        requestId: "req_test",
-        sandboxId: sandbox.sandboxId,
-      },
-    })
   })
 
   test("rejects non-canonical core output without serializing internal fields", async () => {

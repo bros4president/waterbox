@@ -91,7 +91,28 @@ export interface CreateSandboxContext extends CommandContext {
   readonly idempotencyKey: string
 }
 
-export class WaterboxClientError extends Error {
+export interface PublicWaterboxClientError extends Error {
+  readonly status?: number
+  readonly code?: ErrorCode
+  readonly requestId?: string
+  readonly recoverySandboxId?: SandboxId
+}
+
+export interface PublicWaterboxClientErrorDetails {
+  readonly message: string
+  readonly status?: number
+  readonly code?: ErrorCode
+  readonly requestId?: string
+  readonly recoverySandboxId?: SandboxId
+}
+
+const publicClientErrors = new WeakMap<Error, PublicWaterboxClientErrorDetails>()
+
+/**
+ * An ordinary client error is intentionally not agent-visible. Only errors
+ * branded by this module after API-envelope validation pass the public guard.
+ */
+export class WaterboxClientError extends Error implements PublicWaterboxClientError {
   readonly status?: number
   readonly code?: ErrorCode
   readonly requestId?: string
@@ -107,13 +128,35 @@ export class WaterboxClientError extends Error {
   }
 }
 
+function clientError(message: string, options: { status?: number; code?: ErrorCode; requestId?: string; recoverySandboxId?: SandboxId } = {}): WaterboxClientError {
+  const error = new WaterboxClientError(message, options)
+  publicClientErrors.set(error, Object.freeze({ message, ...options }))
+  return error
+}
+
+export function isPublicWaterboxClientError(error: unknown): error is PublicWaterboxClientError {
+  return error instanceof Error && publicClientErrors.has(error)
+}
+
+export function publicWaterboxClientErrorMessage(error: unknown): string | undefined {
+  return publicWaterboxClientErrorDetails(error)?.message
+}
+
+export function publicWaterboxClientRecoverySandboxId(error: unknown): SandboxId | undefined {
+  return publicWaterboxClientErrorDetails(error)?.recoverySandboxId
+}
+
+export function publicWaterboxClientErrorDetails(error: unknown): PublicWaterboxClientErrorDetails | undefined {
+  return error instanceof Error ? publicClientErrors.get(error) : undefined
+}
+
 export function createRemoteApiBackend(origin: string | URL, authenticatedFetch: (request: Request) => Promise<Response>): ApiBackend {
   const parsed = validateOrigin(origin)
   let closed = false
   return {
     get origin() { return new URL(parsed) },
     fetch(request) {
-      if (closed) return Promise.reject(new WaterboxClientError("The Waterbox API backend is closed"))
+      if (closed) return Promise.reject(clientError("The Waterbox API backend is closed"))
       return authenticatedFetch(request)
     },
     async close() { closed = true },
@@ -215,18 +258,18 @@ export class WaterboxClient {
     context.signal.throwIfAborted()
     const sandboxId = SandboxIdSchema.parse(input.sandboxId)
     if (!(input.plaintext instanceof Uint8Array) || input.plaintext.byteLength > MAX_SECURE_FILE_BYTES) {
-      throw new WaterboxClientError("Secure transfer plaintext is too large")
+      throw clientError("Secure transfer plaintext is too large")
     }
     const plaintext = input.plaintext.slice()
     let ciphertext: Uint8Array | undefined
     try {
       const initiated = await this.#json("POST", `/v1/sandboxes/${sandboxPath(sandboxId)}/secure-file-transfers`, 201, SecureTransferInitiatedSchema, context.signal)
-      if (Date.parse(initiated.expiresAt) <= Date.now()) throw new WaterboxClientError("Secure transfer expired before encryption")
+      if (Date.parse(initiated.expiresAt) <= Date.now()) throw clientError("Secure transfer expired before encryption")
       const encrypter = new Encrypter()
       encrypter.addRecipient(initiated.publicKey)
       ciphertext = await encrypter.encrypt(plaintext)
       context.signal.throwIfAborted()
-      if (ciphertext.byteLength > MAX_SECURE_CIPHERTEXT_BYTES) throw new WaterboxClientError("Encrypted file is too large")
+      if (ciphertext.byteLength > MAX_SECURE_CIPHERTEXT_BYTES) throw clientError("Encrypted file is too large")
       const consumption = SecureTransferConsumeRequestSchema.parse({
         targetPath: input.targetPath,
         ciphertext: bytesToBase64(ciphertext),
@@ -324,8 +367,8 @@ export class WaterboxClient {
     try { return await this.#backend.fetch(request) }
     catch (error) {
       if (signal.aborted) throw signal.reason ?? error
-      if (error instanceof WaterboxClientError) throw error
-      throw new WaterboxClientError("The Waterbox API request failed")
+      if (isPublicWaterboxClientError(error)) throw error
+      throw clientError("The Waterbox API request failed")
     }
   }
 }
@@ -354,16 +397,16 @@ async function requireStatus(response: Response, expected: number, signal: Abort
 
 async function apiError(response: Response, signal: AbortSignal): Promise<WaterboxClientError> {
   await propagateResponseAbort(response, signal)
-  if (!hasMediaType(response, "application/json")) { await cancelBody(response); return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status }) }
+  if (!hasMediaType(response, "application/json")) { await cancelBody(response); return clientError("The Waterbox API returned an invalid error response", { status: response.status }) }
   let value: unknown
   try { value = await parseJson(response, MAX_API_ERROR_RESPONSE_BYTES, signal) }
   catch (error) {
     if (signal.aborted) throw signal.reason ?? error
-    return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status })
+    return clientError("The Waterbox API returned an invalid error response", { status: response.status })
   }
   const parsed = ErrorEnvelopeSchema.safeParse(value)
-  if (!parsed.success) return new WaterboxClientError("The Waterbox API returned an invalid error response", { status: response.status })
-  return new WaterboxClientError(parsed.data.error.message, {
+  if (!parsed.success) return clientError("The Waterbox API returned an invalid error response", { status: response.status })
+  return clientError(parsed.data.error.message, {
     status: response.status,
     code: parsed.data.error.code,
     requestId: parsed.data.error.requestId,
@@ -410,7 +453,7 @@ async function propagateResponseAbort(response: Response, signal: AbortSignal): 
   await cancelBody(response)
   throw signal.reason ?? new DOMException("The operation was aborted", "AbortError")
 }
-function protocolError(): WaterboxClientError { return new WaterboxClientError("The Waterbox API returned an invalid response") }
+function protocolError(): WaterboxClientError { return clientError("The Waterbox API returned an invalid response") }
 function hasMediaType(response: Response, expected: string): boolean {
   return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() === expected
 }

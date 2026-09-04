@@ -254,7 +254,9 @@ describe("local API composition", () => {
       expect(JSON.parse(text)).toEqual({
         error: {
           code: kind === "failure" ? "provider_failure" : "ambiguous_execution",
-          message: kind === "failure" ? "The provider operation failed" : "The provider execution outcome is unknown",
+          message: kind === "failure"
+            ? `Sandbox ${sandboxId} has a recorded preparation failure. Inspect it with probe_sandbox; retrying the same creation key returns this failure.`
+            : `Sandbox ${sandboxId} may require recovery. Inspect it with probe_sandbox before retrying the operation.`,
           requestId: expect.any(String),
           sandboxId,
         },

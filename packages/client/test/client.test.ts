@@ -7,6 +7,7 @@ import {
   WaterboxClient,
   WaterboxClientError,
   createRemoteApiBackend,
+  publicWaterboxClientErrorDetails,
   type ApiBackend,
 } from "../src/index.ts"
 
@@ -168,6 +169,13 @@ describe("safe errors and cancellation", () => {
     const second = await client.createSandbox({}, { idempotencyKey: "key", signal }).catch(value => value)
     expect(first.recoverySandboxId).toBe(sandboxId)
     expect(second.recoverySandboxId).toBeUndefined()
+  })
+
+  test("captures validated client metadata before mutable error properties change", async () => {
+    const client = new WaterboxClient(new FakeBackend(() => json({ error: { code: "provider_failure", message: "Approved API failure", requestId: "req-approved", sandboxId } }, 502)))
+    const error = await client.createSandbox({}, { idempotencyKey: "metadata", signal }).catch(value => value as WaterboxClientError)
+    Object.assign(error, { message: "mutated secret", status: 200, code: "not_found", requestId: "mutated", recoverySandboxId: "sbx_mutated-secret-a1" })
+    expect(publicWaterboxClientErrorDetails(error)).toEqual({ status: 502, code: "provider_failure", message: "Approved API failure", requestId: "req-approved", recoverySandboxId: sandboxId })
   })
 
   test("propagates an abort without manufacturing a client error or retry", async () => {
