@@ -24,8 +24,9 @@ order under the `next` dist-tag. The workflow uses npm trusted publishing/OIDC
 and provenance, checks exact package versions and dependencies, retains the
 certified tarballs, and safely resumes a partial publication only when registry
 bytes match. It never republishes the bundled `waterbox@0.1.0-alpha.2` package.
-The `v0.1.0-alpha.3` tag independently publishes only the retained unscoped
-`waterbox@0.1.0-alpha.3` tarball under `latest` using the same OIDC, provenance,
-byte-verification, and release-evidence controls.
+The `v0.1.0-alpha.3` tag, or its idempotent `-r2` recovery tag, independently
+publishes only the retained unscoped `waterbox@0.1.0-alpha.3` tarball under
+`latest` using the same OIDC, provenance, byte-verification, and release-evidence
+controls.
 Do not publish from a dirty checkout or run provider smokes without separate
 isolated-account authorization.

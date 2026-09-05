@@ -2,7 +2,7 @@ name: Publish Waterbox packages
 
 on:
   push:
-    tags: [packages-v0.1.0-alpha.2-r2, v0.1.0-alpha.3]
+    tags: [packages-v0.1.0-alpha.2-r2, v0.1.0-alpha.3, v0.1.0-alpha.3-r2]
 
 permissions:
   contents: read
@@ -148,7 +148,7 @@ jobs:
           test "$(npm view waterbox@latest version)" = "0.1.0-alpha.2"
 
   publish-waterbox:
-    if: github.repository == 'bros4president/waterbox' && github.ref == 'refs/tags/v0.1.0-alpha.3'
+    if: github.repository == 'bros4president/waterbox' && (github.ref == 'refs/tags/v0.1.0-alpha.3' || github.ref == 'refs/tags/v0.1.0-alpha.3-r2')
     runs-on: ubuntu-latest
     environment: npm
     steps:
@@ -173,10 +173,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes ripgrep
       - name: Verify clean tag and version
         run: |
-          test "$(git tag --points-at HEAD)" = "v0.1.0-alpha.3"
+          tag="$(git tag --points-at HEAD)"
+          test "$tag" = "v0.1.0-alpha.3" || test "$tag" = "v0.1.0-alpha.3-r2"
           test -z "$(git status --porcelain)"
           git merge-base --is-ancestor HEAD refs/remotes/origin/main
-          node -e 'const p=require("./packages/mcp/package.json"); if (p.name !== "waterbox" || p.version !== process.env.GITHUB_REF_NAME.slice(1)) process.exit(1)'
+          node -e 'const p=require("./packages/mcp/package.json"); if (p.name !== "waterbox" || p.version !== "0.1.0-alpha.3") process.exit(1)'
       - run: bun install --frozen-lockfile
       - name: Build and certify exact artifact
         env:
@@ -196,12 +197,12 @@ jobs:
           npm install --global npm@11.19.1
           cd "${RUNNER_TEMP}/waterbox-release"
           sha256sum --check waterbox-0.1.0-alpha.3.sha256
-          if output=$(npm view waterbox@0.1.0-alpha.3 version 2>&1); then
+          if output=$(npm view waterbox@0.1.0-alpha.3 version 2>npm-view-error.log); then
             test "$output" = "0.1.0-alpha.3"
-          elif grep -q "E404" <<<"$output"; then
+          elif grep -q "E404" npm-view-error.log; then
             npm publish "${RUNNER_TEMP}/waterbox-release/waterbox-0.1.0-alpha.3.tgz" --provenance --access public --tag latest
           else
-            printf '%s\n' "$output" >&2
+            command cat npm-view-error.log >&2
             exit 1
           fi
           mkdir "${RUNNER_TEMP}/waterbox-registry"
