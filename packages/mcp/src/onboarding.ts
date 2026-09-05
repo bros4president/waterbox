@@ -1,4 +1,5 @@
-import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { chmod, lstat, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { z } from "zod"
@@ -8,7 +9,8 @@ import { automaticStopEnvironmentValue, deriveProviderConfigurationId, parseAuto
 export type Provider = "waterbox" | "box" | "vercel"
 export type CapabilityFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 export type CredentialState = "available" | "missing" | "inaccessible"
-export interface CredentialStore { get(provider: Provider): Promise<string | null | undefined>; set(provider: Provider, secret: string): Promise<void>; delete(provider: Provider): Promise<boolean> }
+export type CredentialBackend = "file" | "keyring"
+export interface CredentialStore { readonly backend?: CredentialBackend; get(provider: Provider): Promise<string | null | undefined>; set(provider: Provider, secret: string): Promise<void>; delete(provider: Provider): Promise<boolean> }
 export interface ConfigStorage { read(): Promise<string | undefined>; write(value: string): Promise<void>; remove(): Promise<void> }
 export interface BoxSettings { apiBaseUrl: string; pollIntervalMs: 1000; pollTimeoutMs: 120000; automaticStopMs: number }
 export interface VercelSettings { apiOrigin: string; teamId: string; projectId: string; pollIntervalMs: 1000; pollTimeoutMs: 120000; requestTimeoutMs: 30000; automaticStopMs: number }
@@ -25,6 +27,7 @@ const CAPABILITY_TIMEOUT_MS = 2_000
 const MAX_CAPABILITY_BYTES = 16 * 1024
 const accounts: Record<Provider, string> = { waterbox: "api-key", box: "box-api-key", vercel: "vercel-token" }
 const MAX_CONFIG_BYTES = 64 * 1024
+const MAX_CREDENTIAL_BYTES = 64 * 1024
 export const setupGuidance = "Waterbox MCP is not configured. Run npx waterbox setup, then restart the MCP client. Environment-only setup is also supported: set WATERBOX_PROVIDER and the selected provider's variables (Waterbox: WATERBOX_API_KEY; Box: BOX_API_KEY, WATERBOX_AUTO_STOP; Vercel: VERCEL_TOKEN, VERCEL_TEAM_ID, VERCEL_PROJECT_ID, WATERBOX_AUTO_STOP). Do not provide credentials in chat or tool arguments."
 
 export class OnboardingError extends Error {
@@ -54,11 +57,90 @@ export function configStorage(home = homedir()): ConfigStorage {
 
 export function nativeCredentialStore(): CredentialStore {
   return {
+    backend: "keyring",
     async get(provider) { const { AsyncEntry } = await import("@napi-rs/keyring"); const value = await new AsyncEntry(KEYRING_SERVICE, accounts[provider]).getPassword(); return value == null ? undefined : providerCredential(value) },
     async set(provider, secret) { const accepted = providerCredential(secret); const { AsyncEntry } = await import("@napi-rs/keyring"); await new AsyncEntry(KEYRING_SERVICE, accounts[provider]).setPassword(accepted) },
     async delete(provider) { const { AsyncEntry } = await import("@napi-rs/keyring"); return new AsyncEntry(KEYRING_SERVICE, accounts[provider]).deleteCredential() },
   }
 }
+
+const credentialDocumentSchema = z.object({ version: z.literal(1), credentials: z.object({ waterbox: z.string().optional(), box: z.string().optional(), vercel: z.string().optional() }).strict() }).strict()
+type CredentialDocument = z.infer<typeof credentialDocumentSchema>
+const credentialQueues = new Map<string, Promise<void>>()
+
+/** Linux has no dependable native keyring in headless installations. */
+export function fileCredentialStore(home = homedir()): CredentialStore {
+  const path = join(home, ".waterbox", "credentials.json")
+  const unavailable = () => new OnboardingError("Waterbox credential storage is unavailable. Run npx waterbox setup or use environment-only configuration.")
+  const queued = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const prior = credentialQueues.get(path) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>(resolve => { release = resolve })
+    const waiting = prior.then(() => current, () => current)
+    credentialQueues.set(path, waiting)
+    await prior.catch(() => {})
+    try { return await operation() }
+    finally { release(); if (credentialQueues.get(path) === waiting) credentialQueues.delete(path) }
+  }
+  const readDocument = async (): Promise<CredentialDocument | undefined> => {
+    try {
+      const directory = await lstat(dirname(path))
+      if (directory.isSymbolicLink() || !directory.isDirectory() || (directory.mode & 0o777) !== 0o700 || !ownedByCurrentUser(directory.uid)) throw unavailable()
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      let value: unknown
+      try {
+        const metadata = await file.stat()
+        if (!metadata.isFile() || metadata.nlink !== 1 || metadata.size > MAX_CREDENTIAL_BYTES || (metadata.mode & 0o777) !== 0o600 || !ownedByCurrentUser(metadata.uid)) throw unavailable()
+        const bytes = Buffer.alloc(metadata.size + 1)
+        let size = 0
+        while (size < bytes.length) { const result = await file.read(bytes, size, bytes.length - size, size); if (result.bytesRead === 0) break; size += result.bytesRead }
+        if (size !== metadata.size) throw unavailable()
+        value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, size)))
+      } catch { throw unavailable() }
+      finally { await file.close() }
+      const parsed = credentialDocumentSchema.safeParse(value)
+      if (!parsed.success) throw unavailable()
+      for (const secret of Object.values(parsed.data.credentials)) try { providerCredential(secret) } catch { throw unavailable() }
+      return parsed.data
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+      if (error instanceof OnboardingError) throw error
+      throw unavailable()
+    }
+  }
+  const syncDirectory = async () => {
+    try { const directory = await open(dirname(path), "r"); try { await directory.sync() } finally { await directory.close() } }
+    catch (error) { if (!["EINVAL", "ENOTSUP", "EPERM", "EISDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error }
+  }
+  const writeDocument = async (document: CredentialDocument) => {
+    const directoryPath = dirname(path)
+    try {
+      await mkdir(directoryPath, { recursive: true, mode: 0o700 })
+      const directory = await lstat(directoryPath)
+      if (directory.isSymbolicLink() || !directory.isDirectory() || !ownedByCurrentUser(directory.uid)) throw unavailable()
+      await chmod(directoryPath, 0o700)
+      try { const existing = await lstat(path); if (existing.isSymbolicLink() || !existing.isFile()) throw unavailable() } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error }
+      const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`
+      try {
+        await writeFile(temporary, JSON.stringify(document), { encoding: "utf8", mode: 0o600, flag: "wx" })
+        await chmod(temporary, 0o600)
+        const file = await open(temporary, "r"); try { await file.sync() } finally { await file.close() }
+        await rename(temporary, path)
+        await syncDirectory()
+      } catch (error) { await rm(temporary, { force: true }).catch(() => {}); throw error }
+    } catch (error) { if (error instanceof OnboardingError) throw error; throw unavailable() }
+  }
+  return {
+    backend: "file",
+    async get(provider) { return queued(async () => (await readDocument())?.credentials[provider]) },
+    async set(provider, secret) { const accepted = providerCredential(secret); await queued(async () => { const document = await readDocument() ?? { version: 1 as const, credentials: {} }; document.credentials[provider] = accepted; await writeDocument(document) }) },
+    async delete(provider) { return queued(async () => { const document = await readDocument(); if (!document || document.credentials[provider] === undefined) return false; delete document.credentials[provider]; if (Object.keys(document.credentials).length === 0) { await rm(path); await syncDirectory() } else await writeDocument(document); return true }) },
+  }
+}
+
+export function defaultCredentialStore(home?: string, platform = process.platform): CredentialStore { return platform === "linux" ? fileCredentialStore(home) : nativeCredentialStore() }
+
+function ownedByCurrentUser(uid: number): boolean { return process.getuid === undefined || uid === process.getuid() }
 
 export async function loadPersisted(storage: ConfigStorage): Promise<PersistedConfig | undefined> {
   let raw: string | undefined
@@ -75,7 +157,7 @@ export async function loadPersisted(storage: ConfigStorage): Promise<PersistedCo
   return parsed.data
 }
 
-export async function resolvedEnvironment(environment: Record<string, string | undefined>, storage: ConfigStorage, credentials: CredentialStore): Promise<{ environment: Record<string, string | undefined>; source: "environment" | "keyring"; provider: Provider }> {
+export async function resolvedEnvironment(environment: Record<string, string | undefined>, storage: ConfigStorage, credentials: CredentialStore): Promise<{ environment: Record<string, string | undefined>; source: "environment" | CredentialBackend; provider: Provider }> {
   const explicit = environment.WATERBOX_PROVIDER
   if (explicit !== undefined) {
     if (explicit !== "waterbox" && explicit !== "box" && explicit !== "vercel") throw new OnboardingError("Waterbox provider is unsupported. Run npx waterbox setup, then restart the MCP client.")
@@ -93,7 +175,7 @@ export async function resolvedEnvironment(environment: Record<string, string | u
   if (config.provider === "waterbox") Object.assign(resolved, { WATERBOX_API_KEY: secret })
   else if (config.provider === "box") { const settings = config.box!; Object.assign(resolved, { BOX_API_KEY: secret, BOX_API_BASE_URL: settings.apiBaseUrl, BOX_POLL_INTERVAL_MS: String(settings.pollIntervalMs), BOX_POLL_TIMEOUT_MS: String(settings.pollTimeoutMs), WATERBOX_AUTO_STOP: automaticStopEnvironmentValue(settings.automaticStopMs) }) }
   else { const settings = config.vercel!; Object.assign(resolved, { VERCEL_TOKEN: secret, VERCEL_API_ORIGIN: settings.apiOrigin, VERCEL_TEAM_ID: settings.teamId, VERCEL_PROJECT_ID: settings.projectId, VERCEL_POLL_INTERVAL_MS: String(settings.pollIntervalMs), VERCEL_POLL_TIMEOUT_MS: String(settings.pollTimeoutMs), VERCEL_REQUEST_TIMEOUT_MS: String(settings.requestTimeoutMs), WATERBOX_AUTO_STOP: automaticStopEnvironmentValue(settings.automaticStopMs) }) }
-  return { environment: resolved, source: "keyring", provider: config.provider }
+  return { environment: resolved, source: credentials.backend ?? "keyring", provider: config.provider }
 }
 
 export interface SetupPrompts { selectProvider(providers: readonly Provider[]): Promise<unknown>; input(message: string, initial: string): Promise<string>; secret(message: string): Promise<string>; confirm(message: string): Promise<boolean> }
@@ -213,8 +295,13 @@ export async function logout(storage: ConfigStorage, credentials: CredentialStor
   let raw: string | undefined, prior: Record<Provider, string | undefined>
   try { raw = await storage.read(); prior = await credentialSnapshot(credentials) }
   catch { throw new OnboardingError("Waterbox logout could not read local configuration or credentials; no changes were made.") }
-  const removed = await Promise.allSettled((Object.keys(prior) as Provider[]).map(async provider => ({ provider, deleted: await credentials.delete(provider) })))
-  const deletionFailed = removed.some(result => result.status === "rejected" || (!result.value.deleted && prior[result.value.provider] !== undefined))
+  let deletionFailed = false
+  for (const provider of Object.keys(prior) as Provider[]) {
+    try {
+      const deleted = await credentials.delete(provider)
+      if (!deleted && prior[provider] !== undefined) deletionFailed = true
+    } catch { deletionFailed = true; break }
+  }
   if (deletionFailed) {
     const restored = await restore(credentials, prior)
     throw new OnboardingError(`Waterbox logout could not remove all credentials${restored ? "; rollback was confirmed" : "; rollback could not be confirmed"}.`)
@@ -266,11 +353,14 @@ function persistedBinding(config: PersistedConfig, secret: string | undefined): 
 }
 async function credentialSnapshot(credentials: CredentialStore): Promise<Record<Provider, string | undefined>> { return { waterbox: await credentials.get("waterbox") ?? undefined, box: await credentials.get("box") ?? undefined, vercel: await credentials.get("vercel") ?? undefined } }
 async function restore(credentials: CredentialStore, prior: Record<Provider, string | undefined>, providers: Provider[] = Object.keys(prior) as Provider[], requireDeletionConfirmation: Provider[] = []): Promise<boolean> {
-  const results = await Promise.allSettled(providers.map(async provider => {
-    if (prior[provider] !== undefined) return credentials.set(provider, prior[provider]!)
-    const deleted = await credentials.delete(provider)
-    if (!deleted && requireDeletionConfirmation.includes(provider)) throw new Error("credential deletion was not confirmed")
-  }))
-  return results.every(result => result.status === "fulfilled")
+  let restored = true
+  for (const provider of providers) try {
+    if (prior[provider] !== undefined) await credentials.set(provider, prior[provider]!)
+    else {
+      const deleted = await credentials.delete(provider)
+      if (!deleted && requireDeletionConfirmation.includes(provider)) throw new Error("credential deletion was not confirmed")
+    }
+  } catch { restored = false }
+  return restored
 }
 async function restoreRawConfig(storage: ConfigStorage, raw: string | undefined): Promise<boolean> { try { if (raw === undefined) await storage.remove(); else await storage.write(raw); return true } catch { return false } }

@@ -75,7 +75,7 @@
     },
     "packages/mcp": {
       "name": "waterbox",
-      "version": "0.1.0-alpha.2",
+      "version": "0.1.0-alpha.3",
       "bin": {
         "waterbox": "./dist/waterbox.js",
       },

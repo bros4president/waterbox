@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { mkdtemp } from "node:fs/promises"
 import { runCli } from "../src/cli.ts"
 import { createHostedMcpClient } from "../src/composition.ts"
 import { dispatch } from "../src/dispatch.ts"
-import { automaticStopGuidance, configStorage, credentialState, hostedWaterboxAvailable, loadPersisted, resolvedEnvironment, setup, type CapabilityFetch, type ConfigStorage, type CredentialStore, type Provider, type SetupPrompts } from "../src/onboarding.ts"
+import { automaticStopGuidance, configStorage, credentialState, defaultCredentialStore, fileCredentialStore, hostedWaterboxAvailable, loadPersisted, resolvedEnvironment, setup, type CapabilityFetch, type ConfigStorage, type CredentialStore, type Provider, type SetupPrompts } from "../src/onboarding.ts"
 import { deriveProviderConfigurationId, parseLocalProviderConfiguration } from "@waterbox/control-plane-local"
 
 const automaticStopProse = "How often should a sandbox be automatically stopped?\n\nImportant: a stopped sandbox is automatically resumed by the next coding operation. This is not a limit on total sandbox runtime or spending.\n\nThis is a safety mechanism that limits wasted compute if the agent does not stop a sandbox when finished. Agents are instructed to stop unused sandboxes, but this is not enforced.\n\nA short duration, such as 40m, minimizes wasted compute but may interrupt long-running commands. For long workflows, consider 6h or more. Provider limits apply, so check your plan's maximum execution time."
@@ -547,6 +547,72 @@ describe("native-keyring onboarding", () => {
     const home = await mkdtemp(join(tmpdir(), "waterbox-home-")); const directory = join(home, ".waterbox")
     try { await mkdir(directory); await writeFile(join(directory, "config.json"), " ".repeat(64 * 1024 + 1)); await expect(configStorage(home).read()).rejects.toThrow("unavailable") }
     finally { await rm(home, { recursive: true, force: true }) }
+  })
+
+  test("Linux file credentials round-trip all providers with private modes and support deletion", async () => {
+    const home = await mkdtemp(join(tmpdir(), "waterbox-home-")), credentials = fileCredentialStore(home)
+    const directory = join(home, ".waterbox"), path = join(directory, "credentials.json")
+    try {
+      expect(credentials.backend).toBe("file")
+      await credentials.set("waterbox", "hosted-secret"); await credentials.set("box", "box-secret"); await credentials.set("vercel", "vercel-secret")
+      expect(await credentials.get("waterbox")).toBe("hosted-secret"); expect(await credentials.get("box")).toBe("box-secret"); expect(await credentials.get("vercel")).toBe("vercel-secret")
+      expect((await stat(directory)).mode & 0o077).toBe(0); expect((await stat(path)).mode & 0o077).toBe(0)
+      expect(await credentials.delete("box")).toBeTrue(); expect(await credentials.delete("box")).toBeFalse(); expect(await credentials.get("box")).toBeUndefined()
+      expect(await readFile(path, "utf8")).not.toContain("box-secret")
+      expect(await credentials.delete("waterbox")).toBeTrue(); expect(await credentials.delete("vercel")).toBeTrue()
+      await expect(stat(path)).rejects.toHaveProperty("code", "ENOENT")
+    } finally { await rm(home, { recursive: true, force: true }) }
+  })
+
+  test("Linux file credentials reject malformed, unknown, and oversized documents", async () => {
+    const home = await mkdtemp(join(tmpdir(), "waterbox-home-")), directory = join(home, ".waterbox"), path = join(directory, "credentials.json")
+    try {
+      await mkdir(directory, { mode: 0o700 })
+      for (const content of ["{", JSON.stringify({ version: 1, credentials: { box: "secret", extra: "secret" } }), " ".repeat(64 * 1024 + 1)]) {
+        await writeFile(path, content)
+        await expect(fileCredentialStore(home).get("box")).rejects.toThrow("credential storage is unavailable")
+      }
+    } finally { await rm(home, { recursive: true, force: true }) }
+  })
+
+  test("Linux file credentials reject unsafe permissions", async () => {
+    const home = await mkdtemp(join(tmpdir(), "waterbox-home-")), directory = join(home, ".waterbox"), path = join(directory, "credentials.json")
+    try {
+      await mkdir(directory, { mode: 0o700 }); await writeFile(path, JSON.stringify({ version: 1, credentials: { box: "secret" } }), { mode: 0o600 })
+      await chmod(path, 0o644)
+      await expect(fileCredentialStore(home).get("box")).rejects.toThrow("credential storage is unavailable")
+      await chmod(path, 0o600); await chmod(directory, 0o755)
+      await expect(fileCredentialStore(home).get("box")).rejects.toThrow("credential storage is unavailable")
+    } finally { await chmod(directory, 0o700).catch(() => {}); await rm(home, { recursive: true, force: true }) }
+  })
+
+  test("Linux file credentials reject non-regular and symlink documents", async () => {
+    const home = await mkdtemp(join(tmpdir(), "waterbox-home-")), directory = join(home, ".waterbox"), path = join(directory, "credentials.json")
+    try {
+      await mkdir(directory, { mode: 0o700 }); await mkdir(path)
+      await expect(fileCredentialStore(home).get("box")).rejects.toThrow("credential storage is unavailable")
+    } finally { await chmod(directory, 0o700).catch(() => {}); await rm(home, { recursive: true, force: true }) }
+    const symlinkHome = await mkdtemp(join(tmpdir(), "waterbox-home-")), symlinkDirectory = join(symlinkHome, ".waterbox"), symlinkPath = join(symlinkDirectory, "credentials.json")
+    try {
+      await mkdir(symlinkDirectory, { mode: 0o700 }); await writeFile(join(symlinkHome, "target"), JSON.stringify({ version: 1, credentials: { box: "secret" } })); await symlink(join(symlinkHome, "target"), symlinkPath)
+      await expect(fileCredentialStore(symlinkHome).get("box")).rejects.toThrow("credential storage is unavailable")
+    } finally { await chmod(symlinkDirectory, 0o700).catch(() => {}); await rm(symlinkHome, { recursive: true, force: true }) }
+  })
+
+  test("default credential selection reports Linux file storage and non-Linux keyring metadata", () => {
+    expect(defaultCredentialStore("/users/test", "linux").backend).toBe("file")
+    expect(defaultCredentialStore("/users/test", "darwin").backend).toBe("keyring")
+  })
+
+  test("Linux status labels persisted credentials as file-backed and bypasses storage for environment configuration", async () => {
+    const home = await mkdtemp(join(tmpdir(), "waterbox-home-")), output: string[] = []
+    try {
+      await configStorage(home).write(JSON.stringify({ version: 2, provider: "waterbox" })); await fileCredentialStore(home).set("waterbox", "hosted-secret")
+      expect(await runCli(["status"], { homeDirectory: home, platform: "linux", environment: {}, write: line => output.push(line), error() {} })).toBe(0)
+      expect(output.at(-1)).toContain("configuration file; credential file available")
+      expect(await runCli(["status"], { homeDirectory: home, platform: "linux", environment: { WATERBOX_PROVIDER: "waterbox", WATERBOX_API_KEY: "environment-secret" }, write: line => output.push(line), error() {} })).toBe(0)
+      expect(output.at(-1)).toContain("configuration environment; credential environment available")
+    } finally { await rm(home, { recursive: true, force: true }) }
   })
 
   test("setup rolls back same-provider credentials when config persistence fails", async () => {

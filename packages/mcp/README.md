@@ -23,22 +23,24 @@ npx waterbox status
 npx waterbox logout
 ```
 
-Interactive setup stores only the provider credential in the native keyring.
-Non-secret settings are written atomically to `~/.waterbox/config.json` using
+Interactive setup stores only the provider credential in the native keyring on
+macOS and Windows. Linux uses `~/.waterbox/credentials.json` with a `0700`
+directory and `0600` file. Non-secret settings are written atomically to
+`~/.waterbox/config.json` using
 the exact official direct-provider endpoints `https://ascii.dev/api/box/v1` and
 `https://api.vercel.com/`; hosted Waterbox is pinned to `https://api.waterbox.ai/`.
 Interactive setup shows hosted Waterbox only when its public capability document
-advertises availability. Existing hosted keyring configuration and explicit
+advertises availability. Existing hosted persisted configuration and explicit
 `WATERBOX_PROVIDER=waterbox` environment configuration remain valid independently.
 `FORCE_DISPLAY_WATERBOX=1` is a development/debug override that shows it without
 fetching capabilities.
-Status never prints credentials. Logout removes local settings and all three
-keyring entries but does not alter remote resources or
+Status never prints credentials and identifies the active credential backend.
+Logout removes local settings and all three stored credentials but does not alter remote resources or
 the SQLite resource registry.
 
-For headless systems without a usable keyring, place a complete provider
-configuration in the MCP client's environment/secret facility. Do not put
-secrets in command arguments:
+For containers, automation, or systems where user-readable file storage is not
+appropriate, place a complete provider configuration in the MCP client's
+environment/secret facility. Do not put secrets in command arguments:
 
 ```text
 Waterbox: WATERBOX_PROVIDER=waterbox, WATERBOX_API_KEY=<client-managed secret>
@@ -53,6 +55,11 @@ Hosted Waterbox always targets `https://api.waterbox.ai/`. Custom Box/Vercel
 endpoints are supported only when the complete provider
 selection and credentials come from process environment. Environment and
 persisted sources are never mixed. `.env` is never loaded implicitly.
+
+Linux credentials are plaintext at rest and protected by filesystem ownership
+and permissions. Same-user processes, root, and backups may read them. Linux
+users upgrading from alpha.2 should rerun `npx waterbox setup`; native-keyring
+entries are not migrated automatically.
 
 An unconfigured server remains connected and returns setup guidance from all
 tools before filesystem, SQLite, artifact, or provider I/O.

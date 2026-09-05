@@ -1,7 +1,7 @@
-import { configStorage, credentialState, credentialVariable, loadPersisted, logout, nativeCredentialStore, OnboardingError, setup, type CapabilityFetch, type ConfigStorage, type CredentialStore, type SetupPrompts } from "./onboarding.ts"
+import { configStorage, credentialState, credentialVariable, defaultCredentialStore, loadPersisted, logout, OnboardingError, setup, type CapabilityFetch, type ConfigStorage, type CredentialStore, type SetupPrompts } from "./onboarding.ts"
 import { McpConfigurationError, parseMcpConfig } from "./config.ts"
 
-export interface CliDependencies { storage?: ConfigStorage; credentials?: CredentialStore; prompts?: SetupPrompts; environment?: Record<string, string | undefined>; fetch?: CapabilityFetch; interactive?: boolean; write?: (line: string) => void; error?: (line: string) => void }
+export interface CliDependencies { storage?: ConfigStorage; credentials?: CredentialStore; prompts?: SetupPrompts; environment?: Record<string, string | undefined>; fetch?: CapabilityFetch; interactive?: boolean; write?: (line: string) => void; error?: (line: string) => void; homeDirectory?: string; platform?: NodeJS.Platform }
 const standardPrompts: SetupPrompts = {
   async selectProvider(providers) { const { select } = await import("@inquirer/prompts"); return select({ message: "Provider", choices: providers.map(provider => ({ name: provider === "waterbox" ? "Waterbox" : provider === "box" ? "Box" : "Vercel", value: provider })) }) },
   async input(message, initial) { const { input } = await import("@inquirer/prompts"); return input({ message, default: initial }) },
@@ -11,7 +11,7 @@ const standardPrompts: SetupPrompts = {
 
 export async function runCli(arguments_: string[], dependencies: CliDependencies = {}): Promise<number> {
   const write = dependencies.write ?? (line => console.log(line)), error = dependencies.error ?? (line => console.error(line))
-  const storage = dependencies.storage ?? configStorage(), credentials = dependencies.credentials ?? nativeCredentialStore()
+  const storage = dependencies.storage ?? configStorage(dependencies.homeDirectory), credentials = dependencies.credentials ?? defaultCredentialStore(dependencies.homeDirectory, dependencies.platform)
   if (arguments_.length !== 1 || !["setup", "status", "logout"].includes(arguments_[0] ?? "")) { error("Usage: waterbox [setup|status|logout]. Run without arguments to start the MCP server."); return 2 }
   try {
     if (arguments_[0] === "setup") {
@@ -25,15 +25,15 @@ export async function runCli(arguments_: string[], dependencies: CliDependencies
       if (!config) { write("Waterbox status: not configured. Run npx waterbox setup."); return 0 }
       const state = await credentialState(config.provider, credentials)
       if (state === "available") await parseMcpConfig(environment, undefined, { storage, credentials })
-      write(`Waterbox status: provider ${config.provider}; local configuration keyring; credential ${state}.${state === "available" ? "" : ` Environment fallback: WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}.`}`)
+      write(`Waterbox status: provider ${config.provider}; configuration file; credential ${credentials.backend ?? "keyring"} ${state}.${state === "available" ? "" : ` Environment fallback: WATERBOX_PROVIDER=${config.provider} and ${credentialVariable(config.provider)}.`}`)
       if (state !== "available") return 1
       return 0
     }
-    const parsed = await parseMcpConfig(environment, undefined, { storage, credentials })
+    const parsed = await parseMcpConfig(environment, dependencies.homeDirectory, { storage, credentials })
     const provider = parsed.provider.type === "waterbox" ? "waterbox" : parsed.provider.configuration.provider.kind
     const source = environment.WATERBOX_PROVIDER === undefined ? "keyring" : "environment"
     const state = source === "keyring" ? await credentialState(provider, credentials) : "available"
-    write(`Waterbox status: provider ${provider}; configuration ${source}; credential ${state}.`)
+    write(`Waterbox status: provider ${provider}; configuration ${source}; credential ${source === "environment" ? "environment" : credentials.backend ?? "keyring"} ${state}.`)
     return 0
   } catch (caught) { error(caught instanceof OnboardingError || caught instanceof McpConfigurationError ? caught.message : "Waterbox command failed"); return 1 }
 }
