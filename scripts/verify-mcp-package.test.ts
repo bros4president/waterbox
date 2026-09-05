@@ -11,11 +11,11 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(path => rm(path, {
 describe("MCP installed-artifact verifier", () => {
   test("selects only npm's single reported tarball and rejects decoys", async () => {
     const directory = await fixture()
-    await writeFile(join(directory, "waterbox-mcp-0.1.0-alpha.2.tgz"), "exact")
-    expect(await resolveOnlyPackedTarball(directory, "waterbox-mcp-0.1.0-alpha.2.tgz")).toBe(join(directory, "waterbox-mcp-0.1.0-alpha.2.tgz"))
+    await writeFile(join(directory, "waterbox-mcp-0.1.0-alpha.3.tgz"), "exact")
+    expect(await resolveOnlyPackedTarball(directory, "waterbox-mcp-0.1.0-alpha.3.tgz")).toBe(join(directory, "waterbox-mcp-0.1.0-alpha.3.tgz"))
     await writeFile(join(directory, "decoy.tgz"), "decoy")
-    await expect(resolveOnlyPackedTarball(directory, "waterbox-mcp-0.1.0-alpha.2.tgz")).rejects.toThrow("exactly one")
-    await expect(resolveOnlyPackedTarball(directory, "../waterbox-mcp-0.1.0-alpha.2.tgz")).rejects.toThrow("invalid tarball")
+    await expect(resolveOnlyPackedTarball(directory, "waterbox-mcp-0.1.0-alpha.3.tgz")).rejects.toThrow("exactly one")
+    await expect(resolveOnlyPackedTarball(directory, "../waterbox-mcp-0.1.0-alpha.3.tgz")).rejects.toThrow("invalid tarball")
   })
 
   test("retains one tarball identity across inspection and installation", async () => {
@@ -41,7 +41,7 @@ describe("MCP installed-artifact verifier", () => {
     expect(() => assertPackedFileAllowlist(files)).not.toThrow()
     expect(() => assertPackedFileAllowlist([...files, "dist/index.js"])).toThrow("allowlist")
     expect(() => assertPackedFileAllowlist(files.filter(path => path !== "LICENSE"))).toThrow("allowlist")
-    const manifest = { name: "waterbox", version: "0.1.0-alpha.2", engines: { node: ">=24.15.0" }, license: "MIT", bin: { waterbox: "./dist/waterbox.js" }, publishConfig: { access: "public", tag: "latest" } }
+    const manifest = { name: "waterbox", version: "0.1.0-alpha.3", engines: { node: ">=24.15.0" }, license: "MIT", bin: { waterbox: "./dist/waterbox.js" }, publishConfig: { access: "public", tag: "latest" } }
     expect(() => assertCliOnlyManifest(manifest)).not.toThrow()
     expect(() => assertCliOnlyManifest({ ...manifest, publishConfig: { access: "public", tag: "next" } })).toThrow("channel")
     expect(() => assertCliOnlyManifest({ ...manifest, publishConfig: { tag: "latest" } })).toThrow("channel")

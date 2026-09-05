@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { McpConfigurationError, parseMcpConfig } from "../src/config.ts"
+import { configStorage, fileCredentialStore } from "../src/onboarding.ts"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 function persistedBox() {
   return {
@@ -46,6 +50,14 @@ describe("Waterbox MCP configuration", () => {
       credentials: { async get(provider: "waterbox" | "box" | "vercel") { return provider === "waterbox" ? "hosted-secret" : undefined }, async set() {}, async delete() { return false } },
     })
     expect(persisted).toEqual({ provider: { type: "waterbox", apiKey: "hosted-secret" } })
+  })
+
+  test("uses the supplied home directory consistently for persisted configuration", async () => {
+    const home = await mkdtemp(join(tmpdir(), "waterbox-home-"))
+    try {
+      await configStorage(home).write(JSON.stringify({ version: 2, provider: "waterbox" })); await fileCredentialStore(home).set("waterbox", "hosted-secret")
+      expect(await parseMcpConfig({}, home, { credentials: fileCredentialStore(home) })).toEqual({ provider: { type: "waterbox", apiKey: "hosted-secret" } })
+    } finally { await rm(home, { recursive: true, force: true }) }
   })
 
   test("keeps direct configuration values out of errors", async () => {

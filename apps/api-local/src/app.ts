@@ -3,7 +3,7 @@ import { createLocalControlPlane, deriveProviderConfigurationId, type LocalContr
 import { loadSandboxRuntimeArtifact, type SandboxRuntimeArtifact } from "@waterbox/provider-box"
 import type { LocalApiConfig } from "./config.ts"
 
-const DEVELOPMENT_ARTIFACT_VERSION = "0.1.0-alpha.2"
+const DEVELOPMENT_ARTIFACT_VERSION = "0.1.0-alpha.3"
 
 export function fixedDevelopmentIdentityResolver(apiKey: string, accountId: string): IdentityResolver {
   return {

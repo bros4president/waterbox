@@ -1,5 +1,5 @@
 import { LocalProviderConfigurationError, parseLocalProviderConfiguration, providerCredential, type LocalConfiguredMcpBackend } from "@waterbox/control-plane-local"
-import { configStorage, nativeCredentialStore, OnboardingError, resolvedEnvironment, type ConfigStorage, type CredentialStore } from "./onboarding.ts"
+import { configStorage, defaultCredentialStore, OnboardingError, resolvedEnvironment, type ConfigStorage, type CredentialStore } from "./onboarding.ts"
 
 export interface LocalMcpConfig {
   provider: { type: "local"; configuration: LocalConfiguredMcpBackend }
@@ -24,7 +24,7 @@ export async function parseMcpConfig(
   dependencies: { storage?: ConfigStorage; credentials?: CredentialStore } = {},
 ): Promise<WaterboxMcpConfig> {
   try {
-    const resolved = await resolvedEnvironment(environment, dependencies.storage ?? configStorage(homeDirectory), dependencies.credentials ?? nativeCredentialStore())
+    const resolved = await resolvedEnvironment(environment, dependencies.storage ?? configStorage(homeDirectory), dependencies.credentials ?? defaultCredentialStore(homeDirectory))
     if (resolved.provider === "waterbox") {
       try { return { provider: { type: "waterbox", apiKey: providerCredential(resolved.environment.WATERBOX_API_KEY) } } }
       catch { throw new OnboardingError("Waterbox API key is missing or invalid. Set WATERBOX_PROVIDER=waterbox and WATERBOX_API_KEY using your MCP client's secret mechanism, then restart the MCP client.") }

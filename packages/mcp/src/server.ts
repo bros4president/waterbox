@@ -36,7 +36,7 @@ const tools: Tool[] = [
 ]
 
 export function createWaterboxMcpServer(client: WaterboxClient & { preflight?: () => void }, options: { onError?: (error: unknown) => void } = {}): Server {
-  const server = new Server({ name: "waterbox", version: "0.1.0-alpha.2" }, { capabilities: { tools: {} }, instructions })
+  const server = new Server({ name: "waterbox", version: "0.1.0-alpha.3" }, { capabilities: { tools: {} }, instructions })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {

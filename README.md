@@ -28,9 +28,11 @@ npx waterbox status
 npx waterbox logout
 ```
 
-Setup requires an interactive terminal. It stores the selected Waterbox API key,
-Box API key, or Vercel token only in the native keyring; only non-secret settings
-are written to `~/.waterbox/config.json`. Hosted Waterbox always uses the pinned
+Setup requires an interactive terminal. On macOS and Windows it stores the
+selected credential in the native keyring. On Linux it stores credentials in
+`~/.waterbox/credentials.json`; the directory is mode `0700` and the file is mode
+`0600`. Only non-secret settings are written to `~/.waterbox/config.json`.
+Hosted Waterbox always uses the pinned
 `https://api.waterbox.ai/` endpoint. Interactive setup shows hosted Waterbox
 only when its public capability document advertises availability; existing
 hosted configuration and explicit `WATERBOX_PROVIDER=waterbox` plus
@@ -38,8 +40,9 @@ hosted configuration and explicit `WATERBOX_PROVIDER=waterbox` plus
 development/debug override that shows hosted Waterbox without a capability
 fetch. Restart the MCP client after a change.
 
-If the native keyring is unavailable, configure the MCP process through your
-client's environment or secret facility. Select exactly one provider:
+For containers, automation, or systems where user-readable file storage is not
+appropriate, configure the MCP process through the client's environment or
+secret facility. Select exactly one provider:
 
 ```text
 WATERBOX_PROVIDER=waterbox
@@ -59,7 +62,7 @@ WATERBOX_AUTO_STOP=40m
 `WATERBOX_AUTO_STOP` is required for both direct providers and accepts whole
 minutes or hours, such as `40m` or `6h`. Environment-only configuration may
 additionally set a custom `BOX_API_BASE_URL` or `VERCEL_API_ORIGIN`. Persisted
-keyring credentials can never be redirected to custom endpoints. Hosted
+persisted credentials can never be redirected to custom endpoints. Hosted
 Waterbox calls always use `https://api.waterbox.ai/`. Waterbox does not load
 `.env` files implicitly. Never put credentials in chat, MCP tool
 arguments, shell history, or committed configuration.
@@ -80,7 +83,7 @@ tool.
 Changing provider, Box account, Vercel team/project, or another resource-scope
 setting does not stop, migrate, or delete prior resources. They may continue to
 incur provider charges. `waterbox logout` removes only local configuration and
-keyring credentials, not SQLite records or remote resources.
+stored credentials, not SQLite records or remote resources.
 
 Fresh sandboxes receive the packaged one-shot Node CLI during creation. A
 supported provider snapshot is repaired to the current packaged CLI while
@@ -108,6 +111,11 @@ credentials. Sandbox agents and providers can read plaintext files delivered
 to a sandbox, and snapshots may retain them. The MCP process can read any local
 file permitted by the invoking user when `send_file_securely` is approved, so
 client-side tool permissions remain important.
+
+Linux credentials are plaintext at rest and protected by filesystem ownership
+and permissions. Processes running as the same user, root, and backups may read
+them. Users upgrading from alpha.2 on Linux should rerun `npx waterbox setup`;
+the unreliable headless keyring fallback is not migrated automatically.
 
 Official MCP registry/catalog publication is deferred. Direct npm installation
 through `npx add-mcp waterbox` does not depend on registry metadata.
